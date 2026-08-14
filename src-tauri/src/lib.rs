@@ -2,6 +2,7 @@ mod cache;
 mod commit;
 mod discovery;
 mod git;
+mod graph;
 mod remote;
 mod settings;
 mod status;
@@ -330,6 +331,25 @@ async fn unstage_all(repo_id: String, app: AppHandle) -> Result<(), String> {
 async fn commit_repo(repo_id: String, message: String, app: AppHandle) -> Result<(), String> {
     write_and_refresh(&app, repo_id, |path| async move { commit::commit(&path, &message).await })
         .await
+}
+
+/// The graph pane's history, one page at a time (§5.3, §8.4). Waits for any
+/// in-flight write like `repo_files` does — a one-off read with nothing
+/// sensible to show if it raced a commit landing.
+#[tauri::command]
+async fn graph_page(repo_id: String, skip: usize, app: AppHandle) -> Result<graph::GraphPage, String> {
+    let path = repo_path(&app, &repo_id)?;
+    let _read_guard = app.state::<AppState>().write_queues.read(&repo_id).await;
+    graph::log(&path, skip).await
+}
+
+/// Ref badges for the graph pane (§5.3, §8.3) — fetched alongside each reload
+/// rather than swept for all 77, same reasoning as `repo_files`.
+#[tauri::command]
+async fn graph_refs(repo_id: String, app: AppHandle) -> Result<Vec<graph::RefBadge>, String> {
+    let path = repo_path(&app, &repo_id)?;
+    let _read_guard = app.state::<AppState>().write_queues.read(&repo_id).await;
+    graph::refs(&path).await
 }
 
 /// A manual, user-triggered fetch — allowed to prompt interactively, unlike
@@ -1008,6 +1028,8 @@ pub fn run() {
             current_root,
             refresh_root,
             repo_files,
+            graph_page,
+            graph_refs,
             stage_paths,
             unstage_paths,
             stage_all,

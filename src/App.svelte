@@ -5,6 +5,7 @@
   import CommitPane from './lib/panes/CommitPane.svelte';
   import GraphPane from './lib/panes/GraphPane.svelte';
   import { repos } from './lib/repos.svelte';
+  import { graph } from './lib/graph.svelte';
   import { settings, DEFAULT_PANE_WIDTHS } from './lib/settings.svelte';
 
   // Minimum usable widths (SPEC.md §4). Below these the panes stop being
@@ -67,6 +68,7 @@
   // Settings first: the pane widths are needed for the very first paint, and
   // the welcome screen reads the recent-roots list from them.
   void settings.load().then(() => repos.start());
+  void graph.start();
 </script>
 
 {#if !repos.ready}

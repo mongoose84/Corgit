@@ -125,18 +125,20 @@ button {
   height: 10px;
 }
 
+/* A visible groove, not just transparent — otherwise a scrollable pane looks
+   identical to a non-scrollable one until the thumb happens to be in view. */
 ::-webkit-scrollbar-track {
-  background: transparent;
+  background: var(--bg-raised);
 }
 
 ::-webkit-scrollbar-thumb {
-  background: var(--border-strong);
-  border: 2px solid transparent;
+  background: var(--text-disabled);
+  border: 1px solid transparent;
   background-clip: content-box;
   border-radius: 5px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: var(--text-disabled);
+  background: var(--text-muted);
   background-clip: content-box;
 }
