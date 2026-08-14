@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Baseline capabilities for twogit windows.",
+  "windows": ["main", "window-*"],
+  "permissions": ["core:default"]
+}
