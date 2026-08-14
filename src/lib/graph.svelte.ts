@@ -9,6 +9,7 @@ import {
   type LaneState,
   type RowLayout,
 } from './graphLayout';
+import type { FileEntry } from './repos.svelte';
 
 /**
  * Graph state for the selected repo (SPEC.md §5.3).
@@ -43,6 +44,25 @@ interface RepoStatusEvent {
  *  selection is a full commit hash. */
 export type GraphSelection = 'working-tree' | string;
 
+/** The commit info panel (§5.2 revised, §8.5) — read-only, so unlike
+ *  `FileChanges` the file list here is never capped. */
+export interface CommitDetails {
+  hash: string;
+  author: string;
+  email: string;
+  timestamp: number;
+  message: string;
+  files: CommitFileEntry[];
+}
+
+/** A changed file plus its line-change stats (GitHub-style per-file +/−).
+ *  `insertions`/`deletions` are `null` for a binary file, where git reports
+ *  `-` instead of a count. */
+export interface CommitFileEntry extends FileEntry {
+  insertions: number | null;
+  deletions: number | null;
+}
+
 class GraphStore {
   repoId = $state<string | null>(null);
   rows = $state<RowLayout[]>([]);
@@ -52,6 +72,12 @@ class GraphStore {
   loadingMore = $state(false);
   error = $state<string | null>(null);
   selection = $state<GraphSelection>('working-tree');
+
+  /** The selected commit's details (§5.2 Mode B) — `null` in working-tree
+   *  mode or before the fetch for the current selection lands. */
+  details = $state<CommitDetails | null>(null);
+  loadingDetails = $state(false);
+  detailsError = $state<string | null>(null);
 
   private laneState: LaneState = emptyLaneState();
 
@@ -81,6 +107,7 @@ class GraphStore {
     this.hasMore = false;
     this.error = null;
     this.selection = 'working-tree';
+    this.clearDetails();
     this.laneState = emptyLaneState();
     await this.reload();
   }
@@ -92,11 +119,45 @@ class GraphStore {
     this.hasMore = false;
     this.error = null;
     this.selection = 'working-tree';
+    this.clearDetails();
     this.laneState = emptyLaneState();
   }
 
+  /** Drives the middle pane's mode (§5.2): `working-tree` clears Mode B's
+   *  data, any other value is a commit hash whose details get fetched. */
   select(selection: GraphSelection): void {
     this.selection = selection;
+    if (selection === 'working-tree') {
+      this.clearDetails();
+    } else {
+      void this.loadDetails(selection);
+    }
+  }
+
+  private clearDetails(): void {
+    this.details = null;
+    this.loadingDetails = false;
+    this.detailsError = null;
+  }
+
+  private async loadDetails(hash: string): Promise<void> {
+    const id = this.repoId;
+    if (!id) return;
+
+    this.loadingDetails = true;
+    this.details = null;
+    this.detailsError = null;
+    try {
+      const details = await invoke<CommitDetails>('commit_details', { repoId: id, hash });
+      // The selection moved on while this was in flight.
+      if (this.repoId !== id || this.selection !== hash) return;
+      this.details = details;
+    } catch (err) {
+      if (this.repoId !== id || this.selection !== hash) return;
+      this.detailsError = String(err);
+    } finally {
+      if (this.repoId === id && this.selection === hash) this.loadingDetails = false;
+    }
   }
 
   /** Re-reads the first page and refs for the current repo — after a

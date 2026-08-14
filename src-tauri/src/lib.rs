@@ -352,6 +352,16 @@ async fn graph_refs(repo_id: String, app: AppHandle) -> Result<Vec<graph::RefBad
     graph::refs(&path).await
 }
 
+/// A single commit's details for the middle pane's Mode B (§5.2, §8.5). Waits
+/// for any in-flight write like `graph_page`/`graph_refs` — a one-off read
+/// with nothing sensible to show if it raced a commit landing.
+#[tauri::command]
+async fn commit_details(repo_id: String, hash: String, app: AppHandle) -> Result<graph::CommitDetails, String> {
+    let path = repo_path(&app, &repo_id)?;
+    let _read_guard = app.state::<AppState>().write_queues.read(&repo_id).await;
+    graph::details(&path, &hash).await
+}
+
 /// A manual, user-triggered fetch — allowed to prompt interactively, unlike
 /// the background fetch sweep (§8.7). Clears "auth needed" regardless of
 /// outcome: the user is sitting right there, and this attempt's own result is
@@ -1030,6 +1040,7 @@ pub fn run() {
             repo_files,
             graph_page,
             graph_refs,
+            commit_details,
             stage_paths,
             unstage_paths,
             stage_all,

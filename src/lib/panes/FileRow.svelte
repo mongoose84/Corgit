@@ -1,14 +1,20 @@
 <script lang="ts">
   import type { FileEntry } from '../repos.svelte';
+  import type { CommitFileEntry } from '../graph.svelte';
 
   interface Props {
-    entry: FileEntry;
-    action: 'stage' | 'unstage';
-    onToggle: () => void;
+    entry: FileEntry | CommitFileEntry;
+    /** Omitted for a read-only row (commit info panel) — no toggle button. */
+    action?: 'stage' | 'unstage';
+    onToggle?: () => void;
     disabled?: boolean;
   }
 
   let { entry, action, onToggle, disabled = false }: Props = $props();
+
+  // Per-file +/− (§5.2 revised, §8.5) — present only on a `CommitFileEntry`,
+  // so this doubles as the "am I a commit-info row" check.
+  const stats = $derived('insertions' in entry ? entry : null);
 
   const label = $derived(action === 'stage' ? 'Stage' : 'Unstage');
   const symbol = $derived(action === 'stage' ? '+' : '−');
@@ -49,16 +55,28 @@
 <div class="file-row">
   <span class="status status-{badgeTone}" title={entry.status}>{entry.status}</span>
   <span class="path selectable" title={entry.path}>{shown}</span>
-  <button
-    type="button"
-    class="toggle"
-    {disabled}
-    onclick={onToggle}
-    title="{label} {entry.path}"
-    aria-label="{label} {entry.path}"
-  >
-    {symbol}
-  </button>
+  {#if stats}
+    <span class="stats">
+      {#if stats.insertions === null && stats.deletions === null}
+        <span class="stat-na">binary</span>
+      {:else}
+        <span class="stat-add">+{stats.insertions ?? 0}</span>
+        <span class="stat-del">−{stats.deletions ?? 0}</span>
+      {/if}
+    </span>
+  {/if}
+  {#if action && onToggle}
+    <button
+      type="button"
+      class="toggle"
+      {disabled}
+      onclick={onToggle}
+      title="{label} {entry.path}"
+      aria-label="{label} {entry.path}"
+    >
+      {symbol}
+    </button>
+  {/if}
 </div>
 
 <style>
@@ -135,5 +153,25 @@
   .toggle:disabled {
     color: var(--text-disabled);
     cursor: default;
+  }
+
+  .stats {
+    flex: 0 0 auto;
+    display: flex;
+    gap: var(--space-1);
+    font-size: var(--text-xs);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .stat-add {
+    color: var(--status-ahead);
+  }
+
+  .stat-del {
+    color: var(--status-error);
+  }
+
+  .stat-na {
+    color: var(--text-disabled);
   }
 </style>

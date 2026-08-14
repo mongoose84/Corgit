@@ -5,12 +5,16 @@
     title: string;
     children: Snippet;
     actions?: Snippet;
+    /** Extra class for the root element — a styling hook for a caller-owned
+     *  `:global()` rule, since scoped CSS in the caller can't otherwise reach
+     *  into a child component's own template. */
+    class?: string;
   }
 
-  let { title, children, actions }: Props = $props();
+  let { title, children, actions, class: className = '' }: Props = $props();
 </script>
 
-<section class="pane">
+<section class="pane {className}">
   <header>
     <h2>{title}</h2>
     {#if actions}

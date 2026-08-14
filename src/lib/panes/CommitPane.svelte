@@ -4,9 +4,9 @@
   import EmptyState from '../EmptyState.svelte';
   import { repos } from '../repos.svelte';
 
-  // Mode A (working tree) is build step 4; Mode B (commit details) is step 7.
-  // See SPEC.md §5.2 — this pane is modal on graph selection, but until the
-  // graph exists (step 6) it always shows Mode A for the selected repo.
+  // Mode A (working tree) — SPEC.md §5.2. Commit details (Mode B) live in
+  // their own panel (graph.svelte.ts + CommitInfoPanel.svelte) rather than
+  // taking over this pane, so staging/commit stays visible at all times.
   let message = $state('');
   let busy = $state(false);
 

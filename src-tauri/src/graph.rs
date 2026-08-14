@@ -151,6 +151,136 @@ fn parse_ref(line: &str) -> Option<RefBadge> {
     Some(RefBadge { name: short.to_string(), commit: commit.to_string(), kind })
 }
 
+/// The middle pane's Mode B (§5.2, §8.5) — read-only, so unlike `FileChanges`
+/// (§5.2's 100-entry cap) the file list here is never capped: a single
+/// commit's diff is bounded by what that commit actually touched.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommitDetails {
+    pub hash: String,
+    pub author: String,
+    pub email: String,
+    /// `%ct`, Unix seconds — rendered client-side the same way `Commit::timestamp` is (§5.3).
+    pub timestamp: i64,
+    /// Full raw message (`%B`: subject + body) — Mode B shows it verbatim
+    /// rather than re-deriving a subject line from the graph row.
+    pub message: String,
+    pub files: Vec<CommitFileEntry>,
+}
+
+/// One changed file with its line-change stats — GitHub-style per-file +/−
+/// alongside the usual status letter. `insertions`/`deletions` are `None` for
+/// a binary file, where git reports `-` instead of a count.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommitFileEntry {
+    pub path: String,
+    pub status: char,
+    pub insertions: Option<u32>,
+    pub deletions: Option<u32>,
+}
+
+/// `git diff-tree --no-commit-id --raw --numstat -r -z <hash>` plus
+/// `git show -s --format=… <hash>` (§8.5), run concurrently since neither
+/// depends on the other's result. `--raw` and `--numstat` combine into a
+/// single call (unlike `--name-status`, which git treats as exclusive with
+/// `--numstat`) — the status letter from one block, the +/− counts from the
+/// other.
+pub async fn details(repo: &Path, hash: &str) -> Result<CommitDetails, String> {
+    let diff_tree_args = ["diff-tree", "--no-commit-id", "--raw", "--numstat", "-r", "-z", hash];
+    let show_args = ["show", "-s", "--format=%H%x1f%an%x1f%ae%x1f%ct%x1f%B", hash];
+    let (files_result, meta_result) =
+        tokio::join!(git::read(repo, &diff_tree_args), git::read(repo, &show_args));
+
+    let files_output = files_result?;
+    if !files_output.ok {
+        return Err(first_line(&files_output.stderr));
+    }
+    let meta_output = meta_result?;
+    if !meta_output.ok {
+        return Err(first_line(&meta_output.stderr));
+    }
+
+    let files = parse_raw_and_numstat(&files_output.stdout);
+    parse_show(&meta_output.stdout, files)
+}
+
+/// `--raw --numstat -r -z` prints two format blocks back to back, describing
+/// the same changed files in the same order: a `:mode mode sha sha status`
+/// header (status is its last whitespace-separated field, with a trailing
+/// similarity score for `R`/`C`) followed by a path, then — once the raw
+/// block runs out (the next token stops starting with `:`) — an
+/// `added\tdeleted\tpath` record per file, in that same order. Zipped by
+/// position rather than by path, which sidesteps matching rename pairs
+/// across the two blocks entirely.
+fn parse_raw_and_numstat(raw: &str) -> Vec<CommitFileEntry> {
+    let mut tokens = raw.split('\0').filter(|token| !token.is_empty()).peekable();
+
+    let mut entries: Vec<(char, String)> = Vec::new();
+    while let Some(&token) = tokens.peek() {
+        if !token.starts_with(':') {
+            break;
+        }
+        tokens.next();
+        let Some(status) = token.split_whitespace().last().and_then(|s| s.chars().next()) else {
+            continue;
+        };
+        if status == 'R' || status == 'C' {
+            let _old_path = tokens.next();
+            if let Some(new_path) = tokens.next() {
+                entries.push((status, new_path.to_string()));
+            }
+        } else if let Some(path) = tokens.next() {
+            entries.push((status, path.to_string()));
+        }
+    }
+
+    let mut stats: Vec<(Option<u32>, Option<u32>)> = Vec::new();
+    while let Some(token) = tokens.next() {
+        let mut fields = token.splitn(3, '\t');
+        let added = fields.next().unwrap_or("");
+        let deleted = fields.next().unwrap_or("");
+        let path_field = fields.next().unwrap_or("");
+        if path_field.is_empty() {
+            // A rename/copy defers its path the same way the raw block does:
+            // two more NUL-terminated tokens follow. Already reflected in
+            // `entries`, so just consumed here to stay in sync.
+            tokens.next();
+            tokens.next();
+        }
+        stats.push((added.parse().ok(), deleted.parse().ok()));
+    }
+
+    entries
+        .into_iter()
+        .zip(stats)
+        .map(|((status, path), (insertions, deletions))| CommitFileEntry {
+            path,
+            status,
+            insertions,
+            deletions,
+        })
+        .collect()
+}
+
+/// `%H%x1f%an%x1f%ae%x1f%ct%x1f%B` — `%B` is last and unbounded (it can
+/// contain its own newlines), so it takes everything `splitn` leaves over.
+fn parse_show(raw: &str, files: Vec<CommitFileEntry>) -> Result<CommitDetails, String> {
+    let mut fields = raw.splitn(5, '\u{1f}');
+    let hash = fields.next().unwrap_or("").to_string();
+    if hash.is_empty() {
+        return Err("git show returned no output".to_string());
+    }
+    let author = fields.next().unwrap_or("").to_string();
+    let email = fields.next().unwrap_or("").to_string();
+    let timestamp = fields.next().unwrap_or("").trim().parse().unwrap_or(0);
+    // Trailing newline `%B` always ends with, trimmed so the pane doesn't
+    // render one extra blank line under the message.
+    let message = fields.next().unwrap_or("").trim_end().to_string();
+
+    Ok(CommitDetails { hash, author, email, timestamp, message, files })
+}
+
 fn first_line(stderr: &str) -> String {
     stderr
         .lines()
@@ -257,5 +387,94 @@ mod tests {
     #[test]
     fn empty_ref_output_is_not_an_error() {
         assert!(parse_refs("").is_empty());
+    }
+
+    fn nul_joined(tokens: &[&str]) -> String {
+        tokens.iter().map(|t| format!("{t}\0")).collect()
+    }
+
+    #[test]
+    fn raw_and_numstat_zip_by_position() {
+        let files = parse_raw_and_numstat(&nul_joined(&[
+            ":100644 100644 aaaaaaa bbbbbbb M",
+            "src/main.rs",
+            ":000000 100644 0000000 ccccccc A",
+            "src/retry.rs",
+            "5\t0\tsrc/main.rs",
+            "12\t0\tsrc/retry.rs",
+        ]));
+
+        assert_eq!(
+            files,
+            vec![
+                CommitFileEntry {
+                    path: "src/main.rs".into(),
+                    status: 'M',
+                    insertions: Some(5),
+                    deletions: Some(0),
+                },
+                CommitFileEntry {
+                    path: "src/retry.rs".into(),
+                    status: 'A',
+                    insertions: Some(12),
+                    deletions: Some(0),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn raw_and_numstat_rename_reads_the_new_path_and_stays_in_sync() {
+        let files = parse_raw_and_numstat(&nul_joined(&[
+            ":100644 100644 aaaaaaa bbbbbbb R100",
+            "src/old.rs",
+            "src/new.rs",
+            "10\t2\t",
+            "src/old.rs",
+            "src/new.rs",
+        ]));
+
+        assert_eq!(
+            files,
+            vec![CommitFileEntry {
+                path: "src/new.rs".into(),
+                status: 'R',
+                insertions: Some(10),
+                deletions: Some(2),
+            }]
+        );
+    }
+
+    #[test]
+    fn raw_and_numstat_binary_file_has_no_counts() {
+        let files = parse_raw_and_numstat(&nul_joined(&[
+            ":100644 100644 aaaaaaa bbbbbbb M",
+            "image.png",
+            "-\t-\timage.png",
+        ]));
+
+        assert_eq!(files, vec![CommitFileEntry { path: "image.png".into(), status: 'M', insertions: None, deletions: None }]);
+    }
+
+    #[test]
+    fn raw_and_numstat_empty_output_is_not_an_error() {
+        assert!(parse_raw_and_numstat("").is_empty());
+    }
+
+    #[test]
+    fn show_parses_metadata_and_a_multiline_message() {
+        let raw = "a3f9c21ee0c1a5b8d4e7f2039182736451a9c0de\u{1f}Jeppe Kronborg\u{1f}jeppe@example.com\u{1f}1786744977\u{1f}feat: add retry logic\n\nLonger body here.\n";
+        let details = parse_show(raw, vec![]).unwrap();
+
+        assert_eq!(details.hash, "a3f9c21ee0c1a5b8d4e7f2039182736451a9c0de");
+        assert_eq!(details.author, "Jeppe Kronborg");
+        assert_eq!(details.email, "jeppe@example.com");
+        assert_eq!(details.timestamp, 1786744977);
+        assert_eq!(details.message, "feat: add retry logic\n\nLonger body here.");
+    }
+
+    #[test]
+    fn show_with_no_output_is_an_error() {
+        assert!(parse_show("", vec![]).is_err());
     }
 }
