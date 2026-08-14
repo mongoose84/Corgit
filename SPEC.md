@@ -652,6 +652,14 @@ bar (§4.1) · window restores size, position and last selected repo.
 Still open, none blocking:
 
 - [ ] Is there a cap on windows, or on total repos across all open roots?
+- [ ] **Should the status sweep emit incrementally rather than in one batch?**
+      Step 2 emits a single event when all repos are done, so every row stays
+      branch-less until the whole sweep lands — 20 s on a cold start on the
+      first machine measured. Cache-first paint (step 3) should hide this,
+      since rows arrive filled in from disk and the sweep only corrects them.
+      Decide *after* the cache is in and only if it still reads badly: doing
+      both means 77 IPC round trips per sweep to solve a problem the cache may
+      already have solved. The change is local to `collect()`.
 
 ---
 
