@@ -114,7 +114,7 @@ pub async fn probe() -> GitInfo {
     // Probes the write binary deliberately: it is the one whose absence would
     // be fatal, and the read binary is derived from it.
     // `--version` needs no repo, so any working directory will do.
-    let Ok(output) = run_in(&binaries().write, Path::new("."), &["--version"], None).await else {
+    let Ok(output) = run_in(&binaries().write, Path::new("."), &["--version"], None, &[]).await else {
         return GitInfo::default();
     };
     if !output.ok {
@@ -153,20 +153,32 @@ pub async fn read(cwd: &Path, args: &[&str]) -> Result<Output, String> {
     let mut full = Vec::with_capacity(args.len() + 1);
     full.push("--no-optional-locks");
     full.extend_from_slice(args);
-    run_in(&binaries().read, cwd, &full, None).await
+    run_in(&binaries().read, cwd, &full, None, &[]).await
 }
 
 /// Run a mutating command through the documented `git` entry point (§3) — the
 /// one credential helpers, hooks and LFS expect. Nothing that stages, commits,
 /// fetches, pulls or pushes may take the `read` shortcut.
 pub async fn write(cwd: &Path, args: &[&str]) -> Result<Output, String> {
-    run_in(&binaries().write, cwd, args, None).await
+    run_in(&binaries().write, cwd, args, None, &[]).await
 }
 
 /// Like [`write`], but pipes `input` to the child's stdin — `git commit -F -`
 /// takes its message this way specifically to avoid arg-escaping pain (§8.6).
 pub async fn write_stdin(cwd: &Path, args: &[&str], input: &str) -> Result<Output, String> {
-    run_in(&binaries().write, cwd, args, Some(input)).await
+    run_in(&binaries().write, cwd, args, Some(input), &[]).await
+}
+
+/// Like [`write`], but with `envs` set on the child — the background fetch
+/// sweep's way of disabling credential prompts (§8.7) without a prompt-free
+/// git existing anywhere else. A **manual** fetch/push must never go through
+/// this: the user is sitting right there and is allowed to be prompted.
+pub async fn write_noninteractive(
+    cwd: &Path,
+    args: &[&str],
+    envs: &[(&str, &str)],
+) -> Result<Output, String> {
+    run_in(&binaries().write, cwd, args, None, envs).await
 }
 
 async fn run_in(
@@ -174,6 +186,7 @@ async fn run_in(
     cwd: &Path,
     args: &[&str],
     stdin: Option<&str>,
+    envs: &[(&str, &str)],
 ) -> Result<Output, String> {
     // Held for the lifetime of the child process, not just the spawn.
     let _permit = inflight()
@@ -185,6 +198,7 @@ async fn run_in(
     command
         .args(args)
         .current_dir(cwd)
+        .envs(envs.iter().copied())
         .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

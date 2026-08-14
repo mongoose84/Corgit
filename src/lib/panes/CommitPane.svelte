@@ -12,6 +12,10 @@
 
   const hasRepo = $derived(repos.selectedId !== undefined);
   const files = $derived(repos.files);
+  const status = $derived(repos.selectedId ? repos.status(repos.selectedId) : undefined);
+  // No upstream configured (§8.7) — "Push" becomes "Publish branch" rather
+  // than a separate control, since exactly one of the two ever applies.
+  const needsPublish = $derived(status !== undefined && status.upstream === null);
 
   const canCommit = $derived(
     hasRepo && !busy && message.trim().length > 0 && (files?.stagedTotal ?? 0) > 0,
@@ -26,6 +30,43 @@
     busy = true;
     try {
       if (await repos.commit(message)) message = '';
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function doFetch() {
+    busy = true;
+    try {
+      await repos.fetch();
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function doPull() {
+    busy = true;
+    try {
+      await repos.pull();
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function doPush() {
+    busy = true;
+    try {
+      await (needsPublish ? repos.publish() : repos.push());
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function doCommitAndPush() {
+    if (!canCommit) return;
+    busy = true;
+    try {
+      if (await repos.commitAndPush(message)) message = '';
     } finally {
       busy = false;
     }
@@ -70,12 +111,25 @@
 
 <Pane title="Changes">
   {#snippet actions()}
-    <!-- Fetch and Pull arrive with remotes in build step 5 — icon-only and
-         hover-revealed per feedback, rather than a full button row, since
-         they act on the selected repo the same way the menu bar's
+    <!-- Icon-only and hover-revealed per feedback, rather than a full button
+         row, since they act on the selected repo the same way the menu bar's
          Repository ▸ Fetch/Pull do (§4.1). -->
-    <button type="button" class="icon-action" disabled title="Fetch" aria-label="Fetch">↻</button>
-    <button type="button" class="icon-action" disabled title="Pull" aria-label="Pull">⇩</button>
+    <button
+      type="button"
+      class="icon-action"
+      disabled={!hasRepo || busy}
+      title="Fetch"
+      aria-label="Fetch"
+      onclick={doFetch}
+    >↻</button>
+    <button
+      type="button"
+      class="icon-action"
+      disabled={!hasRepo || busy}
+      title="Pull"
+      aria-label="Pull"
+      onclick={doPull}
+    >⇩</button>
   {/snippet}
 
   {#if !hasRepo}
@@ -92,12 +146,18 @@
 
       <div class="buttons">
         <button class="primary" disabled={!canCommit} onclick={doCommit}>Commit</button>
-        <!-- Push / Publish branch arrives with remotes in build step 5. -->
-        <button disabled>Push</button>
+        <button disabled={!hasRepo || busy} onclick={doPush}>
+          {needsPublish ? 'Publish branch' : 'Push'}
+        </button>
       </div>
 
-      <!-- Commit and push in one step arrives with remotes in build step 5. -->
-      <button type="button" class="primary wide" disabled title="Commit, then push in one step">
+      <button
+        type="button"
+        class="primary wide"
+        disabled={!canCommit}
+        title="Commit, then push in one step"
+        onclick={doCommitAndPush}
+      >
         Commit + Push
       </button>
 

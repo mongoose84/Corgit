@@ -48,6 +48,15 @@ impl WriteQueues {
     pub fn try_read(&self, repo_id: &str) -> Option<OwnedRwLockReadGuard<()>> {
         self.get(repo_id).try_read_owned().ok()
     }
+
+    /// Acquired by the background fetch sweep. `None` means either a write or
+    /// an in-flight read (e.g. the middle pane's file list) currently holds
+    /// the repo; the sweep skips it for this round rather than blocking the
+    /// other repos behind a busy one, mirroring `try_read`'s non-blocking
+    /// spirit for the write side.
+    pub fn try_write(&self, repo_id: &str) -> Option<OwnedRwLockWriteGuard<()>> {
+        self.get(repo_id).try_write_owned().ok()
+    }
 }
 
 #[cfg(test)]
@@ -76,5 +85,25 @@ mod tests {
             assert!(queues.try_read("repo-1").is_none());
         }
         assert!(queues.try_read("repo-1").is_some());
+    }
+
+    #[tokio::test]
+    async fn a_held_read_lock_fails_try_write() {
+        let queues = WriteQueues::default();
+        let _read_guard = queues.read("repo-1").await;
+        assert!(queues.try_write("repo-1").is_none());
+    }
+
+    #[tokio::test]
+    async fn a_held_write_lock_fails_try_write() {
+        let queues = WriteQueues::default();
+        let _write_guard = queues.write("repo-1").await;
+        assert!(queues.try_write("repo-1").is_none());
+    }
+
+    #[tokio::test]
+    async fn an_idle_repo_permits_try_write() {
+        let queues = WriteQueues::default();
+        assert!(queues.try_write("repo-1").is_some());
     }
 }

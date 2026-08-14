@@ -29,6 +29,11 @@ pub struct RootCache {
     pub version: u32,
     /// Keyed by repo id, same as the live `RootState.statuses` it seeds.
     pub statuses: HashMap<String, RepoStatus>,
+    /// Unix seconds of each repo's last fetch attempt (§6, §9.5), keyed by
+    /// repo id. Lets the fetch sweep skip a repo fetched within the last
+    /// interval even across a restart, rather than re-fetching everything
+    /// the moment the app launches.
+    pub last_fetch_at: HashMap<String, i64>,
 }
 
 fn hash_root(root: &Path) -> String {
@@ -125,7 +130,7 @@ mod tests {
         let dir = TempDir::new("twogit-test-cache-roundtrip");
         let root = Path::new(r"C:\dev\code");
 
-        let mut cache = RootCache { version: CACHE_VERSION, statuses: HashMap::new() };
+        let mut cache = RootCache { version: CACHE_VERSION, statuses: HashMap::new(), last_fetch_at: HashMap::new() };
         cache.statuses.insert(
             "repo-1".to_string(),
             RepoStatus { branch: Some("main".to_string()), ahead: 2, ..Default::default() },

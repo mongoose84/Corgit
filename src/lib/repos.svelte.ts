@@ -62,6 +62,8 @@ interface RootView {
   repos: Repo[];
   statuses: Record<string, RepoStatus>;
   errors: Record<string, string>;
+  lastFetchAt: Record<string, number>;
+  authNeeded: string[];
 }
 
 interface SweepEvent {
@@ -69,6 +71,17 @@ interface SweepEvent {
   root: string;
   statuses: Record<string, RepoStatus>;
   errors: Record<string, string>;
+  elapsedMs: number;
+}
+
+/** The background fetch sweep's own event (SPEC.md §6) — separate from the
+ *  status sweep's, since fetch and status are different mechanisms. Carries
+ *  no status data of its own; a fetch moves refs/remotes/*, and it is the
+ *  status sweep that turns that into ahead/behind counts. */
+interface FetchSweepEvent {
+  root: string;
+  lastFetchAt: Record<string, number>;
+  authNeeded: string[];
   elapsedMs: number;
 }
 
@@ -93,6 +106,12 @@ class RepoStore {
   statuses = $state<Record<string, RepoStatus>>({});
   /** Keyed by repo id. A repo whose status failed is unknown, not clean. */
   errors = $state<Record<string, string>>({});
+  /** Unix seconds of each repo's last fetch attempt (§6), keyed by repo id. */
+  lastFetchAt = $state<Record<string, number>>({});
+  /** Repos whose background fetch most recently failed on what looks like an
+   *  auth problem (§8.7, §13) — the background sweep stops retrying these
+   *  until a manual fetch. */
+  authNeeded = $state<Set<string>>(new Set());
 
   git = $state<GitInfo>({
     available: true,
@@ -186,6 +205,31 @@ class RepoStore {
     return this.write('commit_repo', { message });
   }
 
+  /** Manual, user-triggered fetch — unlike the background sweep, this one is
+   *  allowed to prompt for credentials (§8.7). */
+  async fetch(): Promise<boolean> {
+    return this.write('fetch_repo', {});
+  }
+
+  async pull(): Promise<boolean> {
+    return this.write('pull_repo', {});
+  }
+
+  /** `git push`, or "Publish branch" (`push -u origin <branch>`) when the
+   *  selected repo's current status has no upstream (§8.7) — the caller
+   *  decides which button to show; both land here as one command each. */
+  async push(): Promise<boolean> {
+    return this.write('push_repo', {});
+  }
+
+  async publish(): Promise<boolean> {
+    return this.write('publish_branch', {});
+  }
+
+  async commitAndPush(message: string): Promise<boolean> {
+    return this.write('commit_and_push', { message });
+  }
+
   /** Every mutating command shares this shape: resolve the selected repo,
    *  invoke, refresh the file list, surface a failure in `writeError`. The
    *  row/status side updates itself via the `status:repo` event (§7). Returns
@@ -220,6 +264,7 @@ class RepoStore {
       this.git = await invoke<GitInfo>('git_info');
       await listen<SweepEvent>('status:sweep', (event) => this.applySweep(event.payload));
       await listen<RepoStatusEvent>('status:repo', (event) => this.applyRepoStatus(event.payload));
+      await listen<FetchSweepEvent>('fetch:sweep', (event) => this.applyFetchSweep(event.payload));
 
       // A reload lands here with the backend's root still open; reuse it
       // rather than sweeping again.
@@ -292,6 +337,8 @@ class RepoStore {
     this.repos = view.repos;
     this.statuses = view.statuses;
     this.errors = view.errors;
+    this.lastFetchAt = view.lastFetchAt;
+    this.authNeeded = new Set(view.authNeeded);
   }
 
   private applySweep(event: SweepEvent): void {
@@ -302,6 +349,13 @@ class RepoStore {
     this.errors = event.errors;
     this.lastSweepMs = event.elapsedMs;
     this.sweeping = false;
+  }
+
+  private applyFetchSweep(event: FetchSweepEvent): void {
+    if (event.root !== this.root) return;
+
+    this.lastFetchAt = event.lastFetchAt;
+    this.authNeeded = new Set(event.authNeeded);
   }
 
   private applyRepoStatus(event: RepoStatusEvent): void {

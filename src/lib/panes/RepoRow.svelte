@@ -13,6 +13,11 @@
   const dirty = $derived(status !== undefined && isDirty(status));
   // Detached HEAD has no branch name; the short oid is the honest substitute.
   const branch = $derived(status?.branch ?? status?.head ?? '');
+  // The background fetch sweep stopped retrying this repo (§8.7, §13) — a
+  // manual fetch is what clears it. Shown alongside the other badges rather
+  // than replacing them: unlike a status-read failure, this repo's status is
+  // still known and current, just possibly stale on the "behind" count.
+  const authNeeded = $derived(repos.authNeeded.has(repo.id));
 </script>
 
 <button
@@ -46,6 +51,9 @@
       {/if}
       {#if status.behind > 0}
         <span class="badge behind" title="{status.behind} commit(s) to pull">↓{status.behind}</span>
+      {/if}
+      {#if authNeeded}
+        <span class="badge auth" title="Authentication needed — fetch manually to sign in">⚿</span>
       {/if}
     {/if}
   </span>
@@ -137,5 +145,9 @@
 
   .conflict {
     color: var(--status-conflict);
+  }
+
+  .auth {
+    color: var(--status-dirty);
   }
 </style>
