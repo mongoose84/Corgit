@@ -20,7 +20,9 @@ tauri-plugin-dialog = "2.5.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 # Process fan-out for the status sweep, plus the semaphore that caps it (§7.3).
-tokio = { version = "1.49.0", features = ["process", "sync", "rt", "macros"] }
+# "time" drives the focus-gated sweep ticker (§6); "io-util" pipes the commit
+# message to `git commit -F -`'s stdin (§8.6).
+tokio = { version = "1.49.0", features = ["process", "sync", "rt", "macros", "time", "io-util"] }
 # std::fs::canonicalize returns \\?\C:\… on Windows, which is unfit both for
 # display and for handing back to git. dunce strips the prefix when it is safe.
 dunce = "1.0.5"

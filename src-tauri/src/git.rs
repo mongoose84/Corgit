@@ -114,7 +114,7 @@ pub async fn probe() -> GitInfo {
     // Probes the write binary deliberately: it is the one whose absence would
     // be fatal, and the read binary is derived from it.
     // `--version` needs no repo, so any working directory will do.
-    let Ok(output) = run_in(&binaries().write, Path::new("."), &["--version"]).await else {
+    let Ok(output) = run_in(&binaries().write, Path::new("."), &["--version"], None).await else {
         return GitInfo::default();
     };
     if !output.ok {
@@ -153,10 +153,28 @@ pub async fn read(cwd: &Path, args: &[&str]) -> Result<Output, String> {
     let mut full = Vec::with_capacity(args.len() + 1);
     full.push("--no-optional-locks");
     full.extend_from_slice(args);
-    run_in(&binaries().read, cwd, &full).await
+    run_in(&binaries().read, cwd, &full, None).await
 }
 
-async fn run_in(program: &Path, cwd: &Path, args: &[&str]) -> Result<Output, String> {
+/// Run a mutating command through the documented `git` entry point (§3) — the
+/// one credential helpers, hooks and LFS expect. Nothing that stages, commits,
+/// fetches, pulls or pushes may take the `read` shortcut.
+pub async fn write(cwd: &Path, args: &[&str]) -> Result<Output, String> {
+    run_in(&binaries().write, cwd, args, None).await
+}
+
+/// Like [`write`], but pipes `input` to the child's stdin — `git commit -F -`
+/// takes its message this way specifically to avoid arg-escaping pain (§8.6).
+pub async fn write_stdin(cwd: &Path, args: &[&str], input: &str) -> Result<Output, String> {
+    run_in(&binaries().write, cwd, args, Some(input)).await
+}
+
+async fn run_in(
+    program: &Path,
+    cwd: &Path,
+    args: &[&str],
+    stdin: Option<&str>,
+) -> Result<Output, String> {
     // Held for the lifetime of the child process, not just the spawn.
     let _permit = inflight()
         .acquire()
@@ -167,7 +185,7 @@ async fn run_in(program: &Path, cwd: &Path, args: &[&str]) -> Result<Output, Str
     command
         .args(args)
         .current_dir(cwd)
-        .stdin(Stdio::null())
+        .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
@@ -179,8 +197,23 @@ async fn run_in(program: &Path, cwd: &Path, args: &[&str]) -> Result<Output, Str
         command.creation_flags(CREATE_NO_WINDOW);
     }
 
-    let output = command
-        .output()
+    let mut child = command
+        .spawn()
+        .map_err(|err| format!("could not run git: {err}"))?;
+
+    if let Some(input) = stdin {
+        use tokio::io::AsyncWriteExt;
+        // Taking the handle (rather than borrowing) drops and closes it at
+        // the end of this block, so git sees EOF instead of hanging on stdin.
+        if let Some(mut pipe) = child.stdin.take() {
+            pipe.write_all(input.as_bytes())
+                .await
+                .map_err(|err| format!("could not write to git: {err}"))?;
+        }
+    }
+
+    let output = child
+        .wait_with_output()
         .await
         .map_err(|err| format!("could not run git: {err}"))?;
 

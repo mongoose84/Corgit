@@ -41,6 +41,22 @@ export interface GitInfo {
   readBinary: string | null;
 }
 
+/** One row in the middle pane's file lists (§5.2). */
+export interface FileEntry {
+  path: string;
+  /** Git's own status letter (M/A/D/R/C/T/U/?), rendered as-is. */
+  status: string;
+}
+
+/** The selected repo's file list — fetched on demand, never for all 77 (§5.2). */
+export interface FileChanges {
+  staged: FileEntry[];
+  stagedTotal: number;
+  unstaged: FileEntry[];
+  unstagedTotal: number;
+  conflicted: FileEntry[];
+}
+
 interface RootView {
   path: string;
   repos: Repo[];
@@ -54,6 +70,15 @@ interface SweepEvent {
   statuses: Record<string, RepoStatus>;
   errors: Record<string, string>;
   elapsedMs: number;
+}
+
+/** Emitted after a stage, unstage or commit lands — updates one row and the
+ *  middle pane immediately rather than waiting up to 60 s for the next sweep. */
+interface RepoStatusEvent {
+  root: string;
+  repoId: string;
+  status: RepoStatus | null;
+  error: string | null;
 }
 
 /** The dirty dot is one state — the row answers "does this need me?", nothing
@@ -90,8 +115,21 @@ class RepoStore {
    */
   selected = $state<Set<string>>(new Set());
 
+  /** The selected repo's file list (§5.2) — fetched on demand, not part of
+   *  the sweep. `null` before the first fetch lands or when nothing's selected. */
+  files = $state<FileChanges | null>(null);
+  loadingFiles = $state(false);
+  filesError = $state<string | null>(null);
+  /** Set when a stage/unstage/commit attempt fails; cleared on the next one. */
+  writeError = $state<string | null>(null);
+
+  get selectedId(): string | undefined {
+    return this.selected.values().next().value;
+  }
+
   select(id: string): void {
     this.selected = new Set([id]);
+    void this.loadFiles();
   }
 
   status(id: string): RepoStatus | undefined {
@@ -100,6 +138,72 @@ class RepoStore {
 
   error(id: string): string | undefined {
     return this.errors[id];
+  }
+
+  /** Re-fetch the selected repo's file list — after selecting a repo, and
+   *  after any stage/unstage/commit attempt so the pane reflects reality. */
+  async loadFiles(): Promise<void> {
+    const id = this.selectedId;
+    if (!id) {
+      this.files = null;
+      this.filesError = null;
+      return;
+    }
+
+    this.loadingFiles = true;
+    try {
+      const files = await invoke<FileChanges>('repo_files', { repoId: id });
+      // The selection moved on while this was in flight.
+      if (this.selectedId !== id) return;
+      this.files = files;
+      this.filesError = null;
+    } catch (err) {
+      if (this.selectedId !== id) return;
+      this.files = null;
+      this.filesError = String(err);
+    } finally {
+      if (this.selectedId === id) this.loadingFiles = false;
+    }
+  }
+
+  async stagePaths(paths: string[]): Promise<boolean> {
+    return this.write('stage_paths', { paths });
+  }
+
+  async unstagePaths(paths: string[]): Promise<boolean> {
+    return this.write('unstage_paths', { paths });
+  }
+
+  async stageAll(): Promise<boolean> {
+    return this.write('stage_all', {});
+  }
+
+  async unstageAll(): Promise<boolean> {
+    return this.write('unstage_all', {});
+  }
+
+  async commit(message: string): Promise<boolean> {
+    return this.write('commit_repo', { message });
+  }
+
+  /** Every mutating command shares this shape: resolve the selected repo,
+   *  invoke, refresh the file list, surface a failure in `writeError`. The
+   *  row/status side updates itself via the `status:repo` event (§7). Returns
+   *  whether it succeeded, so e.g. the commit box only clears on success. */
+  private async write(command: string, args: Record<string, unknown>): Promise<boolean> {
+    const id = this.selectedId;
+    if (!id) return false;
+
+    this.writeError = null;
+    try {
+      await invoke(command, { repoId: id, ...args });
+      return true;
+    } catch (err) {
+      this.writeError = String(err);
+      return false;
+    } finally {
+      await this.loadFiles();
+    }
   }
 
   /**
@@ -115,6 +219,7 @@ class RepoStore {
     try {
       this.git = await invoke<GitInfo>('git_info');
       await listen<SweepEvent>('status:sweep', (event) => this.applySweep(event.payload));
+      await listen<RepoStatusEvent>('status:repo', (event) => this.applyRepoStatus(event.payload));
 
       // A reload lands here with the backend's root still open; reuse it
       // rather than sweeping again.
@@ -178,7 +283,11 @@ class RepoStore {
 
   private applyRoot(view: RootView): void {
     // A selection is meaningless once the repo it names may be gone.
-    if (view.path !== this.root) this.selected = new Set();
+    if (view.path !== this.root) {
+      this.selected = new Set();
+      this.files = null;
+      this.filesError = null;
+    }
     this.root = view.path;
     this.repos = view.repos;
     this.statuses = view.statuses;
@@ -193,6 +302,24 @@ class RepoStore {
     this.errors = event.errors;
     this.lastSweepMs = event.elapsedMs;
     this.sweeping = false;
+  }
+
+  private applyRepoStatus(event: RepoStatusEvent): void {
+    if (event.root !== this.root) return;
+
+    if (event.status) {
+      this.statuses = { ...this.statuses, [event.repoId]: event.status };
+      if (event.repoId in this.errors) {
+        const { [event.repoId]: _removed, ...rest } = this.errors;
+        this.errors = rest;
+      }
+    } else if (event.error) {
+      this.errors = { ...this.errors, [event.repoId]: event.error };
+      if (event.repoId in this.statuses) {
+        const { [event.repoId]: _removed, ...rest } = this.statuses;
+        this.statuses = rest;
+      }
+    }
   }
 }
 
