@@ -1,8 +1,10 @@
 <script lang="ts">
   import Divider from './lib/Divider.svelte';
+  import Welcome from './lib/Welcome.svelte';
   import RepoList from './lib/panes/RepoList.svelte';
   import CommitPane from './lib/panes/CommitPane.svelte';
   import GraphPane from './lib/panes/GraphPane.svelte';
+  import { repos } from './lib/repos.svelte';
   import { settings, DEFAULT_PANE_WIDTHS } from './lib/settings.svelte';
 
   // Minimum usable widths (SPEC.md §4). Below these the panes stop being
@@ -62,37 +64,52 @@
     void settings.flush();
   }
 
-  void settings.load();
+  // Settings first: the pane widths are needed for the very first paint, and
+  // the welcome screen reads the recent-roots list from them.
+  void settings.load().then(() => repos.start());
 </script>
 
-<main
-  bind:this={container}
-  bind:clientWidth={width}
-  style="--pane-left: {px.left}px; --pane-middle: {px.middle}px; --divider: {DIVIDER}px"
->
-  <RepoList />
-  <Divider
-    label="Resize repository list"
-    value={Math.round((px.left / usable) * 100)}
-    ondrag={dragLeft}
-    onrelease={() => void settings.flush()}
-    onreset={reset}
-  />
-  <CommitPane />
-  <Divider
-    label="Resize commit pane"
-    value={Math.round(((px.left + px.middle) / usable) * 100)}
-    ondrag={dragMiddle}
-    onrelease={() => void settings.flush()}
-    onreset={reset}
-  />
-  <GraphPane />
-</main>
+{#if !repos.ready}
+  <!-- Deliberately blank rather than a spinner. Startup is a few milliseconds
+       of reading two files; a spinner would only ever be seen as a flash. -->
+  <div class="booting"></div>
+{:else if repos.root === null}
+  <Welcome />
+{:else}
+  <main
+    bind:this={container}
+    bind:clientWidth={width}
+    style="--pane-left: {px.left}px; --pane-middle: {px.middle}px; --divider: {DIVIDER}px"
+  >
+    <RepoList />
+    <Divider
+      label="Resize repository list"
+      value={Math.round((px.left / usable) * 100)}
+      ondrag={dragLeft}
+      onrelease={() => void settings.flush()}
+      onreset={reset}
+    />
+    <CommitPane />
+    <Divider
+      label="Resize commit pane"
+      value={Math.round(((px.left + px.middle) / usable) * 100)}
+      ondrag={dragMiddle}
+      onrelease={() => void settings.flush()}
+      onreset={reset}
+    />
+    <GraphPane />
+  </main>
+{/if}
 
 <style>
   main {
     display: grid;
     grid-template-columns: var(--pane-left) var(--divider) var(--pane-middle) var(--divider) 1fr;
+    height: 100%;
+    background: var(--bg-app);
+  }
+
+  .booting {
     height: 100%;
     background: var(--bg-app);
   }

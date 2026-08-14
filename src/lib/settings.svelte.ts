@@ -1,5 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 
+import { inTauri } from './tauri';
+
 /**
  * Settings mirror (SPEC.md §9).
  *
@@ -38,8 +40,6 @@ const DEFAULTS: Settings = {
 const SAVE_DEBOUNCE_MS = 500;
 const STORAGE_KEY = 'twogit.settings';
 
-const inTauri = typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
-
 class SettingsStore {
   loaded = $state(false);
   data = $state<Settings>(structuredClone(DEFAULTS));
@@ -54,6 +54,13 @@ class SettingsStore {
   set paneWidths(value: PaneWidths) {
     this.data.paneWidths = value;
     this.queueSave();
+  }
+
+  /** Re-read what the backend holds. Opening a folder appends to the
+   *  recent-roots list back there, which the welcome screen renders. */
+  async reload(): Promise<void> {
+    this.loaded = false;
+    await this.load();
   }
 
   async load(): Promise<void> {

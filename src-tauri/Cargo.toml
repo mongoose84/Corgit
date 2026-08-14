@@ -16,8 +16,14 @@ tauri-build = { version = "2.6.3", features = [] }
 
 [dependencies]
 tauri = { version = "2.11.5", features = [] }
+tauri-plugin-dialog = "2.5.0"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+# Process fan-out for the status sweep, plus the semaphore that caps it (§7.3).
+tokio = { version = "1.49.0", features = ["process", "sync", "rt", "macros"] }
+# std::fs::canonicalize returns \\?\C:\… on Windows, which is unfit both for
+# display and for handing back to git. dunce strips the prefix when it is safe.
+dunce = "1.0.5"
 
 [profile.release]
 codegen-units = 1

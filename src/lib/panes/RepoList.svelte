@@ -1,23 +1,73 @@
 <script lang="ts">
   import Pane from './Pane.svelte';
+  import RepoRow from './RepoRow.svelte';
   import EmptyState from '../EmptyState.svelte';
+  import { repos } from '../repos.svelte';
 
-  // Populated in build step 2 (SPEC.md §16): discovery + status.
   let filter = $state('');
+
+  // Substring on repo name only — not branch, not path (SPEC.md §5.1).
+  const shown = $derived.by(() => {
+    const needle = filter.trim().toLowerCase();
+    if (!needle) return repos.repos;
+    return repos.repos.filter((repo) => repo.name.toLowerCase().includes(needle));
+  });
+
+  // Pins split this into two sections in build step 9; until then it is one.
+  const count = $derived(
+    shown.length === repos.repos.length
+      ? `${repos.repos.length}`
+      : `${shown.length} of ${repos.repos.length}`,
+  );
 </script>
 
-<Pane title="Repositories">
+<Pane title="Repositories ({count})">
+  {#snippet actions()}
+    {#if repos.lastSweepMs !== null && !repos.sweeping}
+      <!-- The 300 ms status-sweep budget in §1 is the reason this project
+           exists, so the measurement is on screen, not in a log. -->
+      <span class="timing" title="Last status sweep across {repos.repos.length} repositories"
+        >{repos.lastSweepMs} ms</span
+      >
+    {/if}
+    <button
+      type="button"
+      class="refresh"
+      onclick={() => void repos.refresh()}
+      disabled={repos.sweeping || !repos.root}
+      title="Rescan and refresh status"
+      aria-label="Refresh"
+    >
+      ⟳
+    </button>
+  {/snippet}
+
   <div class="filter">
     <input
       type="search"
       placeholder="Filter repositories…"
       bind:value={filter}
-      disabled
+      disabled={repos.repos.length === 0}
       aria-label="Filter repositories by name"
     />
   </div>
 
-  <EmptyState message="No folder open" hint="File → Open Folder…" />
+  {#if repos.repos.length === 0}
+    <EmptyState
+      message="No repositories here"
+      hint="twogit looks one level down — open the folder that contains them"
+    />
+  {:else if shown.length === 0}
+    <EmptyState message="No matches" hint="Filter matches repository names only" />
+  {:else}
+    <ul>
+      {#each shown as repo (repo.id)}
+        <li>
+          <RepoRow {repo} status={repos.status(repo.id)} error={repos.error(repo.id)} />
+        </li>
+      {/each}
+    </ul>
+  {/if}
 </Pane>
 
 <style>
@@ -50,5 +100,40 @@
   input:focus-visible {
     border-color: var(--accent);
     outline: none;
+  }
+
+  .timing {
+    font-size: var(--text-xs);
+    font-variant-numeric: tabular-nums;
+    color: var(--text-disabled);
+  }
+
+  .refresh {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    border: 0;
+    border-radius: var(--radius-sm);
+    background: none;
+    color: var(--text-muted);
+    cursor: default;
+  }
+
+  .refresh:hover:not(:disabled) {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+  }
+
+  .refresh:disabled {
+    color: var(--text-disabled);
+  }
+
+  ul {
+    margin: 0;
+    padding: 0;
+    list-style: none;
   }
 </style>

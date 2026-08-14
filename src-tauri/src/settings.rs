@@ -2,8 +2,8 @@
 //!
 //! Global here means "not tied to a root": pane widths, sweep intervals, the
 //! recent-roots list. Per-root state (pins, last selected repo, window
-//! geometry) lands in `roots/<hash>.json` in build step 2, and the per-root
-//! status cache in `cache/<hash>.json`.
+//! geometry) lands in `roots/<hash>.json` alongside the per-root status cache
+//! in `cache/<hash>.json` — build step 3, when there is state worth caching.
 
 use std::fs;
 use std::io::Write;
