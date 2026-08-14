@@ -136,13 +136,25 @@
     <EmptyState message="No repository selected" hint="Select a repository to stage and commit changes" />
   {:else}
     <div class="compose">
-      <textarea
-        bind:value={message}
-        placeholder="Commit message"
-        rows="3"
-        disabled={busy}
-        aria-label="Commit message"
-      ></textarea>
+      <div class="message-field">
+        <textarea
+          bind:value={message}
+          placeholder="Commit message"
+          rows="3"
+          disabled={busy}
+          aria-label="Commit message"
+        ></textarea>
+        {#if message.length > 0}
+          <button
+            type="button"
+            class="clear-message"
+            disabled={busy}
+            title="Clear commit message"
+            aria-label="Clear commit message"
+            onclick={() => (message = '')}
+          >×</button>
+        {/if}
+      </div>
 
       <div class="buttons">
         <button class="primary" disabled={!canCommit} onclick={doCommit}>Commit</button>
@@ -235,9 +247,15 @@
     border-bottom: 1px solid var(--border);
   }
 
+  .message-field {
+    position: relative;
+  }
+
   textarea {
     width: 100%;
     padding: var(--space-2);
+    /* Room for the clear button so it never overlaps typed text. */
+    padding-right: calc(var(--space-2) + 18px + var(--space-1));
     font: inherit;
     font-size: var(--text-sm);
     color: var(--text-primary);
@@ -245,6 +263,33 @@
     border: 1px solid var(--border);
     border-radius: var(--radius-sm);
     resize: vertical;
+  }
+
+  .clear-message {
+    position: absolute;
+    top: var(--space-1);
+    right: var(--space-1);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    padding: 0;
+    border: 0;
+    border-radius: var(--radius-sm);
+    background: none;
+    color: var(--text-muted);
+    font-size: var(--text-md);
+    line-height: 1;
+  }
+
+  .clear-message:hover:not(:disabled) {
+    background: var(--bg-hover);
+    color: var(--text-primary);
+  }
+
+  .clear-message:disabled {
+    color: var(--text-disabled);
   }
 
   textarea::placeholder {
@@ -282,18 +327,27 @@
     border-color: var(--border-strong);
   }
 
+  /* Tinted at rest rather than a solid accent fill — full brightness read as
+     mismatched next to the neutral Push button. Brightens to the solid fill
+     on hover, so it still reads as the primary action. */
   button.primary:not(:disabled) {
     color: var(--accent-text);
-    background: var(--accent);
+    background: var(--accent-muted);
     border-color: var(--accent);
   }
 
   button.primary:hover:not(:disabled) {
-    background: var(--accent-hover);
+    color: var(--accent-text);
+    background: var(--accent);
     border-color: var(--accent-hover);
   }
 
   button.wide {
+    /* Overrides the base rule's `flex: 1 1 0` — this button is a direct flex
+       item of `.compose` (a column flex container), not of `.buttons`, so
+       without this it stretches to fill the leftover vertical space instead
+       of staying the same height as Commit/Push. */
+    flex: 0 0 auto;
     width: 100%;
   }
 
