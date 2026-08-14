@@ -549,7 +549,11 @@ Three rules for the dark palette:
    one step lighter than its background reads correctly.
 3. **One accent colour**, used for selection and primary buttons only. Status colours
    (dirty, ahead/behind, error) are semantic and must never reuse the accent, or the repo
-   list stops being scannable — which is the entire point of the left pane.
+   list stops being scannable — which is the entire point of the left pane. Settled on an
+   indigo/blurple (`--accent: #5865f2`, hover `#7c87f5`, muted/selection fill `#262b5e`) after
+   live-comparing it against violet, electric cyan and fuchsia in the running app — bold
+   enough to read as a deliberate choice next to VS Code Dark+ blue, but far enough from the
+   status hues (amber/green/orange/red) to stay unambiguous at a glance.
 
 Set the Tauri window background colour to `--bg-app` so the window doesn't flash white
 before the webview paints.

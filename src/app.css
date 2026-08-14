@@ -26,9 +26,9 @@
   /* Exactly one accent, for selection and primary actions only. It must never
      be reused for status, or the repo list stops being scannable — which is
      the entire point of the left pane. */
-  --accent: #4c8dff;
-  --accent-hover: #6ba0ff;
-  --accent-muted: #1e3a63;
+  --accent: #5865f2;
+  --accent-hover: #7c87f5;
+  --accent-muted: #262b5e;
   --accent-text: #ffffff;
 
   /* Semantic status colours. Distinct hues from --accent and from each other. */
