@@ -14,7 +14,7 @@ use crate::git;
 pub async fn switch_local(repo: &Path, branch: &str) -> Result<(), String> {
     let output = git::write(repo, &["switch", branch]).await?;
     if !output.ok {
-        return Err(first_line(&output.stderr));
+        return Err(full_message(&output.stderr));
     }
     Ok(())
 }
@@ -30,14 +30,14 @@ pub async fn switch_remote_tracking(repo: &Path, remote_ref: &str) -> Result<(),
         return Ok(());
     }
     if !create.stderr.contains("already exists") {
-        return Err(first_line(&create.stderr));
+        return Err(full_message(&create.stderr));
     }
 
     // A local branch of that name already exists elsewhere in the graph —
     // just switch to it, the same as double-clicking its own local badge would.
     let fallback = git::write(repo, &["switch", &local]).await?;
     if !fallback.ok {
-        return Err(first_line(&fallback.stderr));
+        return Err(full_message(&fallback.stderr));
     }
     Ok(())
 }
@@ -49,13 +49,12 @@ fn local_name(remote_ref: &str) -> String {
     remote_ref.split_once('/').map_or(remote_ref, |(_, rest)| rest).to_string()
 }
 
-fn first_line(stderr: &str) -> String {
-    stderr
-        .lines()
-        .find(|line| !line.trim().is_empty())
-        .unwrap_or("git switch failed")
-        .trim()
-        .to_string()
+/// The whole trimmed stderr, not just its first line — §13's "raw stderr
+/// always available in a collapsible Details" needs the whole thing; the
+/// frontend's `translateGitError` picks a plain-language headline out of it.
+fn full_message(stderr: &str) -> String {
+    let trimmed = stderr.trim();
+    if trimmed.is_empty() { "git switch failed".to_string() } else { trimmed.to_string() }
 }
 
 #[cfg(test)]

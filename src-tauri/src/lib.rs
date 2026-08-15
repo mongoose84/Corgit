@@ -4,9 +4,12 @@ mod commit;
 mod discovery;
 mod git;
 mod graph;
+mod menu;
 mod remote;
+mod roots;
 mod settings;
 mod status;
+mod watch;
 mod writequeue;
 
 use std::collections::{HashMap, HashSet};
@@ -64,6 +67,14 @@ struct AppState {
     /// `Arc`-wrapped so the sweep can clone a handle into its per-repo tasks
     /// without needing an `AppHandle` there too (§6, §7 rule 2).
     write_queues: Arc<WriteQueues>,
+    /// FS watchers on the hot set — pinned ∪ selected (§6, build step 9).
+    hot_watchers: watch::HotWatchers,
+    /// Native menu bar (§4.1) — handles for the items later mutations
+    /// (selection change, a View checkbox, a new recent root) need to reach.
+    menu: menu::MenuHandles,
+    /// The View menu's two checkboxes' actual state — the checkboxes
+    /// themselves only mirror this (§9.3: Rust owns state).
+    pane_visibility: Mutex<menu::PaneVisibility>,
 }
 
 /// One window, one root (§9.1).
@@ -87,6 +98,16 @@ struct RootState {
     /// there and may resolve it (or fail again honestly). Not persisted — a
     /// fresh launch is a fair reason to try again.
     auth_needed: HashSet<String>,
+    /// The hot set's user-controlled half (§5.1, §6) — the other half is
+    /// whichever repo is currently selected. Persisted to `roots/<hash>.json`
+    /// (§9.5), not the status cache: pins are truth, not something a sweep
+    /// can regenerate.
+    pins: HashSet<String>,
+    /// Mirrors `pins` and the frontend's current selection so a relaunch can
+    /// restore it (§9.5). Kept here rather than only in `roots.rs`'s on-disk
+    /// copy so `set_selected_repo` has somewhere in memory to read it back
+    /// from without a file read on every selection change.
+    selected: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -98,6 +119,11 @@ struct RootView {
     errors: HashMap<String, String>,
     last_fetch_at: HashMap<String, i64>,
     auth_needed: HashSet<String>,
+    pins: HashSet<String>,
+    /// The repo selected when this root was last open, if it still exists
+    /// (§9.5) — the frontend selects it on load so a relaunch drops you back
+    /// where you left off.
+    last_selected: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -200,6 +226,13 @@ fn open_root(path: PathBuf, app: AppHandle) -> Result<RootView, String> {
     cached.statuses.retain(|id, _| repos.iter().any(|repo| &repo.id == id));
     cached.last_fetch_at.retain(|id, _| repos.iter().any(|repo| &repo.id == id));
 
+    let mut root_settings = roots::load(&state.config_dir, &root);
+    root_settings.pins.retain(|id| repos.iter().any(|repo| &repo.id == id));
+    let last_selected = root_settings
+        .last_selected
+        .clone()
+        .filter(|id| repos.iter().any(|repo| &repo.id == id));
+
     let generation = {
         let mut current = state.root.lock().expect("root mutex poisoned");
         let generation = current.as_ref().map_or(0, |root| root.generation) + 1;
@@ -211,12 +244,15 @@ fn open_root(path: PathBuf, app: AppHandle) -> Result<RootView, String> {
             errors: HashMap::new(),
             last_fetch_at: cached.last_fetch_at.clone(),
             auth_needed: HashSet::new(),
+            pins: root_settings.pins.clone(),
+            selected: last_selected.clone(),
         });
         generation
     };
 
-    remember_root(&state, &root);
+    remember_root(&app, &root);
     start_sweep(&app, generation, repos.clone());
+    sync_hot_watchers(&app);
 
     Ok(RootView {
         path: root,
@@ -225,6 +261,8 @@ fn open_root(path: PathBuf, app: AppHandle) -> Result<RootView, String> {
         errors: HashMap::new(),
         last_fetch_at: cached.last_fetch_at,
         auth_needed: HashSet::new(),
+        pins: root_settings.pins,
+        last_selected,
     })
 }
 
@@ -240,6 +278,11 @@ fn current_root(state: State<'_, AppState>) -> Option<RootView> {
         errors: root.errors.clone(),
         last_fetch_at: root.last_fetch_at.clone(),
         auth_needed: root.auth_needed.clone(),
+        pins: root.pins.clone(),
+        // A reload keeps whatever is already selected in the frontend rather
+        // than re-forcing the on-open default — this field only matters for a
+        // fresh `open_root`.
+        last_selected: root.selected.clone(),
     })
 }
 
@@ -262,6 +305,14 @@ fn refresh_root(app: AppHandle) -> Result<RootView, String> {
         root.errors.retain(|id, _| repos.iter().any(|repo| &repo.id == id));
         root.last_fetch_at.retain(|id, _| repos.iter().any(|repo| &repo.id == id));
         root.auth_needed.retain(|id| repos.iter().any(|repo| &repo.id == id));
+        // A repo dropped from the root loses its pin too — nothing left to
+        // pin. `toggle_pin` is what persists this to disk; a deleted repo
+        // never toggles again, so this in-memory prune is the only cleanup
+        // it gets, same as `statuses`/`errors` above.
+        root.pins.retain(|id| repos.iter().any(|repo| &repo.id == id));
+        if root.selected.as_deref().is_some_and(|id| !repos.iter().any(|repo| repo.id == id)) {
+            root.selected = None;
+        }
         root.repos = repos;
 
         (
@@ -273,11 +324,14 @@ fn refresh_root(app: AppHandle) -> Result<RootView, String> {
                 errors: root.errors.clone(),
                 last_fetch_at: root.last_fetch_at.clone(),
                 auth_needed: root.auth_needed.clone(),
+                pins: root.pins.clone(),
+                last_selected: root.selected.clone(),
             },
         )
     };
 
     start_sweep(&app, generation, view.repos.clone());
+    sync_hot_watchers(&app);
     Ok(view)
 }
 
@@ -412,6 +466,109 @@ async fn open_in_vscode(repo_id: String, app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Right-click → Open in Terminal (§5.1). Unlike every git spawn, this one is
+/// meant to leave a visible window behind, so `CREATE_NO_WINDOW` is
+/// deliberately never set here.
+#[tauri::command]
+async fn open_in_terminal(repo_id: String, app: AppHandle) -> Result<(), String> {
+    let path = repo_path(&app, &repo_id)?;
+
+    let mut command = if cfg!(windows) {
+        match windows_terminal_on_path() {
+            // `wt -d <path>` opens straight into the repo; no separate `cd`.
+            Some(wt) => {
+                let mut command = tokio::process::Command::new(wt);
+                command.arg("-d").arg(&path);
+                command
+            }
+            None => {
+                let mut command = tokio::process::Command::new("cmd");
+                command.arg("/K").current_dir(&path);
+                command
+            }
+        }
+    } else {
+        let mut command = tokio::process::Command::new("sh");
+        command.current_dir(&path);
+        command
+    };
+
+    command
+        .spawn()
+        .map_err(|err| format!("could not open a terminal: {err}"))?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn windows_terminal_on_path() -> Option<PathBuf> {
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .map(|dir| dir.join("wt.exe"))
+        .find(|candidate| candidate.is_file())
+}
+
+/// Only Windows has Windows Terminal to look for (§10 — the `not(windows)`
+/// half exists purely so `open_in_terminal` above can call this
+/// unconditionally rather than branching on `cfg!` around the call itself).
+#[cfg(not(windows))]
+fn windows_terminal_on_path() -> Option<PathBuf> {
+    None
+}
+
+/// Pin/unpin a repo (§5.1) — persisted immediately, same reasoning as
+/// `remember_root`: a pin toggle is a deliberate, infrequent user action, not
+/// something worth debouncing.
+#[tauri::command]
+fn toggle_pin(repo_id: String, app: AppHandle) -> Result<HashSet<String>, String> {
+    let state = app.state::<AppState>();
+    let (root_path, pins, selected) = {
+        let mut current = state.root.lock().expect("root mutex poisoned");
+        let root = current.as_mut().ok_or_else(|| "No folder is open".to_string())?;
+        if !root.repos.iter().any(|repo| repo.id == repo_id) {
+            return Err("That repository is no longer open".to_string());
+        }
+        if !root.pins.remove(&repo_id) {
+            root.pins.insert(repo_id);
+        }
+        (root.path.clone(), root.pins.clone(), root.selected.clone())
+    };
+
+    persist_root_settings(&app, &root_path, pins.clone(), selected);
+    sync_hot_watchers(&app);
+    Ok(pins)
+}
+
+/// The frontend's current selection, mirrored server-side (§9.5's persisted
+/// `last_selected`, and the input to the hot set in §6/build step 9's
+/// watchers plus the Repository menu's enabled state in the native menu bar).
+/// `None` when nothing is selected.
+#[tauri::command]
+fn set_selected_repo(repo_id: Option<String>, app: AppHandle) -> Result<(), String> {
+    let state = app.state::<AppState>();
+    let (root_path, pins, selected) = {
+        let mut current = state.root.lock().expect("root mutex poisoned");
+        let root = current.as_mut().ok_or_else(|| "No folder is open".to_string())?;
+        root.selected = repo_id;
+        (root.path.clone(), root.pins.clone(), root.selected.clone())
+    };
+
+    persist_root_settings(&app, &root_path, pins, selected.clone());
+    sync_hot_watchers(&app);
+    menu::set_repo_selected(&app, selected.is_some());
+    Ok(())
+}
+
+/// The one place that writes `roots/<hash>.json` (§9.5): every caller hands
+/// over the whole current snapshot, same reasoning as `persist_cache` below —
+/// the file is overwritten wholesale, so a partial write would silently erase
+/// the other half on disk.
+fn persist_root_settings(app: &AppHandle, root_path: &Path, pins: HashSet<String>, last_selected: Option<String>) {
+    let state = app.state::<AppState>();
+    let settings = roots::RootSettings { version: roots::ROOTS_VERSION, pins, last_selected };
+    if let Err(err) = roots::save(&state.config_dir, root_path, &settings) {
+        eprintln!("twogit: could not save root settings ({err})");
+    }
+}
+
 /// A manual, user-triggered fetch — allowed to prompt interactively, unlike
 /// the background fetch sweep (§8.7). Clears "auth needed" regardless of
 /// outcome: the user is sitting right there, and this attempt's own result is
@@ -431,6 +588,13 @@ async fn pull_repo(repo_id: String, app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 async fn push_repo(repo_id: String, app: AppHandle) -> Result<(), String> {
     write_and_refresh(&app, repo_id, |path| async move { remote::push(&path).await }).await
+}
+
+/// §13's merge-conflict banner: "Abort merge", one of its exactly two ways
+/// out (the other is *Open in VS Code*).
+#[tauri::command]
+async fn merge_abort(repo_id: String, app: AppHandle) -> Result<(), String> {
+    write_and_refresh(&app, repo_id, |path| async move { remote::merge_abort(&path).await }).await
 }
 
 /// A branch with no upstream configured (§8.7) — the branch name comes from
@@ -523,8 +687,10 @@ where
 /// Re-reads one repo's status outside any write lock, updates it in the open
 /// root (if that root and repo are still current), saves the cache, and
 /// notifies every window watching this root — the single-repo counterpart to
-/// what a full sweep does for all of them.
-async fn emit_repo_status(app: &AppHandle, repo_id: &str, path: &Path) {
+/// what a full sweep does for all of them. `pub(crate)` so `watch.rs`'s
+/// debounced FS-watcher callbacks (§6) can call it directly, the same way
+/// `write_and_refresh` does after every mutating command.
+pub(crate) async fn emit_repo_status(app: &AppHandle, repo_id: &str, path: &Path) {
     let status = status::query(path).await;
     let state = app.state::<AppState>();
 
@@ -675,6 +841,30 @@ async fn sweep(app: AppHandle, generation: u64, repos: Vec<Repo>) {
             state.sweeping.store(false, Ordering::SeqCst);
         }
     }
+}
+
+/// Recomputes the hot set — pinned ∪ selected (§6) — from whatever root is
+/// currently open, and syncs the FS watchers to match. Called after anything
+/// that can change either half: `open_root`, `toggle_pin`,
+/// `set_selected_repo`, `refresh_root`.
+fn sync_hot_watchers(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    let current = state.root.lock().expect("root mutex poisoned");
+    let Some(root) = current.as_ref() else {
+        drop(current);
+        state.hot_watchers.clear();
+        return;
+    };
+
+    let hot: Vec<(String, PathBuf)> = root
+        .repos
+        .iter()
+        .filter(|repo| root.pins.contains(&repo.id) || root.selected.as_deref() == Some(repo.id.as_str()))
+        .map(|repo| (repo.id.clone(), repo.path.clone()))
+        .collect();
+    drop(current);
+
+    state.hot_watchers.sync(app, &hot);
 }
 
 /// Sweep the currently open root, if any — a no-op with no root open. Shared
@@ -1016,17 +1206,24 @@ async fn fetch_many(write_queues: Arc<WriteQueues>, repos: Vec<Repo>) -> (Vec<St
 
 /// Most-recent-first, deduplicated, capped. Saved immediately rather than on
 /// the settings debounce: opening a folder is exactly the moment a crash would
-/// be most annoying to lose.
-fn remember_root(state: &AppState, root: &Path) {
-    let mut settings = state.settings.lock().expect("settings mutex poisoned");
+/// be most annoying to lose. Also refreshes the native File ▸ Open Recent
+/// submenu (§4.1), since this is the one place the list actually changes.
+fn remember_root(app: &AppHandle, root: &Path) {
+    let state = app.state::<AppState>();
+    let recent_roots = {
+        let mut settings = state.settings.lock().expect("settings mutex poisoned");
 
-    settings.recent_roots.retain(|recent| recent != root);
-    settings.recent_roots.insert(0, root.to_path_buf());
-    settings.recent_roots.truncate(MAX_RECENT_ROOTS);
+        settings.recent_roots.retain(|recent| recent != root);
+        settings.recent_roots.insert(0, root.to_path_buf());
+        settings.recent_roots.truncate(MAX_RECENT_ROOTS);
 
-    if let Err(err) = settings::save(&state.config_dir, &settings) {
-        eprintln!("twogit: could not save recent roots ({err})");
-    }
+        if let Err(err) = settings::save(&state.config_dir, &settings) {
+            eprintln!("twogit: could not save recent roots ({err})");
+        }
+        settings.recent_roots.clone()
+    };
+
+    menu::refresh_open_recent(app, &recent_roots);
 }
 
 pub fn run() {
@@ -1046,6 +1243,11 @@ pub fn run() {
                 eprintln!("twogit: no usable git on PATH");
             }
 
+            // No repo is open yet, so nothing is selected and the panes
+            // default to visible — built before `app.manage` since the
+            // resulting handles are themselves a field of `AppState`.
+            let menu_handles = menu::install(app.handle(), &settings.recent_roots, false, menu::PaneVisibility::default())?;
+
             app.manage(AppState {
                 config_dir,
                 cache_dir,
@@ -1057,6 +1259,9 @@ pub fn run() {
                 fetch_sweeping: AtomicBool::new(false),
                 fetch_ticker: Mutex::new(None),
                 write_queues: Arc::new(WriteQueues::default()),
+                hot_watchers: watch::HotWatchers::default(),
+                menu: menu_handles,
+                pane_visibility: Mutex::new(menu::PaneVisibility::default()),
             });
 
             // Focus gating (§6): a window is focused when created, and Tauri
@@ -1099,10 +1304,14 @@ pub fn run() {
             fetch_repo,
             pull_repo,
             push_repo,
+            merge_abort,
             publish_branch,
             commit_and_push,
             switch_branch,
             open_in_vscode,
+            open_in_terminal,
+            toggle_pin,
+            set_selected_repo,
         ])
         .run(tauri::generate_context!())
         .expect("twogit: fatal error while running the application");

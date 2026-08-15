@@ -1,5 +1,8 @@
 <script lang="ts">
   import { isDirty, repos, type Repo, type RepoStatus } from '../repos.svelte';
+  import ContextMenu from '../ContextMenu.svelte';
+  import Popover from '../Popover.svelte';
+  import GitErrorNotice from '../GitErrorNotice.svelte';
 
   interface Props {
     repo: Repo;
@@ -13,11 +16,52 @@
   const dirty = $derived(status !== undefined && isDirty(status));
   // Detached HEAD has no branch name; the short oid is the honest substitute.
   const branch = $derived(status?.branch ?? status?.head ?? '');
+  const pinned = $derived(repos.pins.has(repo.id));
   // The background fetch sweep stopped retrying this repo (§8.7, §13) — a
   // manual fetch is what clears it. Shown alongside the other badges rather
   // than replacing them: unlike a status-read failure, this repo's status is
   // still known and current, just possibly stale on the "behind" count.
   const authNeeded = $derived(repos.authNeeded.has(repo.id));
+  // A row-triggered write (Fetch/Pull from this very row) failing is the
+  // freshest, most actionable signal — it wins over a stale status-read
+  // failure when both happen to be present (§5.1, §13).
+  const rowError = $derived(repos.rowErrors[repo.id] ?? error);
+  const canPullRow = $derived(status !== undefined && status.behind > 0 && status.conflicted === 0);
+
+  let menuPos = $state<{ x: number; y: number } | null>(null);
+  let errorPopoverPos = $state<{ x: number; y: number } | null>(null);
+  let pulling = $state(false);
+
+  function openMenu(event: MouseEvent) {
+    event.preventDefault();
+    menuPos = { x: event.clientX, y: event.clientY };
+  }
+
+  function openErrorPopover(event: MouseEvent) {
+    event.preventDefault();
+    event.stopPropagation();
+    errorPopoverPos = { x: event.clientX, y: event.clientY };
+  }
+
+  async function pullRow(event: MouseEvent) {
+    event.preventDefault();
+    event.stopPropagation();
+    if (pulling) return;
+    pulling = true;
+    try {
+      await repos.pullRow(repo.id);
+    } finally {
+      pulling = false;
+    }
+  }
+
+  const menuItems = $derived([
+    { label: pinned ? 'Unpin' : 'Pin', onSelect: () => void repos.togglePin(repo.id) },
+    { label: 'Fetch', onSelect: () => void repos.fetchRepo(repo.id) },
+    { label: 'Open in VS Code', onSelect: () => void repos.openInVSCode(repo.id) },
+    { label: 'Open in Terminal', onSelect: () => void repos.openInTerminal(repo.id) },
+    { label: 'Copy path', onSelect: () => void navigator.clipboard.writeText(repo.path) },
+  ]);
 </script>
 
 <button
@@ -27,15 +71,41 @@
   aria-current={selected}
   title={repo.path}
   onclick={() => repos.select(repo.id)}
+  oncontextmenu={openMenu}
 >
   <span class="name">{repo.name}</span>
 
   <span class="meta">
-    {#if error}
-      <!-- A repo whose status could not be read is unknown, not clean, and
-           must never render as a clean row (§5.1). -->
-      <span class="badge error" title={error}>!</span>
-    {:else if status}
+    {#if canPullRow}
+      <!-- Hover-revealed, and only on rows that are behind (§5.1) — acting
+           without a select-then-cross-the-window trip is the whole point. -->
+      <!-- svelte-ignore a11y_click_events_have_key_events -->
+      <span
+        role="button"
+        tabindex="-1"
+        class="pull-action"
+        class:pulling
+        title="Pull"
+        aria-label="Pull"
+        onclick={pullRow}
+      >{pulling ? '…' : '⇩'}</span>
+    {/if}
+
+    {#if rowError}
+      <!-- A repo whose status could not be read — or whose row-triggered
+           write just failed — is unknown/needs-attention, not clean, and
+           must never render as a clean row (§5.1). Click opens the raw
+           detail (§13). -->
+      <!-- svelte-ignore a11y_click_events_have_key_events -->
+      <span
+        role="button"
+        tabindex="-1"
+        class="badge error"
+        title={rowError}
+        onclick={openErrorPopover}
+      >!</span>
+    {/if}
+    {#if status}
       <span class="branch" class:detached={!status.branch}>{branch}</span>
 
       {#if status.conflicted > 0}
@@ -58,6 +128,20 @@
     {/if}
   </span>
 </button>
+
+{#if menuPos}
+  <ContextMenu x={menuPos.x} y={menuPos.y} items={menuItems} onClose={() => (menuPos = null)} />
+{/if}
+
+{#if errorPopoverPos && rowError}
+  <Popover x={errorPopoverPos.x} y={errorPopoverPos.y} onClose={() => (errorPopoverPos = null)}>
+    <GitErrorNotice
+      error={rowError}
+      onOpenVSCode={() => repos.openInVSCode(repo.id)}
+      onRetry={() => void repos.retryRow(repo.id)}
+    />
+  </Popover>
+{/if}
 
 <style>
   .row {
@@ -130,6 +214,36 @@
     line-height: 1;
   }
 
+  /* Row-level Pull (§5.1): hidden until the row is hovered/focused, and only
+     ever rendered on rows that are behind in the first place. */
+  .pull-action {
+    display: none;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+    width: 18px;
+    height: 18px;
+    border-radius: var(--radius-sm);
+    color: var(--text-muted);
+    font-size: var(--text-sm);
+    line-height: 1;
+  }
+
+  .row:hover .pull-action,
+  .row:focus-visible .pull-action {
+    display: flex;
+  }
+
+  .pull-action:hover {
+    background: var(--bg-active);
+    color: var(--text-primary);
+  }
+
+  .pull-action.pulling {
+    display: flex;
+    color: var(--text-disabled);
+  }
+
   .ahead {
     color: var(--status-ahead);
   }
@@ -141,6 +255,10 @@
   .error {
     color: var(--status-error);
     font-weight: 700;
+  }
+
+  .badge.error:hover {
+    text-decoration: underline;
   }
 
   .conflict {

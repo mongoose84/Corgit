@@ -26,6 +26,10 @@ tokio = { version = "1.49.0", features = ["process", "sync", "rt", "macros", "ti
 # std::fs::canonicalize returns \\?\C:\… on Windows, which is unfit both for
 # display and for handing back to git. dunce strips the prefix when it is safe.
 dunce = "1.0.5"
+# FS watchers on hot repos (§6) — the mini debouncer does the "~200 ms
+# debounce" the spec asks for without hand-rolled event coalescing.
+notify = "6"
+notify-debouncer-mini = "0.4"
 
 [profile.release]
 codegen-units = 1

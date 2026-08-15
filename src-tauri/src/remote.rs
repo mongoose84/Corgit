@@ -28,7 +28,7 @@ pub async fn fetch_background(repo: &Path) -> Result<(), String> {
     )
     .await?;
     if !output.ok {
-        return Err(first_line(&output.stderr));
+        return Err(full_message(&output.stderr));
     }
     Ok(())
 }
@@ -41,6 +41,12 @@ pub async fn pull(repo: &Path) -> Result<(), String> {
 
 pub async fn push(repo: &Path) -> Result<(), String> {
     run(repo, &["push"]).await
+}
+
+/// §13's merge-conflict banner: exactly two ways out, this is one of them —
+/// never a third option, matching §8.3's "never force-checkout" precedent.
+pub async fn merge_abort(repo: &Path) -> Result<(), String> {
+    run(repo, &["merge", "--abort"]).await
 }
 
 /// "Publish branch" — pushes a branch with no upstream configured and sets one.
@@ -83,18 +89,17 @@ pub fn looks_like_auth_failure(stderr: &str) -> bool {
 async fn run(repo: &Path, args: &[&str]) -> Result<(), String> {
     let output = git::write(repo, args).await?;
     if !output.ok {
-        return Err(first_line(&output.stderr));
+        return Err(full_message(&output.stderr));
     }
     Ok(())
 }
 
-fn first_line(stderr: &str) -> String {
-    stderr
-        .lines()
-        .find(|line| !line.trim().is_empty())
-        .unwrap_or("git failed")
-        .trim()
-        .to_string()
+/// The whole trimmed stderr, not just its first line — §13's "raw stderr
+/// always available in a collapsible Details" needs the whole thing; the
+/// frontend's `translateGitError` picks a plain-language headline out of it.
+fn full_message(stderr: &str) -> String {
+    let trimmed = stderr.trim();
+    if trimmed.is_empty() { "git failed".to_string() } else { trimmed.to_string() }
 }
 
 #[cfg(test)]

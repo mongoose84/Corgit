@@ -36,10 +36,12 @@ pub struct RootCache {
     pub last_fetch_at: HashMap<String, i64>,
 }
 
-fn hash_root(root: &Path) -> String {
+/// Shared with `roots.rs` so a root's cache file and its pins file are keyed
+/// identically — both are per-root, both hashed the same way.
+pub fn hash_root(root: &Path) -> String {
     let mut hasher = DefaultHasher::new();
     // Lower-cased so the same folder reached with different casing — which
-    // Windows treats as identical — still hits one cache file.
+    // Windows treats as identical — still hits one file.
     root.to_string_lossy().to_lowercase().hash(&mut hasher);
     format!("{:016x}", hasher.finish())
 }

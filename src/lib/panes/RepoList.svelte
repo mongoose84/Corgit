@@ -13,7 +13,11 @@
     return repos.repos.filter((repo) => repo.name.toLowerCase().includes(needle));
   });
 
-  // Pins split this into two sections in build step 9; until then it is one.
+  // Two sections, each alphabetical (§5.1) — discovery already returns repos
+  // pre-sorted by name, so this is a partition of `shown`, not a re-sort.
+  const pinned = $derived(shown.filter((repo) => repos.pins.has(repo.id)));
+  const unpinned = $derived(shown.filter((repo) => !repos.pins.has(repo.id)));
+
   const count = $derived(
     shown.length === repos.repos.length
       ? `${repos.repos.length}`
@@ -60,8 +64,22 @@
   {:else if shown.length === 0}
     <EmptyState message="No matches" hint="Filter matches repository names only" />
   {:else}
+    {#if pinned.length > 0}
+      <div class="section-header">Pinned ({pinned.length})</div>
+      <ul>
+        {#each pinned as repo (repo.id)}
+          <li>
+            <RepoRow {repo} status={repos.status(repo.id)} error={repos.error(repo.id)} />
+          </li>
+        {/each}
+      </ul>
+    {/if}
+
+    {#if pinned.length > 0}
+      <div class="section-header">All ({unpinned.length})</div>
+    {/if}
     <ul>
-      {#each shown as repo (repo.id)}
+      {#each unpinned as repo (repo.id)}
         <li>
           <RepoRow {repo} status={repos.status(repo.id)} error={repos.error(repo.id)} />
         </li>
@@ -135,5 +153,14 @@
     margin: 0;
     padding: 0;
     list-style: none;
+  }
+
+  .section-header {
+    padding: var(--space-2) var(--space-3) var(--space-1);
+    font-size: var(--text-xs);
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--text-muted);
   }
 </style>

@@ -2,6 +2,7 @@
   import Pane from './Pane.svelte';
   import FileRow from './FileRow.svelte';
   import EmptyState from '../EmptyState.svelte';
+  import GitErrorNotice from '../GitErrorNotice.svelte';
   import { repos } from '../repos.svelte';
 
   // Mode A (working tree) — SPEC.md §5.2. Commit details (Mode B) live in
@@ -16,10 +17,14 @@
   // No upstream configured (§8.7) — "Push" becomes "Publish branch" rather
   // than a separate control, since exactly one of the two ever applies.
   const needsPublish = $derived(status !== undefined && status.upstream === null);
+  // §13: an unresolved merge conflict blocks commit and push for this repo
+  // until it's resolved or aborted — exactly two ways out, never a third.
+  const conflicted = $derived(status !== undefined && status.conflicted > 0);
 
   const canCommit = $derived(
-    hasRepo && !busy && message.trim().length > 0 && (files?.stagedTotal ?? 0) > 0,
+    hasRepo && !busy && !conflicted && message.trim().length > 0 && (files?.stagedTotal ?? 0) > 0,
   );
+  const canPush = $derived(hasRepo && !busy && !conflicted);
 
   function sectionLabel(shown: number, total: number): string {
     return shown === total ? `${total}` : `${shown} of ${total}`;
@@ -30,6 +35,15 @@
     busy = true;
     try {
       if (await repos.commit(message)) message = '';
+    } finally {
+      busy = false;
+    }
+  }
+
+  async function doMergeAbort() {
+    busy = true;
+    try {
+      await repos.mergeAbort();
     } finally {
       busy = false;
     }
@@ -135,6 +149,17 @@
   {#if !hasRepo}
     <EmptyState message="No repository selected" hint="Select a repository to stage and commit changes" />
   {:else}
+    {#if conflicted}
+      <!-- §13: exactly two buttons, never a third — never force-anything. -->
+      <div class="conflict-banner">
+        <p class="selectable">This repository has a merge conflict. Commit and push are blocked until it's resolved or aborted.</p>
+        <div class="conflict-actions">
+          <button type="button" disabled={busy} onclick={doMergeAbort}>Abort merge</button>
+          <button type="button" disabled={busy} onclick={() => repos.openInVSCode()}>Open in VS Code</button>
+        </div>
+      </div>
+    {/if}
+
     <div class="compose">
       <div class="message-field">
         <textarea
@@ -158,7 +183,7 @@
 
       <div class="buttons">
         <button class="primary" disabled={!canCommit} onclick={doCommit}>Commit</button>
-        <button disabled={!hasRepo || busy} onclick={doPush}>
+        <button disabled={!canPush} onclick={doPush}>
           {needsPublish ? 'Publish branch' : 'Push'}
         </button>
       </div>
@@ -174,7 +199,12 @@
       </button>
 
       {#if repos.writeError}
-        <p class="error selectable">{repos.writeError}</p>
+        <GitErrorNotice
+          error={repos.writeError}
+          onPull={doPull}
+          onOpenVSCode={() => repos.openInVSCode()}
+          onDismiss={() => (repos.writeError = null)}
+        />
       {/if}
     </div>
 
@@ -239,6 +269,43 @@
 </Pane>
 
 <style>
+  .conflict-banner {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
+    padding: var(--space-2) var(--space-3);
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-raised);
+  }
+
+  .conflict-banner p {
+    margin: 0;
+    min-width: 0;
+    font-size: var(--text-sm);
+    color: var(--status-conflict);
+  }
+
+  .conflict-actions {
+    display: flex;
+    flex: 0 0 auto;
+    gap: var(--space-2);
+  }
+
+  .conflict-actions button {
+    height: 22px;
+    padding: 0 var(--space-2);
+    font-size: var(--text-xs);
+    color: var(--text-primary);
+    background: var(--bg-hover);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+  }
+
+  .conflict-actions button:hover:not(:disabled) {
+    background: var(--bg-active);
+  }
+
   .compose {
     display: flex;
     flex-direction: column;
@@ -381,12 +448,6 @@
 
   .icon-action:disabled {
     color: var(--text-disabled);
-  }
-
-  .error {
-    margin: 0;
-    font-size: var(--text-sm);
-    color: var(--status-error);
   }
 
   .section {

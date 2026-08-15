@@ -64,6 +64,8 @@ interface RootView {
   errors: Record<string, string>;
   lastFetchAt: Record<string, number>;
   authNeeded: string[];
+  pins: string[];
+  lastSelected: string | null;
 }
 
 interface SweepEvent {
@@ -112,6 +114,18 @@ class RepoStore {
    *  auth problem (§8.7, §13) — the background sweep stops retrying these
    *  until a manual fetch. */
   authNeeded = $state<Set<string>>(new Set());
+  /** User-pinned repos (§5.1) — the hot set's other half is whichever repo
+   *  is selected (§6). Persisted server-side per root. */
+  pins = $state<Set<string>>(new Set());
+  /** Failures from a row-triggered write (Fetch or Pull from a row's context
+   *  menu / hover affordance) — keyed by repo id rather than the single
+   *  `writeError`, since the row that failed may not be selected (§5.1,
+   *  §13: "the row must be able to carry an error badge"). */
+  rowErrors = $state<Record<string, string>>({});
+  /** Whichever of `fetchRepo`/`pullRow` most recently failed for a repo, so
+   *  the row's error popover's "Retry" re-runs the operation that actually
+   *  failed rather than guessing. */
+  #rowRetry: Record<string, () => Promise<void>> = {};
 
   git = $state<GitInfo>({
     available: true,
@@ -149,6 +163,18 @@ class RepoStore {
   select(id: string): void {
     this.selected = new Set([id]);
     void this.loadFiles();
+    // Mirrored server-side for §9.5 persistence, the hot-set watchers (§6)
+    // and the native menu bar's Repository-menu enable/disable state.
+    void invoke('set_selected_repo', { repoId: id }).catch(() => {});
+  }
+
+  async togglePin(id: string): Promise<void> {
+    try {
+      const pins = await invoke<string[]>('toggle_pin', { repoId: id });
+      this.pins = new Set(pins);
+    } catch (err) {
+      console.warn('twogit: could not toggle pin', err);
+    }
   }
 
   status(id: string): RepoStatus | undefined {
@@ -226,6 +252,13 @@ class RepoStore {
     return this.write('publish_branch', {});
   }
 
+  /** §13's merge-conflict banner "Abort merge" — the selected repo only,
+   *  same as commit/push; the row-level conflict badge is driven purely by
+   *  status and needs no store method of its own. */
+  async mergeAbort(): Promise<boolean> {
+    return this.write('merge_abort', {});
+  }
+
   async commitAndPush(message: string): Promise<boolean> {
     return this.write('commit_and_push', { message });
   }
@@ -237,14 +270,59 @@ class RepoStore {
   }
 
   /** The dirty-tree checkout failure's other half (§8.3) — not routed through
-   *  `write()`, since it never mutates repo state and has nothing to refresh. */
-  async openInVSCode(): Promise<void> {
-    const id = this.selectedId;
-    if (!id) return;
+   *  `write()`, since it never mutates repo state and has nothing to refresh.
+   *  Defaults to the selected repo; the row context menu (§5.1) passes an
+   *  explicit id for a row that may not be selected. */
+  async openInVSCode(id?: string): Promise<void> {
+    const target = id ?? this.selectedId;
+    if (!target) return;
     try {
-      await invoke('open_in_vscode', { repoId: id });
+      await invoke('open_in_vscode', { repoId: target });
     } catch (err) {
       this.writeError = String(err);
+    }
+  }
+
+  /** Right-click → Open in Terminal (§5.1). Fire-and-forget, like
+   *  `openInVSCode` — nothing in twogit's own state changes because of it. */
+  async openInTerminal(id: string): Promise<void> {
+    try {
+      await invoke('open_in_terminal', { repoId: id });
+    } catch (err) {
+      console.warn('twogit: could not open a terminal', err);
+    }
+  }
+
+  /** Right-click → Fetch on a row that may not be the selected repo (§5.1).
+   *  Goes through the same write queue as every other write; failures land in
+   *  `rowErrors` rather than the compose pane's `writeError`, since the row
+   *  that failed is not necessarily the one currently shown there. */
+  async fetchRepo(id: string): Promise<void> {
+    await this.rowWrite(id, 'fetch_repo', () => this.fetchRepo(id));
+  }
+
+  /** Row-level Pull (§5.1) — the dashboard's whole thesis is acting without
+   *  navigating, so a behind row gets its own hover-revealed Pull rather than
+   *  forcing a select-then-cross-the-window trip. Same `rowErrors` reasoning
+   *  as `fetchRepo`. */
+  async pullRow(id: string): Promise<void> {
+    await this.rowWrite(id, 'pull_repo', () => this.pullRow(id));
+  }
+
+  /** The row error popover's "Retry" (§13's `index.lock` case) — re-runs
+   *  whichever of `fetchRepo`/`pullRow` most recently failed for this repo. */
+  async retryRow(id: string): Promise<void> {
+    await this.#rowRetry[id]?.();
+  }
+
+  private async rowWrite(id: string, command: string, retry: () => Promise<void>): Promise<void> {
+    delete this.rowErrors[id];
+    this.#rowRetry[id] = retry;
+    try {
+      await invoke(command, { repoId: id });
+      delete this.#rowRetry[id];
+    } catch (err) {
+      this.rowErrors = { ...this.rowErrors, [id]: String(err) };
     }
   }
 
@@ -346,7 +424,8 @@ class RepoStore {
 
   private applyRoot(view: RootView): void {
     // A selection is meaningless once the repo it names may be gone.
-    if (view.path !== this.root) {
+    const isNewRoot = view.path !== this.root;
+    if (isNewRoot) {
       this.selected = new Set();
       this.files = null;
       this.filesError = null;
@@ -357,6 +436,12 @@ class RepoStore {
     this.errors = view.errors;
     this.lastFetchAt = view.lastFetchAt;
     this.authNeeded = new Set(view.authNeeded);
+    this.pins = new Set(view.pins);
+
+    // Restores where a relaunch left off (§9.5) — only on a genuinely new
+    // root; a reload of the one already open must not fight the frontend's
+    // own in-memory selection.
+    if (isNewRoot && view.lastSelected) this.select(view.lastSelected);
   }
 
   private applySweep(event: SweepEvent): void {

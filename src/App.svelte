@@ -8,6 +8,7 @@
   import { repos } from './lib/repos.svelte';
   import { graph } from './lib/graph.svelte';
   import { settings, DEFAULT_PANE_WIDTHS } from './lib/settings.svelte';
+  import { paneVisibility, startMenuListener } from './lib/menu.svelte';
 
   // Minimum usable widths (SPEC.md §4). Below these the panes stop being
   // readable, so they win over the stored fractions.
@@ -29,8 +30,19 @@
   let container: HTMLElement | undefined = $state();
   let width = $state(0);
 
-  const usable = $derived(Math.max(1, width - DIVIDER * 2));
-  const px = $derived(resolve(usable, settings.paneWidths.left, settings.paneWidths.middle, infoWidth));
+  // View ▸ Toggle Repo List / Toggle Commit Pane (§4.1) — Rust owns the
+  // actual booleans (§9.3); a hidden pane and its divider are dropped from
+  // the layout entirely rather than squeezed to zero, so `usable` and
+  // `resolve()` only ever reserve space for panes that are actually shown.
+  const showLeft = $derived(paneVisibility.repoList);
+  const showMiddle = $derived(paneVisibility.commitPane);
+
+  const usable = $derived(
+    Math.max(1, width - (showLeft ? DIVIDER : 0) - (showMiddle ? DIVIDER : 0)),
+  );
+  const px = $derived(
+    resolve(usable, settings.paneWidths.left, settings.paneWidths.middle, infoWidth, showLeft, showMiddle),
+  );
 
   /**
    * Widths are stored as fractions so they survive window resizing, but they
@@ -38,18 +50,30 @@
    * honour both, the middle pane yields first, then the left. `reserved` is
    * the info panel's current width — left/middle keep their stored fractions
    * exactly (opening the panel must not itself resize them), but the excess
-   * check additionally protects the graph's minimum against it.
+   * check additionally protects the graph's minimum against it. A hidden pane
+   * contributes nothing and is never shrunk for one still visible.
    */
-  function resolve(total: number, leftFrac: number, middleFrac: number, reserved: number) {
-    let left = Math.max(MIN_LEFT, Math.round(total * leftFrac));
-    let middle = Math.max(MIN_MIDDLE, Math.round(total * middleFrac));
+  function resolve(
+    total: number,
+    leftFrac: number,
+    middleFrac: number,
+    reserved: number,
+    showLeft: boolean,
+    showMiddle: boolean,
+  ) {
+    let left = showLeft ? Math.max(MIN_LEFT, Math.round(total * leftFrac)) : 0;
+    let middle = showMiddle ? Math.max(MIN_MIDDLE, Math.round(total * middleFrac)) : 0;
 
     let excess = left + middle + MIN_GRAPH + reserved - total;
     if (excess > 0) {
-      const fromMiddle = Math.min(excess, middle - MIN_MIDDLE);
-      middle -= fromMiddle;
-      excess -= fromMiddle;
-      left -= Math.min(excess, left - MIN_LEFT);
+      if (showMiddle) {
+        const fromMiddle = Math.min(excess, middle - MIN_MIDDLE);
+        middle -= fromMiddle;
+        excess -= fromMiddle;
+      }
+      if (showLeft) {
+        left -= Math.min(excess, left - MIN_LEFT);
+      }
     }
     return { left, middle };
   }
@@ -83,6 +107,7 @@
   // the welcome screen reads the recent-roots list from them.
   void settings.load().then(() => repos.start());
   void graph.start();
+  void startMenuListener();
 </script>
 
 {#if !repos.ready}
@@ -95,24 +120,28 @@
   <main
     bind:this={container}
     bind:clientWidth={width}
-    style="--pane-left: {px.left}px; --pane-middle: {px.middle}px; --pane-info: {infoWidth}px; --divider: {DIVIDER}px"
+    style="--pane-left: {px.left}px; --divider-left: {showLeft ? DIVIDER : 0}px; --pane-middle: {px.middle}px; --divider-mid: {showMiddle ? DIVIDER : 0}px; --pane-info: {infoWidth}px"
   >
-    <RepoList />
-    <Divider
-      label="Resize repository list"
-      value={Math.round((px.left / usable) * 100)}
-      ondrag={dragLeft}
-      onrelease={() => void settings.flush()}
-      onreset={reset}
-    />
-    <CommitPane />
-    <Divider
-      label="Resize commit pane"
-      value={Math.round(((px.left + px.middle) / usable) * 100)}
-      ondrag={dragMiddle}
-      onrelease={() => void settings.flush()}
-      onreset={reset}
-    />
+    {#if showLeft}
+      <RepoList />
+      <Divider
+        label="Resize repository list"
+        value={Math.round((px.left / usable) * 100)}
+        ondrag={dragLeft}
+        onrelease={() => void settings.flush()}
+        onreset={reset}
+      />
+    {/if}
+    {#if showMiddle}
+      <CommitPane />
+      <Divider
+        label="Resize commit pane"
+        value={Math.round(((px.left + px.middle) / usable) * 100)}
+        ondrag={dragMiddle}
+        onrelease={() => void settings.flush()}
+        onreset={reset}
+      />
+    {/if}
     <GraphPane />
     {#if infoOpen}
       <CommitInfoPanel />
@@ -123,8 +152,8 @@
 <style>
   main {
     display: grid;
-    grid-template-columns: var(--pane-left) var(--divider) var(--pane-middle) var(--divider) 1fr var(--pane-info);
-    /* Only the info column's track actually changes at runtime (0 ↔ 320px);
+    grid-template-columns: var(--pane-left) var(--divider-left) var(--pane-middle) var(--divider-mid) 1fr var(--pane-info);
+    /* Only the info column's track reliably animates at runtime (0 ↔ 320px);
        the graph's `1fr` reflows for free as a side effect of that track
        changing, no JS width recalculation needed for it (§5.2 revised). */
     transition: grid-template-columns 180ms ease;

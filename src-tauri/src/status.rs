@@ -36,7 +36,7 @@ pub struct RepoStatus {
 pub async fn query(repo: &Path) -> Result<RepoStatus, String> {
     let output = git::read(repo, &["status", "--porcelain=v2", "--branch", "-z"]).await?;
     if !output.ok {
-        return Err(first_line(&output.stderr));
+        return Err(full_message(&output.stderr));
     }
     Ok(parse(&output.stdout))
 }
@@ -71,7 +71,7 @@ pub struct FileChanges {
 pub async fn query_files(repo: &Path) -> Result<FileChanges, String> {
     let output = git::read(repo, &["status", "--porcelain=v2", "-z"]).await?;
     if !output.ok {
-        return Err(first_line(&output.stderr));
+        return Err(full_message(&output.stderr));
     }
     Ok(parse_files(&output.stdout))
 }
@@ -141,13 +141,12 @@ fn capped(mut entries: Vec<FileEntry>) -> Vec<FileEntry> {
     entries
 }
 
-fn first_line(stderr: &str) -> String {
-    stderr
-        .lines()
-        .find(|line| !line.trim().is_empty())
-        .unwrap_or("git status failed")
-        .trim()
-        .to_string()
+/// The whole trimmed stderr, not just its first line — §13's "raw stderr
+/// always available in a collapsible Details" needs the whole thing; the
+/// frontend's `translateGitError` picks a plain-language headline out of it.
+fn full_message(stderr: &str) -> String {
+    let trimmed = stderr.trim();
+    if trimmed.is_empty() { "git status failed".to_string() } else { trimmed.to_string() }
 }
 
 /// Records are NUL-terminated rather than NUL-separated, so the final split

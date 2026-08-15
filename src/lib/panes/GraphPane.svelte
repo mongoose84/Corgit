@@ -3,6 +3,7 @@
   import GraphRow from './GraphRow.svelte';
   import EmptyState from '../EmptyState.svelte';
   import ContextMenu from '../ContextMenu.svelte';
+  import GitErrorNotice from '../GitErrorNotice.svelte';
   import { repos, isDirty } from '../repos.svelte';
   import { graph, type RefBadge } from '../graph.svelte';
   import { laneCount as computeLaneCount, laneColorVar, ROW_HEIGHT, LANE_WIDTH } from '../graphLayout';
@@ -93,13 +94,12 @@
     <div class="graph-body">
       {#if switchError}
         <div class="switch-error">
-          <p class="selectable">{switchError}</p>
-          <div class="switch-error-actions">
-            {#if switchErrorDirty}
-              <button type="button" onclick={() => repos.openInVSCode()}>Open in VS Code</button>
-            {/if}
-            <button type="button" onclick={() => (switchError = null)}>Dismiss</button>
-          </div>
+          <GitErrorNotice
+            error={switchError}
+            forceAction={switchErrorDirty ? 'open-vscode' : null}
+            onOpenVSCode={() => repos.openInVSCode()}
+            onDismiss={() => (switchError = null)}
+          />
         </div>
       {/if}
 
@@ -169,42 +169,10 @@
   }
 
   .switch-error {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: var(--space-2);
     flex: 0 0 auto;
     padding: var(--space-2) var(--space-3);
     border-bottom: 1px solid var(--border);
     background: var(--bg-raised);
-  }
-
-  .switch-error p {
-    margin: 0;
-    min-width: 0;
-    overflow: hidden;
-    font-size: var(--text-sm);
-    color: var(--status-error);
-  }
-
-  .switch-error-actions {
-    display: flex;
-    flex: 0 0 auto;
-    gap: var(--space-2);
-  }
-
-  .switch-error-actions button {
-    height: 22px;
-    padding: 0 var(--space-2);
-    font-size: var(--text-xs);
-    color: var(--text-primary);
-    background: var(--bg-hover);
-    border: 1px solid var(--border-strong);
-    border-radius: var(--radius-sm);
-  }
-
-  .switch-error-actions button:hover {
-    background: var(--bg-active);
   }
 
   .uncommitted {

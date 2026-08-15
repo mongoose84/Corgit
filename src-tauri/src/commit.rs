@@ -32,7 +32,7 @@ pub async fn unstage_all(repo: &Path) -> Result<(), String> {
 pub async fn commit(repo: &Path, message: &str) -> Result<(), String> {
     let output = git::write_stdin(repo, &["commit", "-F", "-"], message).await?;
     if !output.ok {
-        return Err(first_line(&output.stderr));
+        return Err(full_message(&output.stderr));
     }
     Ok(())
 }
@@ -56,16 +56,15 @@ async fn run_pathspec(
 async fn run(repo: &Path, args: &[&str]) -> Result<(), String> {
     let output = git::write(repo, args).await?;
     if !output.ok {
-        return Err(first_line(&output.stderr));
+        return Err(full_message(&output.stderr));
     }
     Ok(())
 }
 
-fn first_line(stderr: &str) -> String {
-    stderr
-        .lines()
-        .find(|line| !line.trim().is_empty())
-        .unwrap_or("git failed")
-        .trim()
-        .to_string()
+/// The whole trimmed stderr, not just its first line — §13's "raw stderr
+/// always available in a collapsible Details" needs the whole thing; the
+/// frontend's `translateGitError` picks a plain-language headline out of it.
+fn full_message(stderr: &str) -> String {
+    let trimmed = stderr.trim();
+    if trimmed.is_empty() { "git failed".to_string() } else { trimmed.to_string() }
 }
