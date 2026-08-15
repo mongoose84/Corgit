@@ -7,9 +7,21 @@ glance which ones need attention.
 Four verbs — fetch, pull, commit, push — plus staging and branch switching. Not a general
 git client. See **[SPEC.md](SPEC.md)** for the full design.
 
-**Status: build step 2 of 10** — welcome screen, *Open Folder…*, depth-1 discovery and a
-`status --porcelain=v2` sweep populating the repo list. The middle and right panes are
-still placeholders. Useful on its own: it answers "which of my repos need me?".
+![twogit's three panes: repositories, working tree, commit graph](docs/screenshots/twogit.png)
+
+Left: the hot set pinned above everything else, each row carrying its branch, one dirty
+dot and an ahead/behind badge. Middle: staged and unstaged files for the selected repo.
+Right: the graph, with the *Uncommitted Changes* node on top and the HEAD commit's row
+marked by a larger dot and a tint of its own lane colour.
+
+The screenshot is taken against a throwaway folder of repositories built by
+`bash scripts/make-demo-root.sh` — ahead, behind, dirty, a feature branch and one repo
+with no upstream — so it can be reproduced whenever the UI moves.
+
+**Status: build step 9 of 10.** Everything through branch switching and conflict detection
+works; the polish pass is landing (pins, filter, watchers on hot repos, context menus, error
+translation, the native menu bar). Multi-window, and shipping with auto-update, are what
+remain.
 
 ---
 
@@ -81,26 +93,48 @@ src/
   lib/
     settings.svelte.ts       settings mirror; Tauri IPC or localStorage
     repos.svelte.ts          repo/status mirror; fed by the sweep event
+    graph.svelte.ts          loaded commits, refs, graph selection
+    graphLayout.ts           lane assignment — in-house, never `log --graph`
+    gitErrors.ts             stderr → plain language (SPEC §13)
+    dateFormat.ts            fixed dd-MM-yyyy HH:mm:ss, never a locale format
+    menu.svelte.ts           native menu events → frontend actions
     tauri.ts                 are we running inside the desktop shell?
     Welcome.svelte           first run, missing root, or missing git
     Divider.svelte           draggable pane separator
+    ContextMenu.svelte       right-click menus
+    Popover.svelte           anchored overlay, used by row error badges
+    GitErrorNotice.svelte    a failure plus the one action that resolves it
     EmptyState.svelte
+    Mascot.svelte
     panes/
       Pane.svelte            shared header + scrolling body
-      RepoList.svelte        left    — filter, rows, sweep timing
-      RepoRow.svelte         name · branch · dirty dot · ahead/behind
-      CommitPane.svelte      middle  — steps 4 and 7
-      GraphPane.svelte       right   — step 6
+      RepoList.svelte        left    — filter, pinned/all sections, sweep timing
+      RepoRow.svelte         pin · name · branch · dirty dot · ahead/behind
+      CommitPane.svelte      middle  — message, staging, the four verbs
+      FileRow.svelte         status letter · path · stage/unstage on hover
+      GraphPane.svelte       right   — virtualization, branch switching
+      GraphRow.svelte        lanes · hash · subject · refs · author · date
+      CommitInfoPanel.svelte commit details for the selected commit
 src-tauri/
   src/
     main.rs                  desktop entry point
-    lib.rs                   app state, Tauri commands, the sweep
-    settings.rs              versioned, atomically-written settings
+    lib.rs                   app state, Tauri commands, the sweeps
+    settings.rs              versioned, atomically-written global settings
+    roots.rs                 per-root pins and last selection
+    cache.rs                 per-root status cache — a cache, never truth
     git.rs                   git resolution + the global 8-process semaphore
+    writequeue.rs            one write queue per repo (SPEC §7)
     discovery.rs             depth-1 scan of a root
     status.rs                porcelain=v2 parser
+    commit.rs                staging and commit
+    remote.rs                fetch, pull, push, publish
+    branch.rs                switching to a local or remote-tracking branch
+    graph.rs                 `git log` paging and the ref badges
+    watch.rs                 FS watchers on the hot set
+    menu.rs                  the native Windows menu bar
 scripts/
   make-icon.mjs              regenerates the placeholder icon source
+  make-demo-root.sh          throwaway repos to screenshot against
 ```
 
 ## Notes
@@ -116,6 +150,10 @@ scripts/
 - **Discovery is depth 1.** Direct children of the root only — one directory read plus an
   `exists()` per child, so it needs no progress UI (SPEC §8.1). The root itself counts too,
   so opening a single repository shows that repository rather than nothing.
+- **The hot set is the FS-watch budget.** Pinned repos plus the selected one get watchers on
+  `.git/HEAD`, `.git/refs` and `.git/index`; every other repo waits for the 60 s sweep. So
+  pinning is a latency decision as much as a layout one, which is why it costs one click on
+  the row rather than a trip through a context menu (SPEC §5.1, §6).
 - **First paint never waits on git.** `open_root` returns the discovered list immediately
   and the status sweep fills the rows in afterwards, over one batched event.
 - **Concurrency is capped globally at 8 git processes**, by a static semaphore in `git.rs`

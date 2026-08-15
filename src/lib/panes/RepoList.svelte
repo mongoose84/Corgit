@@ -65,7 +65,19 @@
     <EmptyState message="No matches" hint="Filter matches repository names only" />
   {:else}
     {#if pinned.length > 0}
-      <div class="section-header">Pinned ({pinned.length})</div>
+      <div class="section-header">
+        <span>Pinned ({pinned.length})</span>
+        <!-- Emptying the hot set in one click matters as much as filling it:
+             the set is meant to track what you are working on this week, and
+             a set that is tedious to clear stops tracking anything. -->
+        {#if filter.trim() === ''}
+          <!-- Hidden while filtering: the section then shows a subset, and a
+               button that quietly unpins repos the user cannot see is a trap. -->
+          <button type="button" class="clear" onclick={() => void repos.clearPins()}>
+            Unpin all
+          </button>
+        {/if}
+      </div>
       <ul>
         {#each pinned as repo (repo.id)}
           <li>
@@ -156,11 +168,39 @@
   }
 
   .section-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
     padding: var(--space-2) var(--space-3) var(--space-1);
     font-size: var(--text-xs);
     font-weight: 600;
     letter-spacing: 0.06em;
     text-transform: uppercase;
     color: var(--text-muted);
+  }
+
+  .clear {
+    padding: 0;
+    border: 0;
+    background: none;
+    font-size: var(--text-xs);
+    letter-spacing: 0.04em;
+    color: var(--text-disabled);
+    cursor: default;
+    /* Transparent rather than hidden, so it stays reachable by keyboard. */
+    opacity: 0;
+  }
+
+  /* Revealed with the section, not the individual row — it acts on the whole
+     set, so hovering any part of that set is the right trigger. */
+  .section-header:hover .clear,
+  .clear:focus-visible {
+    opacity: 1;
+  }
+
+  .clear:hover {
+    color: var(--text-primary);
+    text-decoration: underline;
   }
 </style>

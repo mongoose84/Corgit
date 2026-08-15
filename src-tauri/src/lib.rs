@@ -537,6 +537,26 @@ fn toggle_pin(repo_id: String, app: AppHandle) -> Result<HashSet<String>, String
     Ok(pins)
 }
 
+/// Unpin everything in one go (§5.1). A loop of `toggle_pin` from the
+/// frontend would do the same thing, but it would write `roots/<hash>.json`
+/// and resync the watchers once per pin — this is one write and one resync,
+/// and it cannot leave a half-cleared set behind if a call in the middle
+/// fails.
+#[tauri::command]
+fn clear_pins(app: AppHandle) -> Result<HashSet<String>, String> {
+    let state = app.state::<AppState>();
+    let (root_path, selected) = {
+        let mut current = state.root.lock().expect("root mutex poisoned");
+        let root = current.as_mut().ok_or_else(|| "No folder is open".to_string())?;
+        root.pins.clear();
+        (root.path.clone(), root.selected.clone())
+    };
+
+    persist_root_settings(&app, &root_path, HashSet::new(), selected);
+    sync_hot_watchers(&app);
+    Ok(HashSet::new())
+}
+
 /// The frontend's current selection, mirrored server-side (§9.5's persisted
 /// `last_selected`, and the input to the hot set in §6/build step 9's
 /// watchers plus the Repository menu's enabled state in the native menu bar).
@@ -1311,6 +1331,7 @@ pub fn run() {
             open_in_vscode,
             open_in_terminal,
             toggle_pin,
+            clear_pins,
             set_selected_repo,
         ])
         .run(tauri::generate_context!())

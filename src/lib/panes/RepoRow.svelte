@@ -43,6 +43,15 @@
     errorPopoverPos = { x: event.clientX, y: event.clientY };
   }
 
+  function togglePin(event: MouseEvent) {
+    // The pin lives inside the row's click target, and clicking it must not
+    // also select the repo — pinning a repo you are not working in right now
+    // is a perfectly ordinary thing to do.
+    event.preventDefault();
+    event.stopPropagation();
+    void repos.togglePin(repo.id);
+  }
+
   async function pullRow(event: MouseEvent) {
     event.preventDefault();
     event.stopPropagation();
@@ -73,6 +82,26 @@
   onclick={() => repos.select(repo.id)}
   oncontextmenu={openMenu}
 >
+  <!-- The hot set is only worth having if putting a repo in it costs one
+       click (§5.1), so the pin is on the row, not only in the context menu.
+       The gutter is always reserved — revealing it on hover must not shuffle
+       the names sideways. -->
+  <!-- svelte-ignore a11y_click_events_have_key_events -->
+  <span
+    role="button"
+    tabindex="-1"
+    class="pin"
+    class:pinned
+    aria-pressed={pinned}
+    title={pinned ? 'Unpin' : 'Pin to the top'}
+    aria-label={pinned ? `Unpin ${repo.name}` : `Pin ${repo.name}`}
+    onclick={togglePin}
+  >
+    <svg viewBox="0 0 12 12" aria-hidden="true" focusable="false">
+      <path d="M4 1h4v1l-1 1v2.5l2 1.5v1H6.5V11h-1V8H3V7l2-1.5V3L4 2z" />
+    </svg>
+  </span>
+
   <span class="name">{repo.name}</span>
 
   <span class="meta">
@@ -150,7 +179,7 @@
     gap: var(--space-2);
     width: 100%;
     height: var(--row-height);
-    padding: 0 var(--space-3);
+    padding: 0 var(--space-3) 0 var(--space-1);
     border: 0;
     background: none;
     text-align: left;
@@ -165,6 +194,44 @@
      it or the list stops being scannable, which is the point of this pane. */
   .row.selected {
     background: var(--accent-muted);
+  }
+
+  /* Reserved on every row, drawn only when the repo is pinned or the row is
+     hovered — `visibility` rather than `display` so the names stay aligned. */
+  .pin {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+    width: 18px;
+    height: 18px;
+    border-radius: var(--radius-sm);
+    visibility: hidden;
+    color: var(--text-disabled);
+  }
+
+  .pin svg {
+    width: 11px;
+    height: 11px;
+    fill: currentColor;
+  }
+
+  .row:hover .pin,
+  .row:focus-visible .pin,
+  .pin.pinned {
+    visibility: visible;
+  }
+
+  /* Pinned reads as an established state, not an available action — hence
+     the step up in contrast rather than the accent, which §11 reserves for
+     selection and primary buttons. */
+  .pin.pinned {
+    color: var(--text-secondary);
+  }
+
+  .pin:hover {
+    background: var(--bg-active);
+    color: var(--text-primary);
   }
 
   .name {

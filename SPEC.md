@@ -144,8 +144,13 @@ Menu events arrive on the Rust side and are dispatched to the window that raised
 
 Two sections, each alphabetical:
 
-- **Pinned** — the hot set. User-controlled via right-click → Pin. This is also the FS-watch
-  budget (§6).
+- **Pinned** — the hot set. This is also the FS-watch budget (§6). Every row carries a pin
+  toggle in a reserved leading gutter, hover-revealed on unpinned rows and always drawn on
+  pinned ones — the set only earns its keep if putting a repo in it costs one click, and a
+  right-click-only affordance is not discoverable. Clicking the pin must not also select
+  the repo. The *Pinned* header carries a hover-revealed **Unpin all**, hidden while the
+  filter box is non-empty so it can never unpin repos the user cannot currently see.
+  Right-click → Pin/Unpin stays as a second route.
 - **All** — everything else.
 
 A **filter box** sits between them. Typing filters both sections by substring on **repo name
@@ -235,6 +240,12 @@ Selected repo only — one repo at a time, so graph cost never multiplies by 77.
   coherent surface.
 - Rows: graph lanes · hash (short) · message · author · date · ref badges (branches, tags,
   `origin/*`).
+- **The HEAD commit's row is marked.** Its dot is drawn larger with a halo, and the row
+  carries a low-alpha tint of its own lane colour. Both are keyed off `branch.oid` from
+  §8.2 rather than off the current branch's ref badge, so a detached HEAD — the state where
+  "which commit am I on" is hardest to answer — still marks the right row. The tint is not
+  the accent (§11 rule 3) and is declared so that hover and selection both override it:
+  being on HEAD is a standing fact about the row, not a transient state.
 - **Date format is `dd-MM-yyyy HH:mm:ss`**, always absolute, never relative, rendered in
   **local time** from `%ct` (a Unix timestamp). Use a fixed format string — never a
   locale-dependent formatter, or the column shifts with machine settings. The column is

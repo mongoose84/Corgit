@@ -146,6 +146,7 @@
                   refs={graph.refsByHash.get(row.commit.hash) ?? []}
                   selected={graph.selection === row.commit.hash}
                   currentBranch={status?.branch ?? null}
+                  headHash={status?.head ?? null}
                   onSelect={() => graph.select(row.commit.hash)}
                   onSwitchBranch={switchTo}
                   onContextMenu={openMenu}

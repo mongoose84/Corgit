@@ -177,6 +177,17 @@ class RepoStore {
     }
   }
 
+  /** Empty the hot set (§5.1) — one backend call rather than a loop of
+   *  `togglePin`, so it is one file write and one watcher resync. */
+  async clearPins(): Promise<void> {
+    try {
+      const pins = await invoke<string[]>('clear_pins');
+      this.pins = new Set(pins);
+    } catch (err) {
+      console.warn('twogit: could not clear pins', err);
+    }
+  }
+
   status(id: string): RepoStatus | undefined {
     return this.statuses[id];
   }

@@ -13,6 +13,9 @@
      *  local badge matching it renders bolder and bigger so HEAD reads at a
      *  glance instead of blending into the rest of the row's badges. */
     currentBranch: string | null;
+    /** Short oid of the commit HEAD points at (§8.2's `branch.oid`), `null` in
+     *  a repo with no commits — the row it names is drawn as "you are here". */
+    headHash: string | null;
     onSelect: () => void;
     /** Double-clicking a ref badge (§8.3, §8.4) — checks out that exact
      *  branch directly, skipping any dropdown. */
@@ -22,7 +25,8 @@
     onContextMenu: (event: MouseEvent, refs: RefBadge[]) => void;
   }
 
-  let { row, laneCount, refs, selected, currentBranch, onSelect, onSwitchBranch, onContextMenu }: Props = $props();
+  let { row, laneCount, refs, selected, currentBranch, headHash, onSelect, onSwitchBranch, onContextMenu }: Props =
+    $props();
 
   const cx = (lane: number) => lane * LANE_WIDTH + LANE_WIDTH / 2;
   const cy = ROW_HEIGHT / 2;
@@ -31,6 +35,20 @@
   const date = $derived(formatCommitDate(row.commit.timestamp));
 
   const isCurrent = (ref: RefBadge) => ref.kind === 'local' && ref.name === currentBranch;
+
+  // Matched on the hash rather than on the current branch's ref badge: a
+  // detached HEAD has no branch to match, and it is exactly the state where
+  // "which commit am I on" is hardest to answer from the graph alone.
+  const isHead = $derived(headHash !== null && row.commit.hash.startsWith(headHash));
+
+  // Same lane hue as the dot and the current-branch badge, at low alpha — a
+  // tint, not a second selection colour, which §11 reserves for --accent. Set
+  // as a custom property rather than `background` directly so hover and
+  // selection still win through the normal cascade instead of losing to an
+  // inline style.
+  const headTint = $derived(
+    `--head-tint: color-mix(in srgb, ${laneColorVar(row.lane)} 12%, transparent);`,
+  );
 
   // Ties the badge to the exact dot it names, rather than inventing a ninth
   // hue: same `laneColorVar` the row's own circle/lines already use (§11 —
@@ -54,6 +72,8 @@
   type="button"
   class="graph-row"
   class:selected
+  class:head={isHead}
+  style={isHead ? headTint : undefined}
   onclick={onSelect}
   oncontextmenu={(event) => onContextMenu(event, refs)}
   title={row.commit.subject}
@@ -76,7 +96,13 @@
       <line x1={cx(row.lane)} y1={cy} x2={cx(row.lane)} y2={ROW_HEIGHT} stroke={laneColorVar(row.lane)} />
     {/if}
 
-    <circle cx={cx(row.lane)} cy={cy} r="4" fill={laneColorVar(row.lane)} />
+    {#if isHead}
+      <!-- A halo the lane is wide enough to hold (16 px), so the HEAD dot
+           reads as bigger from across the pane without colliding with its
+           neighbours or with the lines crossing the row. -->
+      <circle cx={cx(row.lane)} cy={cy} r="7.5" fill={laneColorVar(row.lane)} opacity="0.25" />
+    {/if}
+    <circle cx={cx(row.lane)} cy={cy} r={isHead ? 5.5 : 4} fill={laneColorVar(row.lane)} />
   </svg>
 
   <span class="hash">{shortHash}</span>
@@ -108,6 +134,12 @@
     background: none;
     text-align: left;
     cursor: default;
+  }
+
+  /* Declared before hover and selection so both still override it — being on
+     HEAD is a standing fact about the row, not a transient state. */
+  .graph-row.head {
+    background: var(--head-tint);
   }
 
   .graph-row:hover {
