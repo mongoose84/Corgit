@@ -2,6 +2,7 @@
   import Pane from './Pane.svelte';
   import GraphRow from './GraphRow.svelte';
   import EmptyState from '../EmptyState.svelte';
+  import Mascot from '../Mascot.svelte';
   import ContextMenu from '../ContextMenu.svelte';
   import GitErrorNotice from '../GitErrorNotice.svelte';
   import { repos, isDirty } from '../repos.svelte';
@@ -82,7 +83,13 @@
 
 <Pane title="Graph">
   {#if !hasRepo}
-    <EmptyState message="No repository selected" hint="Select a repository to see its history" />
+    <!-- The one place the mascot appears. The commit pane sits empty at the
+         same moment, and two of him on screen at once stops being charming. -->
+    <EmptyState message="No repository selected" hint="Select a repository to see its history">
+      {#snippet art()}
+        <Mascot />
+      {/snippet}
+    </EmptyState>
   {:else if graph.loading && graph.rows.length === 0}
     <EmptyState message="Reading history…" />
   {:else if graph.error}

@@ -153,6 +153,14 @@
   main {
     display: grid;
     grid-template-columns: var(--pane-left) var(--divider-left) var(--pane-middle) var(--divider-mid) 1fr var(--pane-info);
+    /* The single row must be pinned to the container's height. Left implicit
+       it sizes to `auto`, whose max-content contribution is the tallest pane's
+       full content height — so with 69 repositories the row became 9094px in
+       an 870px window, every `.pane { height: 100% }` resolved against *that*,
+       and the panes' own `overflow-y: auto` had nothing left to scroll.
+       `minmax(0, 1fr)` refuses to grow past the container, which is what gives
+       the panes a bounded height to scroll within. */
+    grid-template-rows: minmax(0, 1fr);
     /* Only the info column's track reliably animates at runtime (0 ↔ 320px);
        the graph's `1fr` reflows for free as a side effect of that track
        changing, no JS width recalculation needed for it (§5.2 revised). */
