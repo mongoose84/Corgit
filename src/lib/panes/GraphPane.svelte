@@ -2,8 +2,9 @@
   import Pane from './Pane.svelte';
   import GraphRow from './GraphRow.svelte';
   import EmptyState from '../EmptyState.svelte';
+  import ContextMenu from '../ContextMenu.svelte';
   import { repos, isDirty } from '../repos.svelte';
-  import { graph } from '../graph.svelte';
+  import { graph, type RefBadge } from '../graph.svelte';
   import { laneCount as computeLaneCount, laneColorVar, ROW_HEIGHT, LANE_WIDTH } from '../graphLayout';
 
   // Commit selection drives the middle pane's Mode B in build step 7 (§5.2);
@@ -39,6 +40,43 @@
   function onScroll() {
     if (scrollEl) scrollTop = scrollEl.scrollTop;
   }
+
+  // Branch switching (§8.3, §8.4, build step 8) — double-click a ref badge
+  // or pick one from a row's right-click menu; both funnel through here.
+  let switching = $state(false);
+  let switchError = $state<string | null>(null);
+  // Only true alongside `switchError` when the tree was dirty at the moment
+  // of failure — the one case §8.3 says to offer *Open in VS Code* for.
+  // Never force-checkout, ever, so there is no other action to offer here.
+  let switchErrorDirty = $state(false);
+
+  let menu = $state<{ x: number; y: number; refs: RefBadge[] } | null>(null);
+
+  async function switchTo(ref: RefBadge) {
+    if (switching) return;
+    switching = true;
+    switchError = null;
+    switchErrorDirty = false;
+    const ok = await repos.switchBranch(ref.name, ref.kind);
+    if (!ok) {
+      switchError = repos.writeError;
+      switchErrorDirty = dirty;
+    }
+    switching = false;
+  }
+
+  function openMenu(event: MouseEvent, refs: RefBadge[]) {
+    if (refs.length === 0) return;
+    event.preventDefault();
+    menu = { x: event.clientX, y: event.clientY, refs };
+  }
+
+  function menuItems(refs: RefBadge[]) {
+    return refs.map((ref) => ({
+      label: ref.kind === 'local' ? `Switch to ${ref.name}` : `Switch to ${ref.name} (new local branch)`,
+      onSelect: () => switchTo(ref),
+    }));
+  }
 </script>
 
 <Pane title="Graph">
@@ -53,6 +91,18 @@
          gets a definite height to virtualize against regardless of whether
          the Uncommitted Changes node is showing above it. -->
     <div class="graph-body">
+      {#if switchError}
+        <div class="switch-error">
+          <p class="selectable">{switchError}</p>
+          <div class="switch-error-actions">
+            {#if switchErrorDirty}
+              <button type="button" onclick={() => repos.openInVSCode()}>Open in VS Code</button>
+            {/if}
+            <button type="button" onclick={() => (switchError = null)}>Dismiss</button>
+          </div>
+        </div>
+      {/if}
+
       {#if dirty}
         <button
           type="button"
@@ -88,7 +138,10 @@
                   laneCount={lanes}
                   refs={graph.refsByHash.get(row.commit.hash) ?? []}
                   selected={graph.selection === row.commit.hash}
+                  currentBranch={status?.branch ?? null}
                   onSelect={() => graph.select(row.commit.hash)}
+                  onSwitchBranch={switchTo}
+                  onContextMenu={openMenu}
                 />
               {/each}
             </div>
@@ -104,11 +157,54 @@
   {/if}
 </Pane>
 
+{#if menu}
+  <ContextMenu x={menu.x} y={menu.y} items={menuItems(menu.refs)} onClose={() => (menu = null)} />
+{/if}
+
 <style>
   .graph-body {
     display: flex;
     flex-direction: column;
     height: 100%;
+  }
+
+  .switch-error {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
+    flex: 0 0 auto;
+    padding: var(--space-2) var(--space-3);
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-raised);
+  }
+
+  .switch-error p {
+    margin: 0;
+    min-width: 0;
+    overflow: hidden;
+    font-size: var(--text-sm);
+    color: var(--status-error);
+  }
+
+  .switch-error-actions {
+    display: flex;
+    flex: 0 0 auto;
+    gap: var(--space-2);
+  }
+
+  .switch-error-actions button {
+    height: 22px;
+    padding: 0 var(--space-2);
+    font-size: var(--text-xs);
+    color: var(--text-primary);
+    background: var(--bg-hover);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+  }
+
+  .switch-error-actions button:hover {
+    background: var(--bg-active);
   }
 
   .uncommitted {

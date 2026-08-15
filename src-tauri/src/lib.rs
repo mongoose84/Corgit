@@ -1,3 +1,4 @@
+mod branch;
 mod cache;
 mod commit;
 mod discovery;
@@ -360,6 +361,55 @@ async fn commit_details(repo_id: String, hash: String, app: AppHandle) -> Result
     let path = repo_path(&app, &repo_id)?;
     let _read_guard = app.state::<AppState>().write_queues.read(&repo_id).await;
     graph::details(&path, &hash).await
+}
+
+/// Branch switching (§8.3, §8.4 badges — build step 8): the graph shows every
+/// ref, so unlike the switcher (deferred), this takes whichever badge the
+/// user double-clicked or picked from its context menu and dispatches on its
+/// kind. A dirty-tree failure lands here the same as any other — the frontend
+/// already knows the selected repo's dirty state from its status and decides
+/// whether to offer *Open in VS Code* from that, rather than this command
+/// trying to classify git's stderr (§8.3: never force-checkout).
+#[tauri::command]
+async fn switch_branch(repo_id: String, name: String, kind: graph::RefKind, app: AppHandle) -> Result<(), String> {
+    write_and_refresh(&app, repo_id, |path| async move {
+        match kind {
+            graph::RefKind::Local => branch::switch_local(&path, &name).await,
+            graph::RefKind::Remote => branch::switch_remote_tracking(&path, &name).await,
+        }
+    })
+    .await
+}
+
+/// The dirty-tree checkout failure's other half (§8.3): launches VS Code on
+/// the repo so the user can resolve things by hand. Fire-and-forget — nothing
+/// in twogit's own state changes because of it.
+#[tauri::command]
+async fn open_in_vscode(repo_id: String, app: AppHandle) -> Result<(), String> {
+    let path = repo_path(&app, &repo_id)?;
+
+    // VS Code's Windows launcher is a `.cmd` shim; `Command::new("code")` alone
+    // does not resolve it (Windows does not walk PATHEXT for a bare child
+    // process the way a shell does), so it has to run through one.
+    let mut command = if cfg!(windows) {
+        let mut command = tokio::process::Command::new("cmd");
+        command.args(["/C", "code"]);
+        command
+    } else {
+        tokio::process::Command::new("code")
+    };
+    command.arg(&path);
+
+    #[cfg(windows)]
+    {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    command
+        .spawn()
+        .map_err(|err| format!("could not launch VS Code: {err}"))?;
+    Ok(())
 }
 
 /// A manual, user-triggered fetch — allowed to prompt interactively, unlike
@@ -1051,6 +1101,8 @@ pub fn run() {
             push_repo,
             publish_branch,
             commit_and_push,
+            switch_branch,
+            open_in_vscode,
         ])
         .run(tauri::generate_context!())
         .expect("twogit: fatal error while running the application");

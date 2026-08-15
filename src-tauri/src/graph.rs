@@ -92,7 +92,7 @@ fn parse_commit(record: &str) -> Option<Commit> {
     Some(Commit { hash, parents, timestamp, author, subject })
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum RefKind {
     Local,

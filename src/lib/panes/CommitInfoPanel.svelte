@@ -2,8 +2,10 @@
   import Pane from './Pane.svelte';
   import FileRow from './FileRow.svelte';
   import EmptyState from '../EmptyState.svelte';
-  import { graph } from '../graph.svelte';
+  import { graph, type RefBadge } from '../graph.svelte';
+  import { repos } from '../repos.svelte';
   import { formatCommitDate } from '../dateFormat';
+  import { laneColorVar } from '../graphLayout';
 
   // A fourth column, not a mode of CommitPane (SPEC.md §5.2 revised): opens
   // beside the graph when a commit is selected, closes back to nothing
@@ -15,6 +17,23 @@
   // The same ref badges a graph row shows (§5.3) — reused as-is rather than
   // fetched again, since `graph.refs` already covers the whole loaded page.
   const badges = $derived(details ? (graph.refsByHash.get(details.hash) ?? []) : []);
+  // Grouped rather than one flat wrapped row (§8.3's Local/Remote split,
+  // pulled forward here too) — a commit several branches converge on reads
+  // as two short lists instead of a jumble once there are more than a couple.
+  const localBadges = $derived(badges.filter((ref) => ref.kind === 'local'));
+  const remoteBadges = $derived(badges.filter((ref) => ref.kind === 'remote'));
+  // Same "which one is HEAD" emphasis a graph row gives its badges (§8.3).
+  const currentBranch = $derived(graph.repoId ? (repos.status(graph.repoId)?.branch ?? null) : null);
+  const isCurrent = (ref: RefBadge) => ref.kind === 'local' && ref.name === currentBranch;
+  // The commit's own lane in the graph (GraphRow.svelte's `currentBadgeStyle`
+  // twin) — this panel never lays out lanes itself, but the selected commit
+  // is always one of the currently rendered rows, so the lookup always hits.
+  const currentLane = $derived(details ? (graph.rows.find((row) => row.commit.hash === details.hash)?.lane ?? 0) : 0);
+
+  function currentBadgeStyle(lane: number): string {
+    const color = laneColorVar(lane);
+    return `color: ${color}; border-color: ${color}; background: color-mix(in srgb, ${color} 22%, var(--bg-raised));`;
+  }
 
   function close() {
     graph.select('working-tree');
@@ -35,11 +54,32 @@
       <span class="hash">{details.hash.slice(0, 7)}</span>
       <span class="subject">{subject}</span>
     </div>
-    {#if badges.length > 0}
-      <div class="refs">
-        {#each badges as ref (ref.kind + ref.name)}
-          <span class="ref ref-{ref.kind}">{ref.name}</span>
-        {/each}
+    {#if localBadges.length > 0 || remoteBadges.length > 0}
+      <div class="ref-groups">
+        {#if localBadges.length > 0}
+          <div class="ref-group">
+            <span class="ref-group-label">Local</span>
+            <div class="refs">
+              {#each localBadges as ref (ref.name)}
+                <span
+                  class="ref ref-local"
+                  class:current={isCurrent(ref)}
+                  style={isCurrent(ref) ? currentBadgeStyle(currentLane) : undefined}
+                >{ref.name}</span>
+              {/each}
+            </div>
+          </div>
+        {/if}
+        {#if remoteBadges.length > 0}
+          <div class="ref-group">
+            <span class="ref-group-label">Remote</span>
+            <div class="refs">
+              {#each remoteBadges as ref (ref.name)}
+                <span class="ref ref-remote">{ref.name}</span>
+              {/each}
+            </div>
+          </div>
+        {/if}
       </div>
     {/if}
     <p class="commit-meta">{details.author} · {formatCommitDate(details.timestamp)}</p>
@@ -114,11 +154,33 @@
     color: var(--text-primary);
   }
 
+  .ref-groups {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+    margin: var(--space-2) var(--space-3) 0;
+  }
+
+  .ref-group {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+
+  /* Same treatment as `.section-title` below — kept smaller and without its
+     own row, since a group of badges is lighter-weight than a Files section. */
+  .ref-group-label {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+  }
+
   .refs {
     display: flex;
     flex-wrap: wrap;
     gap: var(--space-1);
-    margin: var(--space-2) var(--space-3) 0;
   }
 
   /* Same badge look as a graph row's (GraphRow.svelte's `.ref`) — this panel
@@ -146,6 +208,14 @@
   .ref-remote {
     color: var(--text-muted);
     font-style: italic;
+  }
+
+  /* Matches GraphRow.svelte's `.ref.current` — same badge, same emphasis.
+     Colour comes from the inline style (`currentBadgeStyle`), not here. */
+  .ref.current {
+    padding: 2px var(--space-2);
+    font-size: var(--text-sm);
+    font-weight: 700;
   }
 
   .commit-meta {

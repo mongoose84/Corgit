@@ -230,6 +230,24 @@ class RepoStore {
     return this.write('commit_and_push', { message });
   }
 
+  /** Branch switching from the graph (§8.3, §8.4) — `kind` mirrors the ref
+   *  badge that was double-clicked or picked from its context menu. */
+  async switchBranch(name: string, kind: 'local' | 'remote'): Promise<boolean> {
+    return this.write('switch_branch', { name, kind });
+  }
+
+  /** The dirty-tree checkout failure's other half (§8.3) — not routed through
+   *  `write()`, since it never mutates repo state and has nothing to refresh. */
+  async openInVSCode(): Promise<void> {
+    const id = this.selectedId;
+    if (!id) return;
+    try {
+      await invoke('open_in_vscode', { repoId: id });
+    } catch (err) {
+      this.writeError = String(err);
+    }
+  }
+
   /** Every mutating command shares this shape: resolve the selected repo,
    *  invoke, refresh the file list, surface a failure in `writeError`. The
    *  row/status side updates itself via the `status:repo` event (§7). Returns
