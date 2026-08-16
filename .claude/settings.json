@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-settings.json",
+  "permissions": {
+    "allow": [
+      "Bash(npm run check:*)",
+      "Bash(npm run build:*)",
+      "Bash(npm test:*)",
+      "Bash(npm ci:*)",
+      "Bash(npm install:*)",
+      "Bash(npx vitest:*)",
+      "Bash(npx svelte-check:*)",
+      "Bash(npx vite build:*)",
+      "Bash(cargo test:*)",
+      "Bash(cargo clippy:*)",
+      "Bash(cargo check:*)",
+      "Bash(cargo build:*)",
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git show:*)",
+      "Bash(git branch:*)",
+      "Bash(git ls-files:*)",
+      "Bash(git for-each-ref:*)",
+      "Bash(git rev-parse:*)",
+      "Bash(git check-ignore:*)",
+      "Bash(bash scripts/make-demo-root.sh:*)",
+      "Bash(python scripts/extract-mascot.py:*)",
+      "PowerShell(cargo test:*)",
+      "PowerShell(cargo clippy:*)",
+      "PowerShell(cargo check:*)",
+      "PowerShell(cargo build:*)",
+      "PowerShell(npm run:*)",
+      "PowerShell(rustc:*)",
+      "PowerShell(rustup:*)"
+    ],
+    "deny": [
+      "Bash(cargo fmt:*)",
+      "PowerShell(cargo fmt:*)"
+    ]
+  }
+}

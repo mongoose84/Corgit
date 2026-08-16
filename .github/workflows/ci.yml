@@ -66,9 +66,18 @@ jobs:
 
       # Rust builds here are minutes, not seconds; the cache is what keeps this
       # job usable as a PR gate. Keyed on the manifests under src-tauri.
+      #
+      # Measured on this tree (506 crates): cold ~3 min, warm ~25 s. The cache
+      # is not one optimisation among several — it is the only one that matters,
+      # and everything below is about making sure it actually gets hit.
+      #
+      # `cache-on-failure` because the default drops the cache when the job goes
+      # red: a PR with one clippy warning would then pay the full cold build on
+      # every push while fixing it, which is exactly when fast feedback counts.
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+          cache-on-failure: true
 
       # `-D warnings` is deliberate: clippy is only a gate if a warning fails
       # the build. The one lint this codebase disagrees with is silenced at its
@@ -92,3 +101,19 @@ jobs:
   #
   # `tauri build`: produces an NSIS installer and takes ~10 min. It belongs in
   # a release workflow (§12, build step 10), not on every pull request.
+  #
+  # Two plausible speed-ups for the backend job, both measured on a cold tree
+  # and both rejected — recorded so they do not get re-proposed:
+  #
+  #   `CARGO_PROFILE_DEV_DEBUG=0`: 3m08 against 2m51 for the default. Dropping
+  #   debug info does not pay for itself here; it is slightly *worse*, and it
+  #   costs readable backtraces on a test failure.
+  #
+  #   `crate-type = ["rlib"]` (dropping staticlib/cdylib, which `cargo test`
+  #   links but never loads): 2m37 against 2m51 — around 8%. Real, but it is a
+  #   change to what the crate ships in order to speed up CI, which is the
+  #   wrong way round for 14 seconds on a job that should be warm anyway.
+  #
+  # Splitting clippy and tests into parallel jobs is also a false economy: warm
+  # they are 4 s and 20 s, so there is nothing to overlap, and cold it doubles
+  # the billed Windows minutes to save part of one build.
