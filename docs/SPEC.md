@@ -575,8 +575,32 @@ git commit -F -            # message via stdin, avoids arg-escaping pain
 git fetch --prune --no-tags --quiet
 git pull --no-rebase              # explicit: user config may set pull.rebase=true
 git push
-git push -u origin <branch>       # "Publish branch" — no upstream configured
+git push -u origin HEAD           # "Publish branch" — see below
 ```
+
+`HEAD`, never the branch's name: a name can only come from cached status, and `git push
+origin <name>` resolves the *local ref of that name* rather than what is checked out, so a
+cache that had not caught up with an external `git switch` would push some other branch
+while reporting success. `HEAD` is whatever git sees at the moment it runs.
+
+**Publish is offered in two states, not one** (`needsPublish`):
+
+1. **No upstream configured** — the obvious case.
+2. **An upstream whose branch name differs from the local branch's** — `feature-x`
+   tracking `origin/main`. Under git's default `push.default = simple` a bare `git push`
+   refuses outright, so Push is the one button guaranteed to fail, while publish both
+   succeeds and re-points the upstream at the matching remote branch.
+
+The second case is not hypothetical: Corgit created it itself until `branch.rs` grew
+`--no-track`. Git's `branch.autoSetupMerge` defaults to `true`, so `git switch -c <name>
+origin/main` silently sets the new branch's upstream to `origin/main` — and no later fix
+repairs a branch that already has it, only a publish does. Note the failure was safe only
+by luck of the default: under `push.default = upstream` that same Push would have pushed a
+feature branch onto `main`.
+
+The accepted cost is that a *deliberately* mismatched upstream — local `feature` tracking
+`origin/jk/feature` — is re-pointed by the next publish. A four-verb dashboard is better
+off tidying an unusual config than offering a button that cannot work.
 
 **Background fetch must never block on a prompt:**
 

@@ -102,16 +102,54 @@ export function isDirty(status: RepoStatus): boolean {
   return status.staged + status.unstaged + status.untracked + status.conflicted > 0;
 }
 
-/** A branch git has no upstream for (§8.7): the middle pane's Push becomes
+/** A branch git cannot plainly `push` (§8.7): the middle pane's Push becomes
  *  "Publish branch", and the row marks its branch name as local-only.
  *
  *  Shared rather than derived in each place so the two can never disagree —
  *  a row promising something the button then doesn't offer is worse than
  *  either signal alone. Detached HEAD is excluded: it has no upstream either,
  *  but there is nothing there to publish, and the row already says so by
- *  showing the oid instead of a name. */
+ *  showing the oid instead of a name.
+ *
+ *  Two states qualify, not one. The obvious one is *no upstream at all*. The
+ *  second is an upstream whose **branch name differs from the local branch's**
+ *  — `feature-x` tracking `origin/main`, say. Under git's default
+ *  `push.default = simple` a bare `git push` refuses that outright, so Push is
+ *  the one button guaranteed to fail, while Publish (`push -u origin HEAD`)
+ *  both succeeds and re-points the upstream at the matching remote branch.
+ *  Offering Push there left such a branch permanently stuck in the UI.
+ *
+ *  Corgit created these itself until `branch.rs` grew `--no-track` (git's
+ *  `branch.autoSetupMerge` sets the upstream from a remote-tracking start
+ *  point on its own), so any branch cut from `origin/…` by an older build is
+ *  in this state and cannot be repaired by that fix — only by a publish.
+ *
+ *  The cost, accepted: a *deliberately* mismatched upstream — local `feature`
+ *  tracking `origin/jk/feature` — is re-pointed by the next publish. That is a
+ *  legitimate setup, and this quietly normalises it. Judged the better trade
+ *  for a four-verb dashboard, where a button that cannot work is worse than
+ *  one that tidies an unusual config. */
+export type PublishReason = 'no-upstream' | 'upstream-name-mismatch';
+
+/** Which of the two states applies, for callers that have to *say* which —
+ *  the row's tooltip would otherwise tell someone with a mismatched upstream
+ *  that they have no upstream. `needsPublish` is this, asked as a yes/no. */
+export function publishReason(status: RepoStatus): PublishReason | null {
+  if (status.branch === null) return null;
+  if (status.upstream === null) return 'no-upstream';
+  return upstreamBranch(status.upstream) === status.branch ? null : 'upstream-name-mismatch';
+}
+
 export function needsPublish(status: RepoStatus): boolean {
-  return status.branch !== null && status.upstream === null;
+  return publishReason(status) !== null;
+}
+
+/** `origin/feature/x` → `feature/x`. Only the first segment is the remote, so
+ *  a branch whose own name contains a `/` survives — the same rule, and the
+ *  same assumption about remote names, as `branch.rs`'s `local_name`. */
+function upstreamBranch(upstream: string): string {
+  const slash = upstream.indexOf('/');
+  return slash === -1 ? upstream : upstream.slice(slash + 1);
 }
 
 class RepoStore {

@@ -41,6 +41,39 @@ describe('needsPublish (§8.7)', () => {
   test('detached HEAD is not publishable', () => {
     expect(needsPublish(status({ branch: null, upstream: null }))).toBe(false);
   });
+
+  /*
+   * A mismatched upstream. Corgit produced these itself until `branch.rs`
+   * grew `--no-track`, and no code change repairs one that already exists —
+   * only a publish does. Treated as needing publish because a bare `git push`
+   * cannot succeed under the default `push.default = simple`, so Push would
+   * be the one button guaranteed to fail.
+   */
+  test('a branch tracking a differently-named upstream needs publishing', () => {
+    expect(needsPublish(status({ branch: 'Update_the_titlebar', upstream: 'origin/main' }))).toBe(true);
+  });
+
+  test('a branch tracking its own name on any remote is already published', () => {
+    expect(needsPublish(status({ branch: 'feature-x', upstream: 'origin/feature-x' }))).toBe(false);
+    expect(needsPublish(status({ branch: 'feature-x', upstream: 'fork/feature-x' }))).toBe(false);
+  });
+
+  /** Only the first segment is the remote, so a slash in the branch's own
+   *  name must not read as a mismatch — this is the common `jk/thing` shape,
+   *  and getting it wrong would push a publish on every such branch. */
+  test('a slash in the branch name is not a mismatch', () => {
+    expect(needsPublish(status({ branch: 'jk/retry', upstream: 'origin/jk/retry' }))).toBe(false);
+  });
+
+  test('a differently-named upstream is a mismatch even sharing a prefix', () => {
+    expect(needsPublish(status({ branch: 'retry', upstream: 'origin/jk/retry' }))).toBe(true);
+  });
+
+  /** Detached HEAD wins over the mismatch check too: there is no branch name
+   *  to compare against, and nothing to publish either way. */
+  test('detached HEAD with an upstream set is still not publishable', () => {
+    expect(needsPublish(status({ branch: null, upstream: 'origin/main' }))).toBe(false);
+  });
 });
 
 describe('isDirty (§5.1)', () => {
