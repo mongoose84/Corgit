@@ -14,11 +14,11 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::fs;
 use std::hash::{Hash, Hasher};
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::atomicfile;
 use crate::status::RepoStatus;
 
 pub const CACHE_VERSION: u32 = 1;
@@ -54,6 +54,8 @@ fn path(cache_dir: &Path, root: &Path) -> PathBuf {
 /// rebuilds silently. The caller gets an empty cache either way, exactly what
 /// a first-ever open of this root would produce.
 pub fn load(cache_dir: &Path, root: &Path) -> RootCache {
+    atomicfile::prune_stale_temps(cache_dir);
+
     let target = path(cache_dir, root);
     let Ok(raw) = fs::read_to_string(&target) else {
         return RootCache::default();
@@ -68,23 +70,15 @@ pub fn load(cache_dir: &Path, root: &Path) -> RootCache {
     }
 }
 
-/// Atomic write: temp file + rename, so a crash mid-write cannot leave a
-/// truncated cache behind (§9.5 rule 1).
+/// Overlapping saves for one root are normal here — a status sweep, a fetch
+/// sweep and a single-repo write each hand over the whole snapshot from their
+/// own thread, and only sweep-vs-sweep is guarded — which is exactly what
+/// [`atomicfile::write`] is built to survive (§9.5 rule 1).
 pub fn save(cache_dir: &Path, root: &Path, cache: &RootCache) -> std::io::Result<()> {
-    fs::create_dir_all(cache_dir)?;
-
-    let target = path(cache_dir, root);
-    let temp = target.with_extension("json.tmp");
-
     let json = serde_json::to_vec(cache)
         .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
 
-    let mut file = fs::File::create(&temp)?;
-    file.write_all(&json)?;
-    file.sync_all()?;
-    drop(file);
-
-    fs::rename(&temp, &target)
+    atomicfile::write(&path(cache_dir, root), &json)
 }
 
 #[cfg(test)]
@@ -144,6 +138,46 @@ mod tests {
         assert_eq!(loaded.statuses.len(), 1);
         assert_eq!(loaded.statuses["repo-1"].branch.as_deref(), Some("main"));
         assert_eq!(loaded.statuses["repo-1"].ahead, 2);
+    }
+
+    #[test]
+    fn concurrent_saves_of_one_root_all_succeed() {
+        let dir = TempDir::new("corgit-test-cache-concurrent");
+        let root = Path::new(r"C:\dev\code");
+
+        let errors: Vec<String> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..8)
+                .map(|n| {
+                    let dir = dir.0.clone();
+                    scope.spawn(move || {
+                        let mut errors = Vec::new();
+                        for _ in 0..40 {
+                            let mut cache = RootCache { version: CACHE_VERSION, ..Default::default() };
+                            cache
+                                .statuses
+                                .insert(format!("repo-{n}"), RepoStatus { ahead: n, ..Default::default() });
+                            if let Err(err) = save(&dir, root, &cache) {
+                                errors.push(err.to_string());
+                            }
+                        }
+                        errors
+                    })
+                })
+                .collect();
+            handles.into_iter().flat_map(|h| h.join().unwrap()).collect()
+        });
+
+        assert!(errors.is_empty(), "{} save(s) failed: {:?}", errors.len(), errors);
+        assert_eq!(temp_files(&dir.0), 0, "temp files left behind");
+        assert_eq!(load(&dir.0, root).version, CACHE_VERSION, "cache unreadable after the storm");
+    }
+
+    fn temp_files(dir: &Path) -> usize {
+        fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "tmp"))
+            .count()
     }
 
     #[test]

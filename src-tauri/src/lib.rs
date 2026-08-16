@@ -1,3 +1,4 @@
+mod atomicfile;
 mod branch;
 mod cache;
 mod commit;

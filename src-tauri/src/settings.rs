@@ -6,10 +6,11 @@
 //! in `cache/<hash>.json` — build step 3, when there is state worth caching.
 
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+
+use crate::atomicfile;
 
 /// Bumped when the on-disk shape changes incompatibly.
 pub const SETTINGS_VERSION: u32 = 1;
@@ -66,6 +67,8 @@ pub fn path(config_dir: &Path) -> PathBuf {
 /// Settings are advisory: every failure falls back to defaults rather than
 /// surfacing an error, because a corrupt file must never block startup.
 pub fn load(config_dir: &Path) -> Settings {
+    atomicfile::prune_stale_temps(config_dir);
+
     let Ok(raw) = fs::read_to_string(path(config_dir)) else {
         return Settings::default();
     };
@@ -90,25 +93,13 @@ fn migrate(old: Settings) -> Settings {
     Settings::default()
 }
 
-/// Write to a sibling temp file and rename over the target, so a crash
-/// mid-write cannot leave a truncated file. `fs::rename` replaces an existing
-/// destination on Windows, and both paths are in the same directory, so the
-/// rename stays on one volume.
+/// Atomic write (§9.5 rule 1) — see [`atomicfile`]. A menu toggle and a
+/// frontend `save_settings` can both land here at once.
 pub fn save(config_dir: &Path, settings: &Settings) -> std::io::Result<()> {
-    fs::create_dir_all(config_dir)?;
-
-    let target = path(config_dir);
-    let temp = target.with_extension("json.tmp");
-
     let json = serde_json::to_vec_pretty(settings)
         .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
 
-    let mut file = fs::File::create(&temp)?;
-    file.write_all(&json)?;
-    file.sync_all()?;
-    drop(file);
-
-    fs::rename(&temp, &target)
+    atomicfile::write(&path(config_dir), &json)
 }
 
 #[cfg(test)]

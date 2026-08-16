@@ -13,11 +13,11 @@
 
 use std::collections::HashSet;
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::atomicfile;
 use crate::cache::hash_root;
 
 pub const ROOTS_VERSION: u32 = 1;
@@ -49,6 +49,8 @@ fn path(config_dir: &Path, root: &Path) -> PathBuf {
 /// `settings.rs` falls back to defaults. The failure mode that rule 5 actually
 /// guards against is `cache.json` deletion, not this file's own corruption.
 pub fn load(config_dir: &Path, root: &Path) -> RootSettings {
+    atomicfile::prune_stale_temps(&dir(config_dir));
+
     let Ok(raw) = fs::read_to_string(path(config_dir, root)) else {
         return RootSettings::default();
     };
@@ -59,23 +61,13 @@ pub fn load(config_dir: &Path, root: &Path) -> RootSettings {
     }
 }
 
-/// Atomic write: temp file + rename (§9.5 rule 1).
+/// Atomic write (§9.5 rule 1) — see [`atomicfile`]. Pins can be toggled faster
+/// than a save completes, so two of these overlapping is ordinary.
 pub fn save(config_dir: &Path, root: &Path, settings: &RootSettings) -> std::io::Result<()> {
-    let dir = dir(config_dir);
-    fs::create_dir_all(&dir)?;
-
-    let target = path(config_dir, root);
-    let temp = target.with_extension("json.tmp");
-
     let json = serde_json::to_vec_pretty(settings)
         .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
 
-    let mut file = fs::File::create(&temp)?;
-    file.write_all(&json)?;
-    file.sync_all()?;
-    drop(file);
-
-    fs::rename(&temp, &target)
+    atomicfile::write(&path(config_dir, root), &json)
 }
 
 #[cfg(test)]
