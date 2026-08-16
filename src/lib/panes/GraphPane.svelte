@@ -4,6 +4,7 @@
   import EmptyState from '../EmptyState.svelte';
   import Mascot from '../Mascot.svelte';
   import ContextMenu from '../ContextMenu.svelte';
+  import CreateBranchDialog from '../CreateBranchDialog.svelte';
   import GitErrorNotice from '../GitErrorNotice.svelte';
   import { repos, isDirty } from '../repos.svelte';
   import { graph, type RefBadge } from '../graph.svelte';
@@ -46,25 +47,52 @@
   // Branch switching (§8.3, §8.4, build step 8) — double-click a ref badge
   // or pick one from a row's right-click menu; both funnel through here.
   let switching = $state(false);
-  let switchError = $state<string | null>(null);
-  // Only true alongside `switchError` when the tree was dirty at the moment
+  // Shared by switching and branch creation: both are `write()` calls whose
+  // failure is a line of git stderr, and only one of them can be in flight.
+  let actionError = $state<string | null>(null);
+  // Only true alongside `actionError` when the tree was dirty at the moment
   // of failure — the one case §8.3 says to offer *Open in VS Code* for.
   // Never force-checkout, ever, so there is no other action to offer here.
-  let switchErrorDirty = $state(false);
+  let actionErrorDirty = $state(false);
 
   let menu = $state<{ x: number; y: number; refs: RefBadge[] } | null>(null);
+  // Non-null while the Create Branch dialog is up; the value is the start
+  // point the new branch will be cut from (§8.3).
+  let createFrom = $state<string | null>(null);
+
+  // Only local names: git rejects a new branch that collides with one, and the
+  // remote-tracking badges sharing the graph are a different namespace.
+  const localBranchNames = $derived(
+    graph.refs.filter((ref) => ref.kind === 'local').map((ref) => ref.name),
+  );
 
   async function switchTo(ref: RefBadge) {
     if (switching) return;
     switching = true;
-    switchError = null;
-    switchErrorDirty = false;
+    actionError = null;
+    actionErrorDirty = false;
     const ok = await repos.switchBranch(ref.name, ref.kind);
     if (!ok) {
-      switchError = repos.writeError;
-      switchErrorDirty = dirty;
+      actionError = repos.writeError;
+      actionErrorDirty = dirty;
     }
     switching = false;
+  }
+
+  async function createBranch(name: string, checkout: boolean): Promise<boolean> {
+    const startPoint = createFrom;
+    if (!startPoint) return false;
+
+    actionError = null;
+    actionErrorDirty = false;
+    const ok = await repos.createBranch(name, startPoint, checkout);
+    if (!ok) {
+      actionError = repos.writeError;
+      // Only a checkout can fail on a dirty tree; a plain `git branch` never
+      // touches the working tree, so offering VS Code there would be noise.
+      actionErrorDirty = checkout && dirty;
+    }
+    return ok;
   }
 
   function openMenu(event: MouseEvent, refs: RefBadge[]) {
@@ -74,10 +102,16 @@
   }
 
   function menuItems(refs: RefBadge[]) {
-    return refs.map((ref) => ({
-      label: ref.kind === 'local' ? `Switch to ${ref.name}` : `Switch to ${ref.name} (new local branch)`,
-      onSelect: () => switchTo(ref),
-    }));
+    return refs.flatMap((ref) => [
+      {
+        label: ref.kind === 'local' ? `Switch to ${ref.name}` : `Switch to ${ref.name} (new local branch)`,
+        onSelect: () => switchTo(ref),
+      },
+      {
+        label: `Create branch from ${ref.name}…`,
+        onSelect: () => (createFrom = ref.name),
+      },
+    ]);
   }
 </script>
 
@@ -111,13 +145,13 @@
          gets a definite height to virtualize against regardless of whether
          the Uncommitted Changes node is showing above it. -->
     <div class="graph-body">
-      {#if switchError}
-        <div class="switch-error">
+      {#if actionError}
+        <div class="action-error">
           <GitErrorNotice
-            error={switchError}
-            forceAction={switchErrorDirty ? 'open-vscode' : null}
+            error={actionError}
+            forceAction={actionErrorDirty ? 'open-vscode' : null}
             onOpenVSCode={() => repos.openInVSCode()}
-            onDismiss={() => (switchError = null)}
+            onDismiss={() => (actionError = null)}
           />
         </div>
       {/if}
@@ -181,6 +215,15 @@
   <ContextMenu x={menu.x} y={menu.y} items={menuItems(menu.refs)} onClose={() => (menu = null)} />
 {/if}
 
+{#if createFrom}
+  <CreateBranchDialog
+    startPoint={createFrom}
+    existingLocal={localBranchNames}
+    onCreate={createBranch}
+    onClose={() => (createFrom = null)}
+  />
+{/if}
+
 <style>
   .graph-body {
     display: flex;
@@ -188,7 +231,7 @@
     height: 100%;
   }
 
-  .switch-error {
+  .action-error {
     flex: 0 0 auto;
     padding: var(--space-2) var(--space-3);
     border-bottom: 1px solid var(--border);

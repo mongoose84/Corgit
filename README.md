@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/mascot/pose-resting-alpha.png" alt="Corgit's mascot: a corgi sitting up, waiting" width="160">
+</p>
+
 # Corgit
 
 A fast dashboard over many local git repositories. Built for the case where you have

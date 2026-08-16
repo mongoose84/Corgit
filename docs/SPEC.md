@@ -379,6 +379,8 @@ This single call populates the repo row *and* the middle pane.
 git for-each-ref --format='%(refname:short)%1f%(upstream:short)%1f%(objectname)' refs/heads refs/remotes
 git switch <branch>                              # local
 git switch -c <branch> --track origin/<branch>   # remote-tracking
+git branch <new> <start-point>                   # create, stay put
+git switch -c <new> <start-point>                # create and check out
 ```
 
 The switcher lists **local branches, plus remote branches with no local counterpart**,
@@ -393,6 +395,14 @@ required, not polish. Stale remote branches are handled by `--prune` on fetch (�
 
 On checkout failure with a dirty tree: show git's actual stderr plus **Open in VS Code**.
 **Never offer force-checkout** — it silently discards work.
+
+**Creating a branch** (Git Graph's gesture): right-click a ref badge in the graph → *Create
+branch from `<ref>`…* → a small modal takes the name plus a **Check out after creating**
+checkbox, which picks between the two commands above. The start point is always the badge
+that was right-clicked, never HEAD. The name is checked against `check-ref-format`'s rules
+and against the local branches already in the graph as it is typed, so the obvious mistakes
+never reach git; everything else surfaces as git's own stderr, like any other write. A new
+branch never gets an upstream — that is `switch -c --track`'s job, and a different intent.
 
 ### 8.4 Graph
 

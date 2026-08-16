@@ -297,6 +297,13 @@ class RepoStore {
     return this.write('switch_branch', { name, kind });
   }
 
+  /** Branch creation from the graph (§8.3) — `startPoint` is the ref badge or
+   *  commit hash that was right-clicked, so the new branch starts there rather
+   *  than at HEAD. */
+  async createBranch(name: string, startPoint: string, checkout: boolean): Promise<boolean> {
+    return this.write('create_branch', { name, startPoint, checkout });
+  }
+
   /** The dirty-tree checkout failure's other half (§8.3) — not routed through
    *  `write()`, since it never mutates repo state and has nothing to refresh.
    *  Defaults to the selected repo; the row context menu (§5.1) passes an
