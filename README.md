@@ -63,6 +63,18 @@ Outside Tauri, settings fall back to `localStorage` instead of the Rust backend,
 widths still persist. There is no git there, so the welcome screen says so rather than
 showing an empty repo list.
 
+## Building
+
+```sh
+npm run tauri:build
+```
+
+Produces a release build at `src-tauri/target/release/corgit.exe` — pin that to the
+taskbar, not the `npm run dev` browser tab, which has no Rust backend and only shows the
+welcome screen. Also produces an NSIS installer at
+`src-tauri/target/release/bundle/nsis/Corgit_<version>_x64-setup.exe`, for a proper
+Start Menu install instead of a loose exe.
+
 ## Checks
 
 ```sh
