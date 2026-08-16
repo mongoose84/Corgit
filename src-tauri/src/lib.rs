@@ -437,7 +437,7 @@ async fn switch_branch(repo_id: String, name: String, kind: graph::RefKind, app:
 
 /// The dirty-tree checkout failure's other half (§8.3): launches VS Code on
 /// the repo so the user can resolve things by hand. Fire-and-forget — nothing
-/// in twogit's own state changes because of it.
+/// in Corgit's own state changes because of it.
 #[tauri::command]
 async fn open_in_vscode(repo_id: String, app: AppHandle) -> Result<(), String> {
     let path = repo_path(&app, &repo_id)?;
@@ -585,7 +585,7 @@ fn persist_root_settings(app: &AppHandle, root_path: &Path, pins: HashSet<String
     let state = app.state::<AppState>();
     let settings = roots::RootSettings { version: roots::ROOTS_VERSION, pins, last_selected };
     if let Err(err) = roots::save(&state.config_dir, root_path, &settings) {
-        eprintln!("twogit: could not save root settings ({err})");
+        eprintln!("corgit: could not save root settings ({err})");
     }
 }
 
@@ -745,7 +745,7 @@ pub(crate) async fn emit_repo_status(app: &AppHandle, repo_id: &str, path: &Path
         error: status.as_ref().err().cloned(),
     };
     if let Err(err) = app.emit(REPO_STATUS_EVENT, event) {
-        eprintln!("twogit: could not publish repo status ({err})");
+        eprintln!("corgit: could not publish repo status ({err})");
     }
 }
 
@@ -763,7 +763,7 @@ fn persist_cache(
     let state = app.state::<AppState>();
     let on_disk = RootCache { version: cache::CACHE_VERSION, statuses, last_fetch_at };
     if let Err(err) = cache::save(&state.cache_dir, root_path, &on_disk) {
-        eprintln!("twogit: could not save status cache ({err})");
+        eprintln!("corgit: could not save status cache ({err})");
     }
 }
 
@@ -840,7 +840,7 @@ async fn sweep(app: AppHandle, generation: u64, repos: Vec<Repo>) {
             persist_cache(&app, &event.root, event.statuses.clone(), last_fetch_at);
 
             if let Err(err) = app.emit(SWEEP_EVENT, event) {
-                eprintln!("twogit: could not publish sweep results ({err})");
+                eprintln!("corgit: could not publish sweep results ({err})");
             }
 
             // Cleared only now: the guard has to cover the cache write and
@@ -1160,7 +1160,7 @@ async fn fetch_sweep(app: AppHandle, generation: u64, repos: Vec<Repo>) {
 
         let event = FetchSweepEvent { root: root_path, last_fetch_at, auth_needed, elapsed_ms };
         if let Err(err) = app.emit(FETCH_SWEEP_EVENT, event) {
-            eprintln!("twogit: could not publish fetch sweep results ({err})");
+            eprintln!("corgit: could not publish fetch sweep results ({err})");
         }
 
         // A fetch just moved refs/remotes/*, which is what the status
@@ -1238,7 +1238,7 @@ fn remember_root(app: &AppHandle, root: &Path) {
         settings.recent_roots.truncate(MAX_RECENT_ROOTS);
 
         if let Err(err) = settings::save(&state.config_dir, &settings) {
-            eprintln!("twogit: could not save recent roots ({err})");
+            eprintln!("corgit: could not save recent roots ({err})");
         }
         settings.recent_roots.clone()
     };
@@ -1260,7 +1260,7 @@ pub fn run() {
             // shows the 500 ms budget is tight.
             let git = tauri::async_runtime::block_on(git::probe());
             if !git.available {
-                eprintln!("twogit: no usable git on PATH");
+                eprintln!("corgit: no usable git on PATH");
             }
 
             // No repo is open yet, so nothing is selected and the panes
@@ -1335,7 +1335,7 @@ pub fn run() {
             set_selected_repo,
         ])
         .run(tauri::generate_context!())
-        .expect("twogit: fatal error while running the application");
+        .expect("corgit: fatal error while running the application");
 }
 
 #[cfg(test)]
@@ -1367,12 +1367,12 @@ mod bench {
     //! measures because §16 says to take it again at build steps 3 and 6.
     //!
     //! ```text
-    //! $env:TWOGIT_BENCH_ROOT = 'C:\dev\code'
+    //! $env:CORGIT_BENCH_ROOT = 'C:\dev\code'
     //! cargo test --release --lib -- --ignored --nocapture bench_status_sweep
     //! ```
     use super::*;
 
-    /// Separates "this machine creates processes slowly" from "twogit creates
+    /// Separates "this machine creates processes slowly" from "Corgit creates
     /// them one at a time". `git --version` does no repository work, so its
     /// wall clock is pure spawn cost: 16 of them should cost about two rounds
     /// of the semaphore, not sixteen.
@@ -1405,10 +1405,10 @@ mod bench {
     }
 
     #[test]
-    #[ignore = "measurement, not a test: needs TWOGIT_BENCH_ROOT"]
+    #[ignore = "measurement, not a test: needs CORGIT_BENCH_ROOT"]
     fn bench_status_sweep() {
-        let root = std::env::var("TWOGIT_BENCH_ROOT")
-            .expect("set TWOGIT_BENCH_ROOT to a folder containing repositories");
+        let root = std::env::var("CORGIT_BENCH_ROOT")
+            .expect("set CORGIT_BENCH_ROOT to a folder containing repositories");
         let root = discovery::canonicalize(Path::new(&root));
 
         let discovery_started = Instant::now();

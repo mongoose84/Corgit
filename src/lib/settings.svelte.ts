@@ -38,7 +38,7 @@ const DEFAULTS: Settings = {
 };
 
 const SAVE_DEBOUNCE_MS = 500;
-const STORAGE_KEY = 'twogit.settings';
+const STORAGE_KEY = 'corgit.settings';
 
 class SettingsStore {
   loaded = $state(false);
@@ -70,7 +70,7 @@ class SettingsStore {
       this.data = inTauri ? await invoke<Settings>('get_settings') : readLocal();
     } catch (err) {
       // Settings are advisory. A broken file must never block startup (§9.5).
-      console.warn('twogit: could not load settings, using defaults', err);
+      console.warn('corgit: could not load settings, using defaults', err);
       this.data = structuredClone(DEFAULTS);
     } finally {
       this.#loading = false;
@@ -102,7 +102,7 @@ class SettingsStore {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
       }
     } catch (err) {
-      console.warn('twogit: could not save settings', err);
+      console.warn('corgit: could not save settings', err);
     }
   }
 }

@@ -2,6 +2,7 @@
   import Pane from './Pane.svelte';
   import RepoRow from './RepoRow.svelte';
   import EmptyState from '../EmptyState.svelte';
+  import Mascot from '../Mascot.svelte';
   import { repos } from '../repos.svelte';
 
   let filter = $state('');
@@ -27,7 +28,13 @@
 
 <Pane title="Repositories ({count})">
   {#snippet actions()}
-    {#if repos.lastSweepMs !== null && !repos.sweeping}
+    {#if repos.sweeping}
+      <!-- Dead time, and chrome rather than decoration — the same reasoning
+           that lets a mascot glyph be a button icon (SPEC §14.1). He trots for
+           as long as the sweep runs; the timing readout takes the slot back
+           the moment it lands, so the two never fight for the space. -->
+      <Mascot pose="mini-working" height={18} />
+    {:else if repos.lastSweepMs !== null}
       <!-- The 300 ms status-sweep budget in §1 is the reason this project
            exists, so the measurement is on screen, not in a log. -->
       <span class="timing" title="Last status sweep across {repos.repos.length} repositories"
@@ -59,7 +66,7 @@
   {#if repos.repos.length === 0}
     <EmptyState
       message="No repositories here"
-      hint="twogit looks one level down — open the folder that contains them"
+      hint="Corgit looks one level down — open the folder that contains them"
     />
   {:else if shown.length === 0}
     <EmptyState message="No matches" hint="Filter matches repository names only" />

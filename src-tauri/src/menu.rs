@@ -187,7 +187,7 @@ fn register_event_handler(app: &AppHandle) {
 
 fn emit_action(app: &AppHandle, action: MenuAction) {
     if let Err(err) = app.emit(MENU_ACTION_EVENT, action) {
-        eprintln!("twogit: could not forward menu action ({err})");
+        eprintln!("corgit: could not forward menu action ({err})");
     }
 }
 
@@ -207,7 +207,7 @@ fn toggle_visibility(app: &AppHandle, field: impl Fn(&mut PaneVisibility) -> &mu
     let _ = state.menu.commit_pane_check.set_checked(visibility.commit_pane);
 
     if let Err(err) = app.emit(PANE_VISIBILITY_EVENT, visibility) {
-        eprintln!("twogit: could not publish pane visibility ({err})");
+        eprintln!("corgit: could not publish pane visibility ({err})");
     }
 }
 
@@ -217,9 +217,9 @@ fn show_about(app: &AppHandle) {
         Some(version) => format!("Git {version} ({})", state.git.read_binary.as_deref().unwrap_or("git")),
         None => "Git not found".to_string(),
     };
-    let message = format!("twogit {}\n{git_line}", env!("CARGO_PKG_VERSION"));
+    let message = format!("Corgit {}\n{git_line}", env!("CARGO_PKG_VERSION"));
 
-    app.dialog().message(message).title("About twogit").show(|_| {});
+    app.dialog().message(message).title("About Corgit").show(|_| {});
 }
 
 /// Called from `set_selected_repo` (§9.3: the frontend's selection, mirrored
@@ -238,7 +238,7 @@ pub fn set_repo_selected(app: &AppHandle, selected: bool) {
 pub fn refresh_open_recent(app: &AppHandle, recent_roots: &[PathBuf]) {
     let state = app.state::<crate::AppState>();
     if let Err(err) = fill_open_recent(&state.menu.open_recent, recent_roots) {
-        eprintln!("twogit: could not refresh Open Recent menu ({err})");
+        eprintln!("corgit: could not refresh Open Recent menu ({err})");
     }
 }
 

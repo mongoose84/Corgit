@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Mascot from './Mascot.svelte';
   import { repos } from './repos.svelte';
   import { settings } from './settings.svelte';
 
@@ -14,13 +15,22 @@
 
 <div class="welcome">
   <div class="card">
-    <h1>twogit</h1>
+    <!-- Standing in for the *greeting* pose, which is not drawn yet
+         (docs/mascot.md §5, priority 2). Resting is the closest thing in the
+         set: sitting up, waiting to be given something to herd, which is
+         exactly the state this screen describes. Full height rather than the
+         app mark — this is the one screen with nothing to compete with, so it
+         is where he can afford the most room. -->
+    <div class="brand">
+      <Mascot pose="resting" height={150} />
+      <h1>Corgit</h1>
+    </div>
 
     {#if !repos.git.available}
       <!-- Git missing is a blocking first-run screen, not a failure repeated
            once per operation (§3). -->
-      <p class="blocked">twogit needs git, and there is none on your PATH.</p>
-      <p class="hint selectable">Install it from https://git-scm.com/download/win, then reopen twogit.</p>
+      <p class="blocked">Corgit needs git, and there is none on your PATH.</p>
+      <p class="hint selectable">Install it from https://git-scm.com/download/win, then reopen Corgit.</p>
     {:else}
       <p class="lede">Open the folder your repositories live in.</p>
 
@@ -47,7 +57,7 @@
       {/if}
 
       <p class="hint">
-        twogit looks one level down, so pick the parent folder — not a single repository.
+        Corgit looks one level down, so pick the parent folder — not a single repository.
       </p>
     {/if}
   </div>
@@ -66,6 +76,16 @@
   .card {
     width: 100%;
     max-width: 460px;
+  }
+
+  /* Stacked, not side by side: at this size he is a full-body pose rather
+     than a glyph, and sitting him next to the wordmark would push the whole
+     card off centre. */
+  .brand {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--space-2);
   }
 
   h1 {

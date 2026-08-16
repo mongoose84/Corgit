@@ -1,4 +1,4 @@
-# twogit — v1 Spec
+# Corgit — v1 Spec
 
 A fast, mouse-first dashboard over many local git repositories. Built because VS Code is
 slow when you keep 77 repos and want to know, at a glance, which ones need attention.
@@ -64,7 +64,7 @@ tags · cherry-pick · revert · reset · submodules · LFS-specific UI · multi
 
 ### Non-goals, permanently
 
-Replacing VS Code for conflict resolution or diff editing. When twogit hits something it
+Replacing VS Code for conflict resolution or diff editing. When Corgit hits something it
 doesn't handle, the escape hatch is a single **Open in VS Code** button.
 
 ---
@@ -322,7 +322,7 @@ git config core.fsmonitor true
 git config core.untrackedCache true
 ```
 
-twogit should **offer** this per repo (a one-click banner), never apply it silently — it
+Corgit should **offer** this per repo (a one-click banner), never apply it silently — it
 modifies the user's config.
 
 If the status sweep still measures slow, add a Defender exclusion for the repo roots and
@@ -332,7 +332,7 @@ If the status sweep still measures slow, add a Defender exclusion for the repo r
 
 ## 7. Concurrency rules
 
-These guarantees are **process-local**, which is exactly why twogit is one process with
+These guarantees are **process-local**, which is exactly why Corgit is one process with
 many windows (§9.2). Queues and semaphores are keyed by canonicalised repo path and shared
 across every window.
 
@@ -605,7 +605,7 @@ few hours of work.
 - **A new OV certificate has no SmartScreen reputation**, so early builds may still warn
   until enough downloads accumulate. Only EV certificates get instant reputation.
 
-Honest recommendation: if twogit stays private, **ship auto-update in v1 and defer
+Honest recommendation: if Corgit stays private, **ship auto-update in v1 and defer
 Authenticode**. Clicking through SmartScreen once, on your own machine, costs nothing.
 Signing becomes worth it the moment you hand a build to a colleague — wire the CI signing
 step in then, not now.
@@ -614,7 +614,7 @@ step in then, not now.
 
 ## 13. Error handling
 
-The rule: **never strand the user in a state twogit can't get them out of.** Every failure
+The rule: **never strand the user in a state Corgit can't get them out of.** Every failure
 path ends in either a recovery action or *Open in VS Code*.
 
 ### Merge conflict
@@ -647,10 +647,39 @@ collapsible "Details":
 
 ## 14. Naming
 
-Product and crate name: **twogit**. (`2git` can't be a Rust crate name, C# namespace or npm
-scope — identifiers can't start with a digit. `twogit` keeps the Twoday joke and is legal
-everywhere.) The containing folder is currently `2git`; renaming it is optional and
-cosmetic.
+Product name: **Corgit**. Crate, package and identifier: `corgit` (lowercase), bundle
+identifier `dev.kronborg.corgit`.
+
+Corgi + git. Corgis are a cattle-herding breed, which is what this app does — a herd of
+repositories, kept in line, with the five that need attention nipped to the front. The
+earlier name (`twogit`, from Twoday + git) described where it was written rather than what
+it does, and the pun didn't carry.
+
+The dog is the brand, in the TunnelBear sense: the mascot is expected to appear often and
+without embarrassment. The constraint that makes that survivable in a three-pane dense
+layout is **§14.1**.
+
+### 14.1 Where the mascot may appear
+
+The rule: **dead space and dead time, never over live data.** Density is the product's
+promise, so the dog never costs a row of repositories, files or commits.
+
+The full brief for whoever draws him — character, palette, the set of poses needed, and
+what has already been ruled out — is **[mascot.md](mascot.md)**.
+
+Permitted:
+
+| | |
+| --- | --- |
+| App identity | icon, taskbar, installer, tray, favicon, About dialog |
+| Empty states | welcome screen, no repo selected, no commits yet, no filter matches |
+| Transitions | reading history, fetch/pull in flight, first scan of a large root |
+| Failures | `GitErrorNotice` — the dog softens git's worst moments (§13) |
+| Resting | every repo clean and in sync: the payoff state, dog lies down |
+
+Not permitted: inside repository rows, file rows, graph rows, or the commit info panel.
+One exception is allowed by the icon rule — a mascot glyph may serve as a *button* icon
+where the verb fits (Fetch), because that reads as chrome, not decoration.
 
 ---
 
