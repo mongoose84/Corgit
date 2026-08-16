@@ -435,6 +435,25 @@ async fn switch_branch(repo_id: String, name: String, kind: graph::RefKind, app:
     .await
 }
 
+/// Branch creation from the graph (§8.3) — right-click a ref badge or a commit
+/// row. `start_point` is whatever that badge/row names (a branch name or a
+/// commit hash), never HEAD, so the branch starts where the user pointed.
+/// `checkout` mirrors the dialog's checkbox; when it is set, a dirty-tree
+/// failure surfaces exactly like a plain switch's does.
+#[tauri::command]
+async fn create_branch(
+    repo_id: String,
+    name: String,
+    start_point: String,
+    checkout: bool,
+    app: AppHandle,
+) -> Result<(), String> {
+    write_and_refresh(&app, repo_id, |path| async move {
+        branch::create(&path, &name, &start_point, checkout).await
+    })
+    .await
+}
+
 /// The dirty-tree checkout failure's other half (§8.3): launches VS Code on
 /// the repo so the user can resolve things by hand. Fire-and-forget — nothing
 /// in Corgit's own state changes because of it.
@@ -1328,6 +1347,7 @@ pub fn run() {
             publish_branch,
             commit_and_push,
             switch_branch,
+            create_branch,
             open_in_vscode,
             open_in_terminal,
             toggle_pin,

@@ -20,8 +20,10 @@
     /** Double-clicking a ref badge (§8.3, §8.4) — checks out that exact
      *  branch directly, skipping any dropdown. */
     onSwitchBranch: (ref: RefBadge) => void;
-    /** Right-clicking the row: only meaningful when `refs` is non-empty, so
-     *  the parent decides whether to actually open a menu. */
+    /** Right-clicking the row, or a single badge on it (§8.3) — the badge
+     *  passes just itself, so its menu is about that branch alone rather than
+     *  every ref sharing the commit. Only meaningful when the list is
+     *  non-empty, so the parent decides whether to actually open a menu. */
     onContextMenu: (event: MouseEvent, refs: RefBadge[]) => void;
   }
 
@@ -56,6 +58,13 @@
   function currentBadgeStyle(lane: number): string {
     const color = laneColorVar(lane);
     return `color: ${color}; border-color: ${color}; background: color-mix(in srgb, ${color} 22%, var(--bg-raised));`;
+  }
+
+  function badgeContextMenu(event: MouseEvent, ref: RefBadge) {
+    // Without this the row's own handler also runs and offers every ref on the
+    // commit; right-clicking a specific badge is a statement about that one.
+    event.stopPropagation();
+    onContextMenu(event, [ref]);
   }
 
   function badgeDblclick(event: MouseEvent, ref: RefBadge) {
@@ -115,7 +124,10 @@
       role="button"
       tabindex="-1"
       ondblclick={(event) => badgeDblclick(event, ref)}
-      title={isCurrent(ref) ? `${ref.name} — current branch` : `${ref.name} — double-click to switch`}
+      oncontextmenu={(event) => badgeContextMenu(event, ref)}
+      title={isCurrent(ref)
+        ? `${ref.name} — current branch, right-click for actions`
+        : `${ref.name} — double-click to switch, right-click for actions`}
     >{ref.name}</span>
   {/each}
   <span class="author">{row.commit.author}</span>
