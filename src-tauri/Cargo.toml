@@ -17,6 +17,11 @@ tauri-build = { version = "2.6.3", features = [] }
 [dependencies]
 tauri = { version = "2.11.5", features = [] }
 tauri-plugin-dialog = "2.5.0"
+# A second launch must route into the running process, never start a second one
+# (§9.2). The guarantees in §7 — one 8-process git semaphore, one write queue
+# per repo, one cache writer — are all process-local, so a second process does
+# not merely duplicate work, it silently breaks them.
+tauri-plugin-single-instance = "2.4.3"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 # Process fan-out for the status sweep, plus the semaphore that caps it (§7.3).

@@ -7,6 +7,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::OnceLock;
+use std::time::Duration;
 
 use serde::Serialize;
 use tokio::process::Command;
@@ -20,13 +21,48 @@ use tokio::sync::Semaphore;
 const REAL_BINARY_DIRS: [&str; 3] = ["mingw64", "mingw32", "clangarm64"];
 
 /// Global cap on concurrent git processes (§7.3). Without it the status sweep
-/// spawns one `git.exe` per repo at once and Defender melts the machine. It is
-/// a process-wide static precisely because the guarantee has to hold across
-/// every window (§9.2).
+/// spawns one `git.exe` per repo at once and Defender melts the machine. A
+/// process-wide static because the cap has to cover every git spawn in the
+/// process at once — which is the whole cap only because §9.2 guarantees there
+/// is exactly one process.
 const MAX_INFLIGHT: usize = 8;
 
 /// Built-in FSMonitor, which is what makes `git status` fast on Windows (§6).
 const FSMONITOR_MIN_VERSION: (u32, u32) = (2, 37);
+
+// How long a git process may run before Corgit presumes it hung and kills it.
+//
+// None of these are performance targets — they are the point past which a
+// process is stuck rather than slow, and they exist because a child that never
+// exits is not merely slow, it is permanent. Such a child holds a semaphore
+// permit (§7.3) and, for a write, its repo's write-queue guard (§7) with
+// nobody left to release either: that repo stops sweeping (`try_read` fails
+// every tick), selecting it blocks the middle pane and graph forever on the
+// blocking `write_queues.read()`, and the 8-process budget shrinks for good.
+//
+// Being killed is a normal git failure like any other — the error surfaces
+// through the same path as a rejected push (§13), and the operation is
+// retryable. Erring generous therefore costs a wait; erring tight costs a
+// legitimately slow operation. Hence the spread below.
+
+/// Local reads — status, log, for-each-ref, remote. Bounded by repo size and
+/// nothing else: no network, no hooks, no credential prompt. The §1 budget for
+/// *all 77* is 300 ms, so a single read reaching 30 s is not slow, it is stuck.
+const READ_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Local writes — add, restore, commit, switch, branch. Deliberately the most
+/// generous of the three: §3 shells out to system git precisely so that hooks
+/// run, and a pre-commit hook running a test suite is doing its job rather
+/// than hanging. Ten minutes is long enough that reaching it means something
+/// is genuinely wedged, not thorough.
+const LOCAL_WRITE_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// Network writes — fetch, pull, push. Long enough for an incremental fetch
+/// over a bad link, short enough that the background fetch sweep cannot wedge
+/// its four slots (§6) — and the eight global ones under them — indefinitely.
+/// This is the timeout that matters most: an unreachable host is the failure
+/// that actually happens, and TCP alone can take far longer to notice.
+const NETWORK_TIMEOUT: Duration = Duration::from_secs(120);
 
 fn inflight() -> &'static Semaphore {
     static SEMAPHORE: OnceLock<Semaphore> = OnceLock::new();
@@ -153,20 +189,32 @@ pub async fn read(cwd: &Path, args: &[&str]) -> Result<Output, String> {
     let mut full = Vec::with_capacity(args.len() + 1);
     full.push("--no-optional-locks");
     full.extend_from_slice(args);
-    run_in(&binaries().read, cwd, &full, None, &[]).await
+    run_in(&binaries().read, cwd, &full, None, &[], READ_TIMEOUT).await
 }
 
 /// Run a mutating command through the documented `git` entry point (§3) — the
 /// one credential helpers, hooks and LFS expect. Nothing that stages, commits,
 /// fetches, pulls or pushes may take the `read` shortcut.
+///
+/// For a command that talks to a remote use [`write_network`] instead: same
+/// binary, different budget for how long it is allowed to say nothing.
 pub async fn write(cwd: &Path, args: &[&str]) -> Result<Output, String> {
-    run_in(&binaries().write, cwd, args, None, &[]).await
+    run_in(&binaries().write, cwd, args, None, &[], LOCAL_WRITE_TIMEOUT).await
+}
+
+/// Like [`write`], but for a command that reaches the network — fetch, pull,
+/// push. Split out for [`NETWORK_TIMEOUT`] alone: an unreachable host is the
+/// hang that actually happens in practice, and it deserves a far tighter leash
+/// than a commit whose pre-commit hook is running tests.
+pub async fn write_network(cwd: &Path, args: &[&str]) -> Result<Output, String> {
+    run_in(&binaries().write, cwd, args, None, &[], NETWORK_TIMEOUT).await
 }
 
 /// Like [`write`], but pipes `input` to the child's stdin — `git commit -F -`
 /// takes its message this way specifically to avoid arg-escaping pain (§8.6).
+/// Commit is the hook-firing command, so this takes the local-write budget.
 pub async fn write_stdin(cwd: &Path, args: &[&str], input: &str) -> Result<Output, String> {
-    run_in(&binaries().write, cwd, args, Some(input), &[]).await
+    run_in(&binaries().write, cwd, args, Some(input), &[], LOCAL_WRITE_TIMEOUT).await
 }
 
 /// Like [`write`], but with `envs` set on the child — the background fetch
@@ -178,7 +226,7 @@ pub async fn write_noninteractive(
     args: &[&str],
     envs: &[(&str, &str)],
 ) -> Result<Output, String> {
-    run_in(&binaries().write, cwd, args, None, envs).await
+    run_in(&binaries().write, cwd, args, None, envs, NETWORK_TIMEOUT).await
 }
 
 async fn run_in(
@@ -187,6 +235,7 @@ async fn run_in(
     args: &[&str],
     stdin: Option<&str>,
     envs: &[(&str, &str)],
+    budget: Duration,
 ) -> Result<Output, String> {
     // Held for the lifetime of the child process, not just the spawn.
     let _permit = inflight()
@@ -201,7 +250,14 @@ async fn run_in(
         .envs(envs.iter().copied())
         .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        // What actually enforces `budget` below, and the only thing that can:
+        // `wait_with_output` consumes the `Child`, so once it is in flight
+        // there is no handle left to call `kill` on. Dropping the future drops
+        // the child, and this turns that drop into a kill. It also covers the
+        // case no timeout can — a task aborted from outside, e.g. a ticker
+        // cancelled on blur (§6) — which would otherwise orphan the process.
+        .kill_on_drop(true);
 
     // A console window per git process is unusable at 77 repos. cfg-gated
     // rather than unconditional so the Linux build (§10) stays clean.
@@ -215,21 +271,36 @@ async fn run_in(
         .spawn()
         .map_err(|err| format!("could not run git: {err}"))?;
 
-    if let Some(input) = stdin {
-        use tokio::io::AsyncWriteExt;
-        // Taking the handle (rather than borrowing) drops and closes it at
-        // the end of this block, so git sees EOF instead of hanging on stdin.
-        if let Some(mut pipe) = child.stdin.take() {
-            pipe.write_all(input.as_bytes())
-                .await
-                .map_err(|err| format!("could not write to git: {err}"))?;
+    // Feeding stdin is inside the budget rather than before it: a child that
+    // never reads its stdin would otherwise block `write_all` forever on a
+    // full pipe, which is the one hang a timeout around the wait alone would
+    // still miss.
+    let run = async move {
+        if let Some(input) = stdin {
+            use tokio::io::AsyncWriteExt;
+            // Taking the handle (rather than borrowing) drops and closes it at
+            // the end of this block, so git sees EOF instead of hanging on stdin.
+            if let Some(mut pipe) = child.stdin.take() {
+                pipe.write_all(input.as_bytes())
+                    .await
+                    .map_err(|err| format!("could not write to git: {err}"))?;
+            }
         }
-    }
 
-    let output = child
-        .wait_with_output()
-        .await
-        .map_err(|err| format!("could not run git: {err}"))?;
+        child
+            .wait_with_output()
+            .await
+            .map_err(|err| format!("could not run git: {err}"))
+    };
+
+    let Ok(waited) = tokio::time::timeout(budget, run).await else {
+        // `run` is dropped here, taking the `Child` with it; `kill_on_drop`
+        // above makes that an actual kill rather than an orphan. Phrased as
+        // something Corgit did, because it is — git did not fail, it was
+        // stopped — and worded so §13's translation can pick it up.
+        return Err(format!("git timed out after {}s and was stopped", budget.as_secs()));
+    };
+    let output = waited?;
 
     // Git emits paths as bytes and porcelain v2 with -z does not quote them, so
     // a path that is not valid UTF-8 is possible. Lossy conversion keeps the

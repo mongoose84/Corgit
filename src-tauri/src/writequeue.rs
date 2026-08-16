@@ -1,8 +1,9 @@
 //! Per-repo write queue (SPEC.md §7).
 //!
 //! One queue per repo, keyed by canonicalised path, living on `AppState` so
-//! it is shared across every window in the process — the guarantee §7
-//! depends on being process-local (§9.2). Modelled as an `RwLock<()>` rather
+//! every caller in the process shares one — the guarantee §7 depends on being
+//! process-local, which §9.2's single-instance rule is what makes safe (two
+//! processes would each get their own set). Modelled as an `RwLock<()>` rather
 //! than a literal queue: every mutating operation needs exclusive access and
 //! runs one at a time, but reads (the status sweep, an on-demand file list)
 //! only need to know that no write is in flight, and may run concurrently

@@ -7,9 +7,11 @@
 //! never lose them (rule 5). That is the whole reason there are two files
 //! instead of one.
 //!
-//! Window size and position (also listed in §9.5's table for this file) land
-//! here once multi-window ships; a single-window app has nowhere meaningful
-//! to restore geometry *to* yet.
+//! Window size and position are deliberately *not* here. They were in §9.5's
+//! table while multi-window was still a v1 goal, on the reasoning that geometry
+//! belongs to the window and a window belongs to a root. With one window (§9.2)
+//! that no longer holds — geometry would be global, not per-root — so it was
+//! dropped from the spec rather than stored in the wrong file.
 
 use std::collections::HashSet;
 use std::fs;

@@ -39,9 +39,9 @@ const REPO_STATUS_EVENT: &str = "status:repo";
 
 /// Rust owns the state; the frontend is a view over it (SPEC.md §9.3).
 ///
-/// The global git semaphore lives in `git.rs` instead, as a static — it has
-/// to hold across every window (§9.2), and routing it through app state would
-/// only make that easier to get wrong.
+/// The global git semaphore lives in `git.rs` instead, as a static — it has to
+/// cover every git spawn in the process (§7.3, §9.2), and routing it through
+/// app state would only make that easier to get wrong.
 struct AppState {
     config_dir: PathBuf,
     cache_dir: PathBuf,
@@ -63,7 +63,7 @@ struct AppState {
     /// focus gating.
     fetch_sweeping: AtomicBool,
     fetch_ticker: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
-    /// One write queue per repo, shared across every window (§7, §9.2). First
+    /// One write queue per repo, shared process-wide (§7, §9.2). First
     /// used in build step 4, where staging and commit are the first writes.
     /// `Arc`-wrapped so the sweep can clone a handle into its per-repo tasks
     /// without needing an `AppHandle` there too (§6, §7 rule 2).
@@ -1266,8 +1266,31 @@ fn remember_root(app: &AppHandle, root: &Path) {
     menu::refresh_open_recent(app, &recent_roots);
 }
 
+/// Routes a second launch into the running process rather than starting a
+/// second one (§9.2). This is not a nicety: the global git semaphore (§7.3),
+/// the per-repo write queues (§7) and the single cache writer (§9.5) are all
+/// process-local, so two processes mean 16 concurrent `git.exe`, two
+/// independent write queues racing `index.lock` on the same repo, and two
+/// writers on one cache file.
+///
+/// Registered before every other plugin, which the plugin requires.
+///
+/// §9.2 also calls for a second launch to *spawn a window* in the running
+/// process. Until multi-window ships there is only ever "main" to raise, so
+/// this surfaces that instead — the half of §9.2 that prevents corruption
+/// rather than the half that adds windows. `args`/`cwd` are ignored because
+/// Corgit takes no command line yet; a future `corgit <path>` opens here.
+fn focus_existing_window(app: &AppHandle, _args: Vec<String>, _cwd: String) {
+    let Some(window) = app.get_webview_window("main") else { return };
+    // Minimised first, then focus: `set_focus` on a minimised window raises it
+    // in the taskbar without actually restoring it on Windows.
+    let _ = window.unminimize();
+    let _ = window.set_focus();
+}
+
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(focus_existing_window))
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let config_dir = app.path().app_config_dir()?;

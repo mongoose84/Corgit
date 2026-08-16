@@ -61,6 +61,10 @@ tags · cherry-pick · revert · reset · submodules · LFS-specific UI · multi
 2. Bulk push / bulk pull across the pinned set
 3. Linux support (§10)
 4. Stash, if branch-switch friction proves annoying in practice
+5. **Multiple windows, one per root** (§9.2) — v1 is one window on one root. The single
+   *process* half of that design ships in v1 and is what keeps §7 honest; the second
+   window is the deferred part, and it is not a small one: every root-scoped field in
+   `AppState` becomes per-window, and every command has to be told which window is asking.
 
 ### Non-goals, permanently
 
@@ -129,12 +133,14 @@ keyboard accessibility and accelerators for free, and costs no CSS.
 
 | Menu | Items |
 | --- | --- |
-| **File** | Open Folder… `Ctrl+O` · Open Recent ▸ · New Window `Ctrl+Shift+N` · Close Window `Ctrl+W` · Exit |
+| **File** | Open Folder… `Ctrl+O` · Open Recent ▸ · Close Window `Ctrl+W` · Exit |
 | **View** | Toggle Repo List · Toggle Commit Pane · Reset Pane Sizes · Reload |
 | **Repository** | Fetch · Pull · Push — acting on the selected repo, mirroring the buttons for discoverability. Disabled when no repo is selected. |
 | **Help** | About · Check for Updates · Open Log Folder |
 
-Menu events arrive on the Rust side and are dispatched to the window that raised them.
+Menu events arrive on the Rust side. Items whose behaviour already lives in the frontend
+are forwarded to it as one event rather than reimplemented in Rust; items that only touch
+process lifecycle or a boolean Rust already owns are handled where they arrive.
 
 ---
 
@@ -304,10 +310,10 @@ not queued. At 77 repos the status sweep should finish in ~150 ms and never coll
 this is cheap insurance rather than an expected path. Individual repos are also skipped
 while their write lock is held (§7).
 
-**Focus gating:** sweeps run only for the root of the **focused window**. Unfocused windows
-and their roots go idle; on focus, that window's root gets an immediate status sweep. With
-no tray and close-means-quit (§9.1), the app has no background lifetime at all — background
-CPU is zero, not merely low.
+**Focus gating:** sweeps run only while the window is **focused**. On blur the tickers are
+aborted outright rather than left running and skipping their own ticks; on focus they
+restart and the root gets an immediate status sweep. With no tray and close-means-quit
+(§9.1), the app has no background lifetime at all — background CPU is zero, not merely low.
 
 Fetch additionally: skips repos with no remote, skips repos fetched within the last
 interval, and records `last_fetch_at` per repo.
@@ -332,9 +338,10 @@ If the status sweep still measures slow, add a Defender exclusion for the repo r
 
 ## 7. Concurrency rules
 
-These guarantees are **process-local**, which is exactly why Corgit is one process with
-many windows (§9.2). Queues and semaphores are keyed by canonicalised repo path and shared
-across every window.
+These guarantees are **process-local**, which is exactly why Corgit enforces a single
+process (§9.2). Queues and semaphores are keyed by canonicalised repo path and shared
+across everything in that process — which, once multi-window lands, means across every
+window too.
 
 1. **One write queue per repo.** Every mutating operation — fetch, pull, commit, push,
    stage, unstage, checkout, merge --abort — goes through it, one at a time. `git fetch`
@@ -461,40 +468,47 @@ interactively — they're sitting right there.
 
 ---
 
-## 9. Roots, windows & persistence
+## 9. Roots & persistence
 
 ### 9.1 Roots
 
-A window opens **one root folder** and shows every repo discovered beneath it — the same
+The window opens **one root folder** and shows every repo discovered beneath it — the same
 mental model as opening a folder in VS Code. The root is remembered and reopened on next
-launch, along with window size, position and last selected repo.
+launch, along with the last selected repo.
 
 - **First run, or saved root missing** (renamed folder, disconnected drive): show a welcome
   screen with *Open Folder…* and the recent list. Never an empty repo list, never a crash.
 - *File → Open Folder…* **replaces** the root in the current window (VS Code's default).
-  Use *New Window* to keep both.
-- *File → New Window* opens a second window on another root.
+  With one window in v1, that is the only way to change root.
 - A **recent roots** list backs *File → Open Recent*.
 
-### 9.2 One process, many windows
+### 9.2 Exactly one process
 
-**Multiple windows, single process.** Tauri supports several `WebviewWindow`s over one Rust
-backend; use `tauri-plugin-single-instance` so a second launch routes into the running
-process and spawns a window there, rather than starting a second process.
+**One process, enforced.** `tauri-plugin-single-instance` routes a second launch into the
+running process — which, in v1, raises the existing window rather than spawning another.
 
 This is not a preference — a second *process* silently breaks §7, because those guarantees
 are process-local:
 
-| | Single process, N windows | N processes |
+| | One process | N processes |
 | --- | --- | --- |
 | Global git semaphore | One, honoured (8 total) | One each → 8×N spawns |
 | Per-repo write queue | Shared, correct | Independent → two `git fetch` on one repo, `index.lock` contention |
 | Cache file | One writer | Concurrent writers, corruption |
 
-**Overlapping roots are therefore safe.** Open `C:\dev` in one window and
-`C:\dev\microservices` in another and the same repo appears in both; because write queues
-are keyed by **canonicalised repo path** and shared across windows, operations still
-serialise correctly, and a status change refreshes the repo in every window showing it.
+Note what this table does *not* say: nothing here is bought by having many windows. The
+single-process rule is the whole of the protection, and it holds with one window.
+
+**v1 ships one window.** Multiple `WebviewWindow`s over the one backend are a v2 candidate
+(§2), and the cost is in `AppState`, not in Tauri: the open root, its statuses, its pins
+and its selection are currently one set of fields for the process, and each would have to
+become per-window with every command told which window is asking.
+
+Two things are built for that future and cost nothing now: write queues and the semaphore
+are already keyed by **canonicalised repo path** rather than by root, and every event
+already carries the root it describes so a receiver can ignore one it isn't showing.
+Overlapping roots — `C:\dev` and `C:\dev\microservices` — are therefore safe by
+construction whenever the second window does arrive.
 
 ### 9.3 Ownership
 
@@ -504,19 +518,22 @@ reconciliation logic gets written twice and the cache becomes a third source of 
 
 ### 9.4 Selection is a set
 
-`selected: HashSet<RepoId>` **per window**, with a v1 invariant of `len() <= 1`. Costs
-nothing now and keeps the v2 multi-repo commit from requiring a rewrite.
+`selected: HashSet<RepoId>` scoped to the open root, with a v1 invariant of `len() <= 1`.
+Costs nothing now and keeps the v2 multi-repo commit from requiring a rewrite. (It becomes
+per-window along with the rest of the root state if multi-window ships — §9.2.)
 
 ### 9.5 Files
 
 | File | Location (Tauri) | Contents |
 | --- | --- | --- |
 | `settings.json` | `app_config_dir` | Global: pane widths, scan depth, sweep intervals, recent roots |
-| `roots/<hash>.json` | `app_config_dir` | Per root: pins, last selected repo, window size/position |
+| `roots/<hash>.json` | `app_config_dir` | Per root: pins, last selected repo |
 | `cache/<hash>.json` | `app_cache_dir` | Per root: branch, dirty, ahead/behind, `last_fetch_at` |
 
 `<hash>` is a short hash of the canonicalised root path. **Cache and pins must be per-root**
-— one shared `cache.json` would have two windows overwriting each other's state.
+— a single shared `cache.json` would be rewritten wholesale every time *Open Folder…*
+changed root, so the previous root's statuses would be gone by the time you went back to
+it, and its pins with them.
 
 Pins are per-root because a pin identifies a repo, and repos live under a root. Pane widths
 are global because they're a display preference.
@@ -697,15 +714,14 @@ where the verb fits (Fetch), because that reads as chrome, not decoration.
 
 Resolved: Svelte 5 · filter matches repo name only · 60 s sweep with re-entrancy guard ·
 graph shows all refs, switcher dedupes local/remote · dark only · auto-update yes, signing
-deferred (§12) · single dirty dot · row-level Pull · close quits · one root per window with
-recent list and multi-window (§9) · absolute `dd-MM-yyyy HH:mm:ss` timestamps · native menu
-bar (§4.1) · window restores size, position and last selected repo.
+deferred (§12) · single dirty dot · row-level Pull · close quits · one root, one window,
+one process, with a recent list (§9) · absolute `dd-MM-yyyy HH:mm:ss` timestamps · native
+menu bar (§4.1) · window restores the last selected repo · multi-window deferred to v2
+(§2, §9.2).
 
-· scan depth 1 (§8.1) · *Open Folder…* replaces the current window's root.
+· scan depth 1 (§8.1) · *Open Folder…* replaces the current root.
 
 Still open, none blocking:
-
-- [ ] Is there a cap on windows, or on total repos across all open roots?
 - [ ] **Should the status sweep emit incrementally rather than in one batch?**
       Step 2 emits a single event when all repos are done, so every row stays
       branch-less until the whole sweep lands — 20 s on a cold start on the
@@ -732,7 +748,7 @@ Each step ends somewhere useful:
 7. **Middle pane Mode B** — commit details
 8. **Branch switching + conflict detection**
 9. **Polish** — pins, filter, watchers on hot repos, context menus, error translation,
-   native menu bar, multi-window + recent roots
+   native menu bar, single-instance enforcement + recent roots
 10. **Ship** — GitHub Releases, Tauri updater keypair, auto-update wired end to end
     (Authenticode deferred per §12)
 
