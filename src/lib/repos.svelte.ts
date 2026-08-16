@@ -102,6 +102,18 @@ export function isDirty(status: RepoStatus): boolean {
   return status.staged + status.unstaged + status.untracked + status.conflicted > 0;
 }
 
+/** A branch git has no upstream for (§8.7): the middle pane's Push becomes
+ *  "Publish branch", and the row marks its branch name as local-only.
+ *
+ *  Shared rather than derived in each place so the two can never disagree —
+ *  a row promising something the button then doesn't offer is worse than
+ *  either signal alone. Detached HEAD is excluded: it has no upstream either,
+ *  but there is nothing there to publish, and the row already says so by
+ *  showing the oid instead of a name. */
+export function needsPublish(status: RepoStatus): boolean {
+  return status.branch !== null && status.upstream === null;
+}
+
 class RepoStore {
   root = $state<string | null>(null);
   repos = $state<Repo[]>([]);

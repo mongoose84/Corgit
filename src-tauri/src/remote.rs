@@ -53,9 +53,22 @@ pub async fn merge_abort(repo: &Path) -> Result<(), String> {
 }
 
 /// "Publish branch" — pushes a branch with no upstream configured and sets one.
-pub async fn publish(repo: &Path, branch: &str) -> Result<(), String> {
-    run_network(repo, &["push", "-u", "origin", branch]).await
+///
+/// The refspec is `HEAD`, never the branch's name. A name can only come from
+/// the cached status (`lib.rs`'s `current_branch`), and `git push origin
+/// <name>` resolves the *local ref of that name*, not what is checked out — so
+/// a cache that had not caught up with an external `git switch` would push some
+/// other branch entirely, reporting success while the commit the user just made
+/// stayed local. `HEAD` is whatever git itself sees at the moment it runs,
+/// which is the same thing the commit landed on, and it defaults the remote
+/// side to the matching name.
+pub async fn publish(repo: &Path) -> Result<(), String> {
+    run_network(repo, PUBLISH_ARGS).await
 }
+
+/// Named so the "source is HEAD" rule above is a thing a test can hold onto —
+/// the failure it guards against is silent, so nothing else would catch it.
+const PUBLISH_ARGS: &[&str] = &["push", "-u", "origin", "HEAD"];
 
 /// `git remote` is a local config read — no network, no lock needed — so it
 /// goes through the read path. The fetch sweep uses this to skip repos with
@@ -129,5 +142,13 @@ mod tests {
     fn does_not_flag_unrelated_failures() {
         assert!(!looks_like_auth_failure("fatal: unable to access: Could not resolve host"));
         assert!(!looks_like_auth_failure("error: failed to push some refs"));
+    }
+
+    /// The whole point of [`PUBLISH_ARGS`]: publish pushes what is checked out.
+    /// A branch name here would be read from cached status and could name a
+    /// branch the user has since switched away from — see `publish`'s docs.
+    #[test]
+    fn publish_pushes_head_rather_than_a_named_branch() {
+        assert_eq!(PUBLISH_ARGS, ["push", "-u", "origin", "HEAD"]);
     }
 }

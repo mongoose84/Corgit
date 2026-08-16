@@ -3,7 +3,7 @@
   import FileRow from './FileRow.svelte';
   import EmptyState from '../EmptyState.svelte';
   import GitErrorNotice from '../GitErrorNotice.svelte';
-  import { repos } from '../repos.svelte';
+  import { needsPublish, repos } from '../repos.svelte';
 
   // Mode A (working tree) — SPEC.md §5.2. Commit details (Mode B) live in
   // their own panel (graph.svelte.ts + CommitInfoPanel.svelte) rather than
@@ -15,8 +15,9 @@
   const files = $derived(repos.files);
   const status = $derived(repos.selectedId ? repos.status(repos.selectedId) : undefined);
   // No upstream configured (§8.7) — "Push" becomes "Publish branch" rather
-  // than a separate control, since exactly one of the two ever applies.
-  const needsPublish = $derived(status !== undefined && status.upstream === null);
+  // than a separate control, since exactly one of the two ever applies. Shared
+  // with the repo row's local-only branch marking (§5.1).
+  const publishable = $derived(status !== undefined && needsPublish(status));
   // §13: an unresolved merge conflict blocks commit and push for this repo
   // until it's resolved or aborted — exactly two ways out, never a third.
   const conflicted = $derived(status !== undefined && status.conflicted > 0);
@@ -70,7 +71,7 @@
   async function doPush() {
     busy = true;
     try {
-      await (needsPublish ? repos.publish() : repos.push());
+      await (publishable ? repos.publish() : repos.push());
     } finally {
       busy = false;
     }
@@ -184,7 +185,7 @@
       <div class="buttons">
         <button class="primary" disabled={!canCommit} onclick={doCommit}>Commit</button>
         <button disabled={!canPush} onclick={doPush}>
-          {needsPublish ? 'Publish branch' : 'Push'}
+          {publishable ? 'Publish branch' : 'Push'}
         </button>
       </div>
 
