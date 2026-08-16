@@ -16,7 +16,8 @@ git client. See **[docs/SPEC.md](docs/SPEC.md)** for the full design.
 Left: the hot set pinned above everything else, each row carrying its branch, one dirty
 dot and an ahead/behind badge. Middle: staged and unstaged files for the selected repo.
 Right: the graph, with the *Uncommitted Changes* node on top and the HEAD commit's row
-marked by a larger dot and a tint of its own lane colour.
+marked by a larger dot and a tint of its own lane colour — or, behind the other tab in
+that pane's header, a side-by-side diff of whichever file was last clicked.
 
 The screenshot is taken against a throwaway folder of repositories built by
 `bash scripts/make-demo-root.sh` — ahead, behind, dirty, a feature branch and one repo
@@ -24,8 +25,8 @@ with no upstream — so it can be reproduced whenever the UI moves.
 
 **Status: build step 9 of 10.** Everything through branch switching and conflict detection
 works; the polish pass is landing (pins, filter, watchers on hot repos, context menus, error
-translation, the native menu bar). Multi-window, and shipping with auto-update, are what
-remain.
+translation, the native menu bar), and the read-only diff viewer (§5.4) is in. Multi-window,
+and shipping with auto-update, are what remain.
 
 ---
 

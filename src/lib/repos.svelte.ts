@@ -319,12 +319,21 @@ class RepoStore {
   /** The dirty-tree checkout failure's other half (§8.3) — not routed through
    *  `write()`, since it never mutates repo state and has nothing to refresh.
    *  Defaults to the selected repo; the row context menu (§5.1) passes an
-   *  explicit id for a row that may not be selected. */
-  async openInVSCode(id?: string): Promise<void> {
+   *  explicit id for a row that may not be selected.
+   *
+   *  `file` opens one file alongside the repo (§5.4). The repo is opened
+   *  either way: a file on its own gives a VS Code window with no source
+   *  control and no search around it, which is most of what made offering
+   *  VS Code worth doing. */
+  async openInVSCode(id?: string, file?: { path: string; line?: number }): Promise<void> {
     const target = id ?? this.selectedId;
     if (!target) return;
     try {
-      await invoke('open_in_vscode', { repoId: target });
+      await invoke('open_in_vscode', {
+        repoId: target,
+        file: file?.path ?? null,
+        line: file?.line ?? null,
+      });
     } catch (err) {
       this.writeError = String(err);
     }

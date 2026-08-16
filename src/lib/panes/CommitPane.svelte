@@ -3,7 +3,9 @@
   import FileRow from './FileRow.svelte';
   import EmptyState from '../EmptyState.svelte';
   import GitErrorNotice from '../GitErrorNotice.svelte';
-  import { needsPublish, repos } from '../repos.svelte';
+  import Glyph from '../Glyph.svelte';
+  import { needsPublish, repos, type FileEntry } from '../repos.svelte';
+  import { diff, type DiffSource } from '../diff.svelte';
 
   // Mode A (working tree) — SPEC.md §5.2. Commit details (Mode B) live in
   // their own panel (graph.svelte.ts + CommitInfoPanel.svelte) rather than
@@ -29,6 +31,27 @@
 
   function sectionLabel(shown: number, total: number): string {
     return shown === total ? `${total}` : `${shown} of ${total}`;
+  }
+
+  /** Which two sides the right pane compares (§5.4). It has to come from the
+   *  section rather than from the entry: the same path sits in both lists
+   *  whenever a file is partly staged, with a different diff on each side.
+   *  An untracked file has no other side at all, so it gets its own source
+   *  rather than a `git diff` that would correctly report nothing. */
+  function sourceFor(section: 'staged' | 'unstaged', entry: FileEntry): DiffSource {
+    if (section === 'staged') return { kind: 'staged' };
+    return entry.status === '?' ? { kind: 'untracked' } : { kind: 'unstaged' };
+  }
+
+  function openDiff(section: 'staged' | 'unstaged', entry: FileEntry) {
+    const id = repos.selectedId;
+    if (!id) return;
+    diff.show(id, entry.path, sourceFor(section, entry));
+  }
+
+  function isOpen(section: 'staged' | 'unstaged', entry: FileEntry): boolean {
+    const id = repos.selectedId;
+    return id !== undefined && diff.isOpen(id, entry.path, sourceFor(section, entry));
   }
 
   async function doCommit() {
@@ -178,7 +201,9 @@
             title="Clear commit message"
             aria-label="Clear commit message"
             onclick={() => (message = '')}
-          >×</button>
+          >
+            <Glyph kind="cross" />
+          </button>
         {/if}
       </div>
 
@@ -231,7 +256,14 @@
         <ul>
           {#each files.staged as entry (entry.path)}
             <li>
-              <FileRow {entry} action="unstage" disabled={busy} onToggle={() => unstagePath(entry.path)} />
+              <FileRow
+                {entry}
+                action="unstage"
+                disabled={busy}
+                onToggle={() => unstagePath(entry.path)}
+                onOpen={() => openDiff('staged', entry)}
+                selected={isOpen('staged', entry)}
+              />
             </li>
           {/each}
         </ul>
@@ -260,7 +292,14 @@
         <ul>
           {#each files.unstaged as entry (entry.path)}
             <li>
-              <FileRow {entry} action="stage" disabled={busy} onToggle={() => stagePath(entry.path)} />
+              <FileRow
+                {entry}
+                action="stage"
+                disabled={busy}
+                onToggle={() => stagePath(entry.path)}
+                onOpen={() => openDiff('unstaged', entry)}
+                selected={isOpen('unstaged', entry)}
+              />
             </li>
           {/each}
         </ul>
@@ -347,8 +386,6 @@
     border-radius: var(--radius-sm);
     background: none;
     color: var(--text-muted);
-    font-size: var(--text-md);
-    line-height: 1;
   }
 
   .clear-message:hover:not(:disabled) {

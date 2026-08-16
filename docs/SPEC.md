@@ -47,6 +47,7 @@ First paint renders from cache. It never waits on git.
 - Merge (via pull); conflict *detection* only
 - Branch switching (local and remote-tracking)
 - Commit graph for the selected repo, with commit details on click
+- Read-only side-by-side diff for one file at a time, working tree or commit (§5.4)
 - Pinning repos
 
 ### Out (v1)
@@ -70,6 +71,10 @@ tags · cherry-pick · revert · reset · submodules · LFS-specific UI · multi
 
 Replacing VS Code for conflict resolution or diff editing. When Corgit hits something it
 doesn't handle, the escape hatch is a single **Open in VS Code** button.
+
+*Reading* a diff is in (§5.4) and does not weaken this: the viewer is read-only, has no
+hunk staging, no editing and no conflict resolution, and every case it cannot render —
+binary, oversized, conflicted — ends at that same button rather than at a half-measure.
 
 ---
 
@@ -122,7 +127,9 @@ support (§6) needs ≥ 2.37.
 
 All three panes are **resizable by dragging**, with widths persisted to settings. The
 percentages above are defaults, not constraints. Minimum widths prevent collapse to
-unusable.
+unusable. The same is true of the boundary inside the diff view (§5.4), and *View ▸ Reset
+Pane Sizes* returns every draggable boundary in the window — not only the pane ones — to
+its default.
 
 ### 4.1 Menu bar
 
@@ -216,8 +223,10 @@ Changes (14)                [+ stage all]
 - **Commit commits staged files only.** Disabled when nothing is staged or the message is
   empty.
 - File rows: status letter, path (ellipsized head-first so the filename stays visible),
-  hover reveals `+`/`−` stage/unstage buttons. Click a file → diff opens in VS Code (v1 has
-  no internal diff viewer).
+  hover reveals `+`/`−` stage/unstage buttons. **Click a file → its diff opens in the right
+  pane** (§5.4). The section the row is in decides which two sides get compared, because
+  that is the only thing that knows: a partly-staged file appears in both lists at once
+  with a different diff on each.
 - **File list is capped at 100 entries per section.** The header must then read
   `Changes (100 of 3,412)`. "Stage all" still stages everything and its tooltip says so
   explicitly — the user must never commit files the UI silently hid.
@@ -235,9 +244,14 @@ Files (7)
   A  src/retry.rs
 ```
 
-Read-only. Clicking a file opens that commit's diff in VS Code.
+Read-only. Clicking a file opens that commit's diff against its parent in the right pane
+(§5.4) — the same viewer the working-tree rows use.
 
 ### 5.3 Graph (right)
+
+The right pane is **two views behind a tab strip** in its header: the graph below, and the
+open file's diff (§5.4). Selecting *Graph* does not close the diff — the tab stays, and
+the graph keeps its scroll position and loaded pages, so glancing between the two is free.
 
 Selected repo only — one repo at a time, so graph cost never multiplies by 77.
 
@@ -268,6 +282,65 @@ free, and avoids hand-rolled hit-testing. Canvas only pays off past ~10k simulta
 which we never render.
 
 **Lane layout** is implemented in-house. Do not parse `git log --graph` ASCII output.
+
+### 5.4 Diff view (right pane, second view)
+
+One file at a time, read-only, opened by clicking a file row in either §5.2 mode.
+
+```
+┌──────────────────────────────────────────────────────┐
+│ [ GRAPH ] [ main.rs × ]                              │
+├──────────────────────────────────────────────────────┤
+│ src/main.rs                                   +2 −1  │
+│ INDEX                    │ WORKING TREE              │
+│  11   let a = 1;         │  11   let a = 1;          │
+│  12   old();             │  12   new();              │
+│                          │  13   extra();            │
+│           ⋯ 34 unchanged lines ⋯                     │
+│  47   let b = 2;         │  48   let b = 2;          │
+└──────────────────────────────────────────────────────┘
+```
+
+- **Side by side, never unified.** Old on the left, new on the right, each column captioned
+  with what it actually is — `HEAD`/`Index` for a staged row, `Index`/`Working tree` for an
+  unstaged one, `<hash>~`/`<hash>` for a commit.
+- **Both columns are sized against the pane, never against the content**, and the boundary
+  between them is draggable, with the fraction persisted beside the pane widths (§9.5).
+  Sizing them to the longest line instead is the obvious implementation and is wrong: on
+  any file with real code in it the old column alone exceeds the pane, so the new column
+  starts off the right edge and the two cannot be read together — which is the only reason
+  to put them side by side.
+- **Alignment is positional, not computed.** Git already decided which lines changed; a run
+  of removals is zipped against the run of additions that follows it and the shorter side
+  gets an empty filler cell. There is no second diff algorithm in the frontend, and there
+  must not be one — it would disagree with the patch it was handed.
+- **Lines never wrap.** Uniform row height is what makes the rows virtualizable, and a
+  wrapped row silently breaks the two columns' alignment. Each column clips its own text
+  instead, and **one shared horizontal offset moves both** — comparing two lines means
+  seeing the same columns of characters on each side, which independent offsets break.
+  That offset gets its own scrollbar strip along the bottom, whose travel is the longest
+  line in the *whole* file less the narrower of the two columns: with rows virtualized,
+  `max-content` would be measured from whichever rows happen to be mounted and the scroll
+  extent would shift under the user as they scrolled vertically.
+- **Unchanged regions between hunks are one row** saying how many lines were skipped. Only
+  the three lines of context git sends are ever shown; there is no "expand" affordance.
+- **Line-level tinting only.** No word-level intra-line highlighting and no syntax
+  highlighting — the latter needs a real dependency, and the frontend has exactly one.
+- **An *Open in VS Code* button sits in the file header, in every state** — the one action
+  a read-only view can offer, and it must not move around between states or it becomes
+  something to look for. It opens the repo folder *and* the file: a lone file gives a
+  VS Code window with no source control and no search around it, which is most of what
+  made offering VS Code worth doing. For a working-tree source it also jumps to the first
+  changed line; for a commit it does not, because that side is an older revision and its
+  line numbers would land the reader wherever those lines sit today.
+- **Four cases have nothing to render and rely on that button:** a binary file, a diff past
+  the backend's line cap (§8.8, truncated rather than silently short), a conflicted file
+  (§13 — resolution is VS Code's job), and an untracked file large enough to be a build
+  artefact. An untracked file below that limit renders as an all-additions diff, since that
+  is what it is.
+- Switching repos closes the diff — the path it names may not exist in the new one. Esc
+  closes it. A write to the repo (stage, unstage, commit) re-reads an open working-tree
+  diff; a commit's diff is immutable and is never re-read.
 
 ---
 
@@ -466,6 +539,31 @@ On auth failure, mark the repo "auth needed" in the UI and stop retrying it in t
 background. A **manual** fetch/push triggered by the user *is* allowed to prompt
 interactively — they're sitting right there.
 
+### 8.8 One file's diff
+
+```
+git diff          --no-ext-diff --no-color --no-renames -U3 -- <path>   # worktree vs index
+git diff --cached --no-ext-diff --no-color --no-renames -U3 -- <path>   # index vs HEAD
+git diff-tree --no-commit-id -p -r --no-ext-diff --no-color --no-renames -U3 <hash> -- <path>
+```
+
+`--no-ext-diff` because a configured external diff driver prints something we have no
+parser for and may be interactive; `--no-color` because `color.diff=always` in a user's
+config would salt the output with escape sequences; `--no-renames` because the pathspec
+already pins one path and half a rename pair reads worse than the add/delete it falls back
+to. The commit case deliberately uses the same `diff-tree` family as §8.5, so the diff and
+the file list it was clicked in cannot disagree — including agreeing to show nothing for a
+merge commit.
+
+An **untracked** file never shells out: `git diff` reports nothing for one and
+`--no-index` exits 1 by design, which is indistinguishable from a real failure. Read the
+file and call every line an addition — that *is* the diff against nothing — subject to a
+size cap first, and a NUL in the first 8000 bytes (git's own heuristic) means binary.
+
+Parsing stops at **20 000 body lines** and reports the diff as truncated. Past that it is
+no longer something a human reads, and rendering it means an IPC payload and a DOM row
+count that neither the §1 budget nor the reader survives.
+
 ---
 
 ## 9. Roots & persistence
@@ -526,7 +624,7 @@ per-window along with the rest of the root state if multi-window ships — §9.2
 
 | File | Location (Tauri) | Contents |
 | --- | --- | --- |
-| `settings.json` | `app_config_dir` | Global: pane widths, scan depth, sweep intervals, recent roots |
+| `settings.json` | `app_config_dir` | Global: pane widths, the diff view's column split (§5.4), scan depth, sweep intervals, recent roots |
 | `roots/<hash>.json` | `app_config_dir` | Per root: pins, last selected repo |
 | `cache/<hash>.json` | `app_cache_dir` | Per root: branch, dirty, ahead/behind, `last_fetch_at` |
 
@@ -575,7 +673,8 @@ value.
 One constraint so that light mode later isn't a rewrite: **all colour goes through CSS
 custom properties** on `:root` (`--bg-app`, `--bg-surface`, `--bg-raised`, `--border`,
 `--text-primary`, `--text-muted`, `--accent`, `--status-dirty`, `--status-error`,
-`--lane-1..8`). **No hex literals in component styles.** Adding a light theme then means
+`--lane-1..8`, `--diff-add-bg`/`--diff-del-bg` and their gutter and filler variants for
+§5.4). **No hex literals in component styles.** Adding a light theme then means
 shipping a second token block, not touching 40 components.
 
 Three rules for the dark palette:
@@ -751,6 +850,9 @@ Each step ends somewhere useful:
    native menu bar, single-instance enforcement + recent roots
 10. **Ship** — GitHub Releases, Tauri updater keypair, auto-update wired end to end
     (Authenticode deferred per §12)
+11. **Diff view** (§5.4) — added after the first ten were laid out, and numbered last
+    rather than slotted in beside step 7 so that the "build step N" citations already in
+    the code keep pointing at the same steps they were written against
 
 Measure against the §1 budget at step 3 and again at step 6. If cold start exceeds 500 ms,
 stop and fix it — that number is the reason this project exists.

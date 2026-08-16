@@ -2,6 +2,7 @@ mod atomicfile;
 mod branch;
 mod cache;
 mod commit;
+mod diff;
 mod discovery;
 mod git;
 mod graph;
@@ -445,6 +446,22 @@ async fn commit_details(repo_id: String, hash: String, app: AppHandle) -> Result
     graph::details(&path, &hash).await
 }
 
+/// One file's diff for the right pane's second view (§5.4, §8.8). Waits for
+/// any in-flight write like `repo_files` and `commit_details` do — a diff read
+/// mid-`git add` would describe an index that no longer exists by the time it
+/// painted.
+#[tauri::command]
+async fn file_diff(
+    repo_id: String,
+    path: String,
+    source: diff::DiffSource,
+    app: AppHandle,
+) -> Result<diff::FileDiff, String> {
+    let repo = repo_path(&app, &repo_id)?;
+    let _read_guard = app.state::<AppState>().write_queues.read(&repo_id).await;
+    diff::file(&repo, &path, &source).await
+}
+
 /// Branch switching (§8.3, §8.4 badges — build step 8): the graph shows every
 /// ref, so unlike the switcher (deferred), this takes whichever badge the
 /// user double-clicked or picked from its context menu and dispatches on its
@@ -485,8 +502,20 @@ async fn create_branch(
 /// The dirty-tree checkout failure's other half (§8.3): launches VS Code on
 /// the repo so the user can resolve things by hand. Fire-and-forget — nothing
 /// in Corgit's own state changes because of it.
+///
+/// `file` opens one file *as well as* the repo (§5.4's escape hatch): the
+/// folder always goes on the command line first so VS Code opens it as the
+/// workspace, because a lone file argument gives a window with no repo around
+/// it — no source control, no search, which is the context that made opening
+/// VS Code worth offering. `line` is appended as `-g <file>:<line>` so the
+/// editor lands on the first change rather than at the top of the file.
 #[tauri::command]
-async fn open_in_vscode(repo_id: String, app: AppHandle) -> Result<(), String> {
+async fn open_in_vscode(
+    repo_id: String,
+    file: Option<String>,
+    line: Option<u32>,
+    app: AppHandle,
+) -> Result<(), String> {
     let path = repo_path(&app, &repo_id)?;
 
     // VS Code's Windows launcher is a `.cmd` shim; `Command::new("code")` alone
@@ -500,6 +529,19 @@ async fn open_in_vscode(repo_id: String, app: AppHandle) -> Result<(), String> {
         tokio::process::Command::new("code")
     };
     command.arg(&path);
+
+    if let Some(file) = file {
+        // Joined here rather than trusted from the frontend: `file` is a
+        // repo-relative path out of `git status`, and the repo root is the
+        // only thing that can turn it into something VS Code can open.
+        let target = path.join(&file);
+        let target = target.to_string_lossy();
+        command.arg("-g");
+        match line {
+            Some(line) => command.arg(format!("{target}:{line}")),
+            None => command.arg(target.as_ref()),
+        };
+    }
 
     #[cfg(windows)]
     {
@@ -1428,6 +1470,7 @@ pub fn run() {
             graph_page,
             graph_refs,
             commit_details,
+            file_diff,
             stage_paths,
             unstage_paths,
             stage_all,

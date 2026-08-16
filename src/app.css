@@ -49,6 +49,20 @@
   --lane-7: #f778ba;
   --lane-8: #dbab0a;
 
+  /* Diff view (§5.4). Hues borrowed from --status-ahead / --status-error so a
+     green line means the same thing here as an ahead badge does, but at a low
+     enough alpha to sit under monospace text and still be read. The gutter is
+     stronger than the row: at 20 px a line-number column is the only part with
+     enough contrast area to carry the signal when the row scrolls past. */
+  --diff-add-bg: #16281a;
+  --diff-add-gutter: #1d3a23;
+  --diff-del-bg: #2c1618;
+  --diff-del-gutter: #431d20;
+  /* The cell opposite an addition or a deletion — no line exists there at all,
+     which has to read as absent rather than as an empty line of code. */
+  --diff-filler-bg: #191a1d;
+  --diff-gutter-text: #6b7280;
+
   --font-ui: 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif;
   --font-mono: 'Cascadia Mono', Consolas, 'Courier New', monospace;
 

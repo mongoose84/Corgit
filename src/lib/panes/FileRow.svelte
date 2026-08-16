@@ -1,4 +1,5 @@
 <script lang="ts">
+  import Glyph from '../Glyph.svelte';
   import type { FileEntry } from '../repos.svelte';
   import type { CommitFileEntry } from '../graph.svelte';
 
@@ -8,16 +9,22 @@
     action?: 'stage' | 'unstage';
     onToggle?: () => void;
     disabled?: boolean;
+    /** Opens this file's diff in the right pane (§5.4). Required, not optional:
+     *  every file row in the app is a way into the diff view, and a row that
+     *  silently was not would be indistinguishable from one that failed. */
+    onOpen: () => void;
+    /** This row's diff is the one currently open — marked so the file lists and
+     *  the right pane's tab cannot disagree about what is being shown. */
+    selected?: boolean;
   }
 
-  let { entry, action, onToggle, disabled = false }: Props = $props();
+  let { entry, action, onToggle, disabled = false, onOpen, selected = false }: Props = $props();
 
   // Per-file +/− (§5.2 revised, §8.5) — present only on a `CommitFileEntry`,
   // so this doubles as the "am I a commit-info row" check.
   const stats = $derived('insertions' in entry ? entry : null);
 
   const label = $derived(action === 'stage' ? 'Stage' : 'Unstage');
-  const symbol = $derived(action === 'stage' ? '+' : '−');
 
   /** M/A/D/R/C/T untouched, but git's own letters don't map to CSS-safe class
    *  names (`?`), so this buckets them into a handful of semantic tones. */
@@ -52,19 +59,24 @@
   const shown = $derived(headEllipsis(entry.path, 44));
 </script>
 
-<div class="file-row">
-  <span class="status status-{badgeTone}" title={entry.status}>{entry.status}</span>
-  <span class="path selectable" title={entry.path}>{shown}</span>
-  {#if stats}
-    <span class="stats">
-      {#if stats.insertions === null && stats.deletions === null}
-        <span class="stat-na">binary</span>
-      {:else}
-        <span class="stat-add">+{stats.insertions ?? 0}</span>
-        <span class="stat-del">−{stats.deletions ?? 0}</span>
-      {/if}
-    </span>
-  {/if}
+<div class="file-row" class:selected>
+  <!-- The path is deliberately not `.selectable` here, unlike everywhere else
+       readable in the app: `cursor: text` on something that opens a diff when
+       clicked is a lie, and the full path is on the title attribute anyway. -->
+  <button type="button" class="open" onclick={onOpen} title="Show the diff for {entry.path}">
+    <span class="status status-{badgeTone}" title={entry.status}>{entry.status}</span>
+    <span class="path">{shown}</span>
+    {#if stats}
+      <span class="stats">
+        {#if stats.insertions === null && stats.deletions === null}
+          <span class="stat-na">binary</span>
+        {:else}
+          <span class="stat-add">+{stats.insertions ?? 0}</span>
+          <span class="stat-del">−{stats.deletions ?? 0}</span>
+        {/if}
+      </span>
+    {/if}
+  </button>
   {#if action && onToggle}
     <button
       type="button"
@@ -74,7 +86,7 @@
       title="{label} {entry.path}"
       aria-label="{label} {entry.path}"
     >
-      {symbol}
+      <Glyph kind={action === 'stage' ? 'plus' : 'minus'} />
     </button>
   {/if}
 </div>
@@ -90,6 +102,29 @@
 
   .file-row:hover {
     background: var(--bg-hover);
+  }
+
+  /* Declared after the hover rule so the open file stays marked while the
+     pointer is elsewhere in the list — which file is showing is a standing
+     fact, not a transient one (§5.3's HEAD-row reasoning). */
+  .file-row.selected {
+    background: var(--accent-muted);
+  }
+
+  /* The row itself (§5.4). A button rather than a click handler on the div, so
+     it is keyboard-reachable and announced as an action; the stage/unstage
+     toggle stays a sibling, since a button inside a button is not valid. */
+  .open {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    flex: 1 1 auto;
+    min-width: 0;
+    height: 100%;
+    padding: 0;
+    border: 0;
+    background: none;
+    text-align: left;
   }
 
   .status {
@@ -135,8 +170,6 @@
     border-radius: var(--radius-sm);
     background: none;
     color: var(--text-muted);
-    font-size: var(--text-md);
-    line-height: 1;
     opacity: 0;
   }
 

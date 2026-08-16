@@ -5,18 +5,26 @@
     title: string;
     children: Snippet;
     actions?: Snippet;
+    /** Replaces the `<h2>` with a caller-owned tab strip (§5.4) — the right
+     *  pane is two views, not one, and its header has to say which is showing.
+     *  `title` is still required and still names the pane for screen readers. */
+    tabs?: Snippet;
     /** Extra class for the root element — a styling hook for a caller-owned
      *  `:global()` rule, since scoped CSS in the caller can't otherwise reach
      *  into a child component's own template. */
     class?: string;
   }
 
-  let { title, children, actions, class: className = '' }: Props = $props();
+  let { title, children, actions, tabs, class: className = '' }: Props = $props();
 </script>
 
 <section class="pane {className}">
   <header>
-    <h2>{title}</h2>
+    {#if tabs}
+      <div class="tabs" role="tablist" aria-label={title}>{@render tabs()}</div>
+    {:else}
+      <h2>{title}</h2>
+    {/if}
     {#if actions}
       <div class="actions">{@render actions()}</div>
     {/if}
@@ -65,6 +73,16 @@
     align-items: center;
     gap: var(--space-1);
     flex: 0 0 auto;
+  }
+
+  /* The tabs sit where the title did, so they inherit its truncation problem:
+     a long filename must shrink rather than push the header's actions off the
+     end. The individual tabs own their own ellipsis. */
+  .tabs {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    min-width: 0;
   }
 
   .body {

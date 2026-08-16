@@ -2,7 +2,9 @@
   import Pane from './Pane.svelte';
   import FileRow from './FileRow.svelte';
   import EmptyState from '../EmptyState.svelte';
+  import Glyph from '../Glyph.svelte';
   import { graph, type RefBadge } from '../graph.svelte';
+  import { diff } from '../diff.svelte';
   import { repos } from '../repos.svelte';
   import { formatCommitDate } from '../dateFormat';
   import { laneColorVar } from '../graphLayout';
@@ -38,11 +40,24 @@
   function close() {
     graph.select('working-tree');
   }
+
+  /** A commit's file rows open the same diff view the working-tree rows do
+   *  (§5.4), against that commit's parent. Read-only either way — the only
+   *  difference is which two sides get compared. */
+  function openDiff(path: string, hash: string) {
+    if (graph.repoId) diff.show(graph.repoId, path, { kind: 'commit', hash });
+  }
+
+  function isOpen(path: string, hash: string): boolean {
+    return graph.repoId !== null && diff.isOpen(graph.repoId, path, { kind: 'commit', hash });
+  }
 </script>
 
 <Pane title="Commit" class="info-panel">
   {#snippet actions()}
-    <button type="button" class="close" title="Close" aria-label="Close" onclick={close}>×</button>
+    <button type="button" class="close" title="Close" aria-label="Close" onclick={close}>
+      <Glyph kind="cross" />
+    </button>
   {/snippet}
 
   {#if graph.loadingDetails && !details}
@@ -94,7 +109,13 @@
     {:else}
       <ul>
         {#each details.files as entry (entry.path)}
-          <li><FileRow {entry} /></li>
+          <li>
+            <FileRow
+              {entry}
+              onOpen={() => openDiff(entry.path, details.hash)}
+              selected={isOpen(entry.path, details.hash)}
+            />
+          </li>
         {/each}
       </ul>
     {/if}
@@ -121,8 +142,6 @@
     border-radius: var(--radius-sm);
     background: none;
     color: var(--text-muted);
-    font-size: var(--text-md);
-    line-height: 1;
   }
 
   .close:hover {

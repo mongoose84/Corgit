@@ -20,6 +20,8 @@ export interface PaneWidths {
 export interface Settings {
   version: number;
   paneWidths: PaneWidths;
+  /** The diff view's old/new split (§5.4), as a fraction of that pane's width. */
+  diffSplit: number;
   scanDepth: number;
   statusSweepSecs: number;
   fetchSweepSecs: number;
@@ -27,10 +29,13 @@ export interface Settings {
 }
 
 export const DEFAULT_PANE_WIDTHS: PaneWidths = { left: 0.25, middle: 0.2 };
+/** Even, because neither side of a diff is the more important one by default. */
+export const DEFAULT_DIFF_SPLIT = 0.5;
 
 const DEFAULTS: Settings = {
   version: 1,
   paneWidths: { ...DEFAULT_PANE_WIDTHS },
+  diffSplit: DEFAULT_DIFF_SPLIT,
   scanDepth: 1,
   statusSweepSecs: 60,
   fetchSweepSecs: 300,
@@ -54,6 +59,24 @@ class SettingsStore {
   set paneWidths(value: PaneWidths) {
     this.data.paneWidths = value;
     this.queueSave();
+  }
+
+  get diffSplit(): number {
+    return this.data.diffSplit;
+  }
+
+  set diffSplit(value: number) {
+    this.data.diffSplit = value;
+    this.queueSave();
+  }
+
+  /** *View ▸ Reset Pane Sizes* and a divider's double-click (§4.1). Shared so
+   *  the menu item and the dividers cannot reset different sets of things —
+   *  every draggable boundary in the window goes back to its default here. */
+  resetLayout(): void {
+    this.data.paneWidths = { ...DEFAULT_PANE_WIDTHS };
+    this.data.diffSplit = DEFAULT_DIFF_SPLIT;
+    void this.flush();
   }
 
   /** Re-read what the backend holds. Opening a folder appends to the

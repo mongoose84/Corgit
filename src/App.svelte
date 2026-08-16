@@ -7,7 +7,8 @@
   import CommitInfoPanel from './lib/panes/CommitInfoPanel.svelte';
   import { repos } from './lib/repos.svelte';
   import { graph } from './lib/graph.svelte';
-  import { settings, DEFAULT_PANE_WIDTHS } from './lib/settings.svelte';
+  import { diff } from './lib/diff.svelte';
+  import { settings } from './lib/settings.svelte';
   import { paneVisibility, startMenuListener } from './lib/menu.svelte';
 
   // Minimum usable widths (SPEC.md §4). Below these the panes stop being
@@ -99,14 +100,14 @@
   }
 
   function reset() {
-    settings.paneWidths = { ...DEFAULT_PANE_WIDTHS };
-    void settings.flush();
+    settings.resetLayout();
   }
 
   // Settings first: the pane widths are needed for the very first paint, and
   // the welcome screen reads the recent-roots list from them.
   void settings.load().then(() => repos.start());
   void graph.start();
+  void diff.start();
   void startMenuListener();
 </script>
 
