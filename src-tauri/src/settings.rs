@@ -39,6 +39,11 @@ impl Default for PaneWidths {
 pub struct Settings {
     pub version: u32,
     pub pane_widths: PaneWidths,
+    /// The diff view's old/new split (§5.4), as a fraction of that pane's
+    /// width. Stored beside the pane widths and for the same reason: it is a
+    /// layout preference, and re-dragging it every session is exactly the kind
+    /// of small friction the persisted widths exist to avoid.
+    pub diff_split: f64,
     /// Direct children of a root only (§8.1). Present so the value is
     /// inspectable, not because deeper scanning is supported.
     pub scan_depth: u32,
@@ -52,6 +57,7 @@ impl Default for Settings {
         Self {
             version: SETTINGS_VERSION,
             pane_widths: PaneWidths::default(),
+            diff_split: 0.5,
             scan_depth: 1,
             status_sweep_secs: 60,
             fetch_sweep_secs: 300,
@@ -137,6 +143,23 @@ mod tests {
 
         assert_eq!(loaded.pane_widths.left, 0.31);
         assert_eq!(loaded.recent_roots.len(), 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The container-level `#[serde(default)]` is what lets a field be added
+    /// without a version bump: a settings file written before `diff_split`
+    /// existed still loads, with the new field defaulted rather than the whole
+    /// file rejected.
+    #[test]
+    fn a_file_predating_a_field_keeps_the_rest_and_defaults_the_new_one() {
+        let dir = std::env::temp_dir().join("corgit-test-added-field");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(path(&dir), br#"{"version":1,"paneWidths":{"left":0.31,"middle":0.2}}"#).unwrap();
+
+        let loaded = load(&dir);
+
+        assert_eq!(loaded.pane_widths.left, 0.31);
+        assert_eq!(loaded.diff_split, 0.5);
         let _ = fs::remove_dir_all(&dir);
     }
 

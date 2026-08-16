@@ -1,7 +1,7 @@
 import { listen } from '@tauri-apps/api/event';
 
 import { needsPublish, repos } from './repos.svelte';
-import { settings, DEFAULT_PANE_WIDTHS } from './settings.svelte';
+import { settings } from './settings.svelte';
 import { inTauri } from './tauri';
 
 /**
@@ -57,8 +57,7 @@ function dispatch(action: MenuAction): void {
       void repos.open(action.path);
       break;
     case 'reset-pane-sizes':
-      settings.paneWidths = { ...DEFAULT_PANE_WIDTHS };
-      void settings.flush();
+      settings.resetLayout();
       break;
     case 'fetch':
       void repos.fetch();
