@@ -135,7 +135,8 @@ to put the dog in a repository row.
 | Content, 112px | `panes/GraphPane.svelte` | No repo selected and `repos.allClean` — every repo swept, clean, and neither ahead nor behind |
 | Mini working, 18px | `panes/RepoList.svelte` | A status sweep is in flight; the pane header's timing readout takes the slot back when it lands |
 | Mini sorry, 20px | `GitErrorNotice.svelte` | Any git failure, wherever the notice is used. Kept small because the narrowest host is the 240px commit pane |
-| App mark | — | Not used in the UI; it is the source for `src-tauri/icon-source.png` and the bundled icon set |
+| App mark, 20px | `TitleBar.svelte` | Always, at the left end of the combined title bar (SPEC.md §4.1). Below the 24px floor above, which is the case the head crop exists for — the taskbar and the window caption have been rendering the same artwork at 16px all along. It became a UI placement only when the window's caption stopped being drawn by Windows and started being ours |
+| App mark | — | Also the source for `src-tauri/icon-source.png` and the bundled icon set |
 
 `allClean` is deliberately strict — a sweep in flight, a failed status, or a repo not yet
 swept all read as *not known to be clean*, because a dog lying down over stale data is the

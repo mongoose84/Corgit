@@ -25,7 +25,7 @@ with no upstream — so it can be reproduced whenever the UI moves.
 
 **Status: build step 9 of 10.** Everything through branch switching and conflict detection
 works; the polish pass is landing (pins, filter, watchers on hot repos, context menus, error
-translation, the native menu bar), and the read-only diff viewer (§5.4) is in. Multi-window,
+translation, the combined title bar and menu), and the read-only diff viewer (§5.4) is in. Multi-window,
 and shipping with auto-update, are what remain.
 
 ---
@@ -102,9 +102,15 @@ src/
     graphLayout.ts           lane assignment — in-house, never `log --graph`
     gitErrors.ts             stderr → plain language (SPEC §13)
     dateFormat.ts            fixed dd-MM-yyyy HH:mm:ss, never a locale format
-    menu.svelte.ts           native menu events → frontend actions
+    menuModel.ts             the menu bar's contents as data (SPEC §4.1)
+    menu.svelte.ts           menu model from live state; routes a chosen item
+    windowFrame.svelte.ts    is the window maximized? (undecorated, so we ask)
     tauri.ts                 are we running inside the desktop shell?
     Welcome.svelte           first run, missing root, or missing git
+    TitleBar.svelte          the one top row — mark, menus, caption buttons
+    MenuBar.svelte           File · View · Repository · Help, and their opening
+    MenuDropdown.svelte      one open menu's panel; checks, submenus, shortcuts
+    WindowControls.svelte    minimize · maximize/restore · close
     Divider.svelte           draggable pane separator
     ContextMenu.svelte       right-click menus
     Popover.svelte           anchored overlay, used by row error badges

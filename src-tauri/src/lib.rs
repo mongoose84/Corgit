@@ -71,11 +71,11 @@ struct AppState {
     write_queues: Arc<WriteQueues>,
     /// FS watchers on the hot set — pinned ∪ selected (§6, build step 9).
     hot_watchers: watch::HotWatchers,
-    /// Native menu bar (§4.1) — handles for the items later mutations
-    /// (selection change, a View checkbox, a new recent root) need to reach.
-    menu: menu::MenuHandles,
     /// The View menu's two checkboxes' actual state — the checkboxes
-    /// themselves only mirror this (§9.3: Rust owns state).
+    /// themselves only mirror this (§9.3: Rust owns state). The only piece of
+    /// the menu bar still held here now that it is drawn in the webview
+    /// (§4.1); the rest of what a menu needs — the recent roots, whether a
+    /// repo is selected — the frontend already has.
     pane_visibility: Mutex<menu::PaneVisibility>,
 }
 
@@ -648,8 +648,7 @@ fn clear_pins(app: AppHandle) -> Result<HashSet<String>, String> {
 
 /// The frontend's current selection, mirrored server-side (§9.5's persisted
 /// `last_selected`, and the input to the hot set in §6/build step 9's
-/// watchers plus the Repository menu's enabled state in the native menu bar).
-/// `None` when nothing is selected.
+/// watchers). `None` when nothing is selected.
 #[tauri::command]
 fn set_selected_repo(repo_id: Option<String>, app: AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
@@ -662,7 +661,11 @@ fn set_selected_repo(repo_id: Option<String>, app: AppHandle) -> Result<(), Stri
 
     persist_root_settings(&app, &root_path, pins, selected.clone());
     sync_hot_watchers(&app);
-    menu::set_repo_selected(&app, selected.is_some());
+    // Repository ▸ Fetch/Pull/Push used to be enabled and disabled from here,
+    // because a native menu item's enabled state is a thing you set. The
+    // frontend menu derives it from `repos.selectedId` instead (§4.1's table),
+    // which is the same selection this command is mirroring — so there is
+    // nothing left to push.
     Ok(())
 }
 
@@ -720,7 +723,14 @@ async fn publish_branch(repo_id: String, app: AppHandle) -> Result<(), String> {
 
 /// Commit, then push in one step. Whether that push needs `-u origin` is
 /// decided up front from the known status, before the commit runs, since a
-/// fresh commit does not change whether an upstream exists.
+/// fresh commit does not change what the branch tracks.
+///
+/// That decision is `status::needs_publish`, the same rule the frontend's
+/// `needsPublish` uses to label the button — one press, two decisions, and the
+/// only reason they are two is that this one happens on the far side of the
+/// IPC boundary. Deciding it here with a *narrower* rule than the label used
+/// is what made this the last path still failing on a branch whose upstream
+/// name did not match: the button read "Publish Branch" and this ran `push`.
 ///
 /// A stale answer costs nothing worse than a clear error: `push` on a branch
 /// that turns out to have no upstream stops with git's own "no upstream"
@@ -729,12 +739,12 @@ async fn publish_branch(repo_id: String, app: AppHandle) -> Result<(), String> {
 /// just committed to, because both refspecs resolve `HEAD` when git runs.
 #[tauri::command]
 async fn commit_and_push(repo_id: String, message: String, app: AppHandle) -> Result<(), String> {
-    let needs_publish = !has_upstream(&app, &repo_id);
-    if needs_publish {
-        // Detached HEAD fails here rather than after `commit::commit` has
-        // already written a commit that the push would then not carry.
-        current_branch(&app, &repo_id)?;
-    }
+    // Detached HEAD fails here rather than after `commit::commit` has already
+    // written a commit that the push would then not carry. It is its own check
+    // rather than a consequence of `needs_publish`, which reports `false` for
+    // a detached HEAD (there is no branch to publish) and would otherwise send
+    // it down the plain-push path to fail in git's words instead of ours.
+    let needs_publish = publish_needed(&app, &repo_id)?;
 
     write_and_refresh(&app, repo_id, |path| async move {
         commit::commit(&path, &message).await?;
@@ -756,13 +766,26 @@ fn current_branch(app: &AppHandle, repo_id: &str) -> Result<String, String> {
         .ok_or_else(|| "No branch to publish (detached HEAD)".to_string())
 }
 
-fn has_upstream(app: &AppHandle, repo_id: &str) -> bool {
+/// Push or publish, for Commit & Push — `status::needs_publish` asked against
+/// the cached status, erroring on the detached HEAD that neither can serve.
+///
+/// Read from the currently known status for the same reason `current_branch`
+/// is: this only picks between two commands that both push `HEAD`, so a stale
+/// answer cannot send a commit somewhere unintended. The worst case is a clear
+/// error — `push` on a branch that turns out to need publishing stops with
+/// git's own message, and `publish` on one that did not re-points an upstream
+/// at the branch it was already tracking.
+fn publish_needed(app: &AppHandle, repo_id: &str) -> Result<bool, String> {
     let state = app.state::<AppState>();
     let current = state.root.lock().expect("root mutex poisoned");
-    current
-        .as_ref()
-        .and_then(|root| root.statuses.get(repo_id))
-        .is_some_and(|status| status.upstream.is_some())
+    let root = current.as_ref().ok_or_else(|| "No folder is open".to_string())?;
+    let status = root.statuses.get(repo_id).ok_or_else(|| "That repository has no status yet".to_string())?;
+    let branch = status
+        .branch
+        .as_deref()
+        .ok_or_else(|| "No branch to publish (detached HEAD)".to_string())?;
+
+    Ok(status::needs_publish(branch, status.upstream.as_deref()))
 }
 
 /// Records this repo's fetch attempt and clears any "auth needed" flag (§8.7,
@@ -1325,24 +1348,24 @@ async fn fetch_many(write_queues: Arc<WriteQueues>, repos: Vec<Repo>) -> (Vec<St
 
 /// Most-recent-first, deduplicated, capped. Saved immediately rather than on
 /// the settings debounce: opening a folder is exactly the moment a crash would
-/// be most annoying to lose. Also refreshes the native File ▸ Open Recent
-/// submenu (§4.1), since this is the one place the list actually changes.
+/// be most annoying to lose.
+///
+/// This used to also repopulate the native File ▸ Open Recent submenu, being
+/// the one place the list actually changes. The frontend menu (§4.1) renders
+/// that submenu from `settings.data.recentRoots`, which the frontend refreshes
+/// on the same open this is called from — so the list now follows without
+/// being pushed.
 fn remember_root(app: &AppHandle, root: &Path) {
     let state = app.state::<AppState>();
-    let recent_roots = {
-        let mut settings = state.settings.lock().expect("settings mutex poisoned");
+    let mut settings = state.settings.lock().expect("settings mutex poisoned");
 
-        settings.recent_roots.retain(|recent| recent != root);
-        settings.recent_roots.insert(0, root.to_path_buf());
-        settings.recent_roots.truncate(MAX_RECENT_ROOTS);
+    settings.recent_roots.retain(|recent| recent != root);
+    settings.recent_roots.insert(0, root.to_path_buf());
+    settings.recent_roots.truncate(MAX_RECENT_ROOTS);
 
-        if let Err(err) = settings::save(&state.config_dir, &settings) {
-            log::warn!("could not save recent roots ({err})");
-        }
-        settings.recent_roots.clone()
-    };
-
-    menu::refresh_open_recent(app, &recent_roots);
+    if let Err(err) = settings::save(&state.config_dir, &settings) {
+        log::warn!("could not save recent roots ({err})");
+    }
 }
 
 /// Routes a second launch into the running process rather than starting a
@@ -1417,11 +1440,6 @@ pub fn run() {
                 log::error!("no usable git on PATH");
             }
 
-            // No repo is open yet, so nothing is selected and the panes
-            // default to visible — built before `app.manage` since the
-            // resulting handles are themselves a field of `AppState`.
-            let menu_handles = menu::install(app.handle(), &settings.recent_roots, false, menu::PaneVisibility::default())?;
-
             app.manage(AppState {
                 config_dir,
                 cache_dir,
@@ -1434,7 +1452,7 @@ pub fn run() {
                 fetch_ticker: Mutex::new(None),
                 write_queues: Arc::new(WriteQueues::default()),
                 hot_watchers: watch::HotWatchers::default(),
-                menu: menu_handles,
+                // No repo is open yet, so the panes default to visible.
                 pane_visibility: Mutex::new(menu::PaneVisibility::default()),
             });
 
@@ -1489,6 +1507,8 @@ pub fn run() {
             toggle_pin,
             clear_pins,
             set_selected_repo,
+            menu::menu_command,
+            menu::publish_pane_visibility,
         ])
         .run(tauri::generate_context!())
         .expect("corgit: fatal error while running the application");

@@ -1,7 +1,13 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Baseline capabilities for Corgit windows.",
+  "description": "Baseline capabilities for Corgit windows. The four window permissions beyond core:default are what the custom title bar (SPEC.md §4.1) needs: core:window:default covers only read-only calls plus internal-toggle-maximize (the drag region's double-click), so dragging the window and the three caption buttons each have to be granted by hand.",
   "windows": ["main", "window-*"],
-  "permissions": ["core:default"]
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-minimize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-close"
+  ]
 }

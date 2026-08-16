@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { isDirty, needsPublish, repos, type Repo, type RepoStatus } from '../repos.svelte';
+  import { isDirty, publishReason, repos, type Repo, type RepoStatus } from '../repos.svelte';
   import ContextMenu from '../ContextMenu.svelte';
   import Popover from '../Popover.svelte';
   import GitErrorNotice from '../GitErrorNotice.svelte';
@@ -23,7 +23,17 @@
   // reserves for "does this need me?": unpublished is a fact about the branch,
   // not a repo that needs attention. It also costs no width, and the strip is
   // already what squeezes the name to an ellipsis on a narrow pane.
-  const unpublished = $derived(status !== undefined && needsPublish(status));
+  const publish = $derived(status === undefined ? null : publishReason(status));
+  const unpublished = $derived(publish !== null);
+  // Both states underline the name, but they are not the same fact and the
+  // tooltip is the only place that can say which. Telling someone whose
+  // branch tracks `origin/main` that it has no upstream would send them
+  // looking for the wrong problem.
+  const publishHint = $derived(
+    publish === 'upstream-name-mismatch'
+      ? `${branch} tracks ${status?.upstream} — a differently-named branch, so Push cannot work. Publish will point it at origin/${branch}.`
+      : `${branch} is not published — no upstream branch on the remote`,
+  );
   const pinned = $derived(repos.pins.has(repo.id));
   // The background fetch sweep stopped retrying this repo (§8.7, §13) — a
   // manual fetch is what clears it. Shown alongside the other badges rather
@@ -147,7 +157,7 @@
         class="branch"
         class:detached={!status.branch}
         class:unpublished
-        title={unpublished ? `${branch} is not published — no upstream branch on the remote` : undefined}
+        title={unpublished ? publishHint : undefined}
       >{branch}</span>
 
       {#if status.conflicted > 0}
