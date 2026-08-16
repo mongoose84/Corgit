@@ -175,8 +175,9 @@ class RepoStore {
   select(id: string): void {
     this.selected = new Set([id]);
     void this.loadFiles();
-    // Mirrored server-side for §9.5 persistence, the hot-set watchers (§6)
-    // and the native menu bar's Repository-menu enable/disable state.
+    // Mirrored server-side for §9.5 persistence and the hot-set watchers
+    // (§6). Not for the Repository menu any more — that reads `selectedId`
+    // straight off this store (§4.1).
     void invoke('set_selected_repo', { repoId: id }).catch(() => {});
   }
 

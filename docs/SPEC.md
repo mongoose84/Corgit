@@ -106,7 +106,7 @@ support (§6) needs ≥ 2.37.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
-│ File   View   Repository   Help                                      │
+│ 🐕  File   View   Repository   Help                        ─   □   ✕ │
 ├─────────────────┬──────────────────┬─────────────────────────────────┤
 │ REPO LIST       │ COMMIT / DETAILS │ GRAPH                           │
 │ ~25%            │ ~20%             │ rest                            │
@@ -131,23 +131,76 @@ unusable. The same is true of the boundary inside the diff view (§5.4), and *Vi
 Pane Sizes* returns every draggable boundary in the window — not only the pane ones — to
 its default.
 
-### 4.1 Menu bar
+### 4.1 Title bar and menu
 
-A **native Windows menu** via Tauri's `tauri::menu` API — not an HTML reimplementation.
-VS Code hand-rolls its menu because it needs identical behaviour on three platforms and
-command-palette integration; you need neither. Native gets OS-consistent behaviour,
-keyboard accessibility and accelerators for free, and costs no CSS.
+**One row**, in the client area: app mark, the four menus, then minimize / maximize /
+close. The window is `decorations: false`.
 
 | Menu | Items |
 | --- | --- |
 | **File** | Open Folder… `Ctrl+O` · Open Recent ▸ · Close Window `Ctrl+W` · Exit |
 | **View** | Toggle Repo List · Toggle Commit Pane · Reset Pane Sizes · Reload |
-| **Repository** | Fetch · Pull · Push — acting on the selected repo, mirroring the buttons for discoverability. Disabled when no repo is selected. |
+| **Repository** | Fetch · Pull · Push — acting on the selected repo, mirroring the buttons for discoverability. Disabled when no repo is selected. Push reads *Publish Branch* on a branch with no upstream, matching §8.7's button. |
 | **Help** | About · Check for Updates · Open Log Folder |
 
-Menu events arrive on the Rust side. Items whose behaviour already lives in the frontend
-are forwarded to it as one event rather than reimplemented in Rust; items that only touch
-process lifecycle or a boolean Rust already owns are handled where they arrive.
+#### This reverses an earlier decision, and the earlier reasoning was not wrong
+
+This section used to specify a **native Windows menu** via `tauri::menu`, explicitly *not*
+an HTML reimplementation, on the grounds that VS Code hand-rolls its menu only because it
+needs three platforms and a command palette, while native gives OS-consistent behaviour,
+keyboard accessibility and accelerators for free and costs no CSS. All of that was true and
+all of it still is.
+
+What it did not account for is that on Windows a native menu is **its own row, below the
+caption** — the OS stacks them and there is no arrangement in which they share one. Two
+OS-drawn rows above a window whose entire purpose is fitting as many repository rows on
+screen as possible cost ~30px permanently. Merging them means drawing the caption
+ourselves, and a custom caption cannot host a native menu. So the menu became HTML as a
+*consequence* of the title bar, not because the original argument stopped holding.
+
+What it cost, all of it real:
+
+- **Accelerators** are re-registered by hand (`TitleBar.svelte`). The key and the label
+  shown beside the item are now two declarations that can drift; `menuModel.test.ts` pins
+  them together.
+- **Alt mnemonics** (Alt+F for File) are **not** reimplemented. They want underlined
+  letters, an Alt-held state, and a collision rule against shortcuts. Recorded as absent
+  rather than half-built.
+- **Snap Layouts** — Windows 11's flyout when hovering Maximize — is gone, and this is
+  measurable rather than assumed: the maximize button reports `HTCLIENT` to `WM_NCHITTEST`
+  where a native frame would report `HTMAXBUTTON`. `Win`+arrow snapping is OS-level and
+  unaffected. Restoring the flyout needs hand-rolled `WM_NCHITTEST` or a plugin; judged not
+  worth a new dependency or a `#[cfg(windows)]` block for v1.
+- **Screen-reader semantics** are hand-built out of `menubar`/`menuitem`/`menuitemcheckbox`
+  roles instead of being inherent.
+
+What it did **not** cost, because these were checked rather than assumed:
+
+- **Resize edges** all still grab — the window keeps `WS_THICKFRAME`, and all eight zones
+  report correctly.
+- **Rounded corners** survive.
+- **The maximized overhang is not a bug.** The maximized window rect is the work area
+  inflated by 9px on every side, which looks exactly like the well-known custom-titlebar
+  defect where the close button lands off-screen. It is not: tao handles `WM_NCCALCSIZE`,
+  so the *client* rect is already the work area at screen 0,0 and the overhang is invisible.
+  Padding it away costs a visible 9px band on all four sides and buys nothing. Measure the
+  client rect, not the window rect, before believing otherwise.
+
+#### Where each item's behaviour lives
+
+Unchanged by the move, and deliberately so. Items that only touch process lifecycle or a
+boolean Rust owns (§9.3) — Close Window, Exit, the View checkboxes, About, Open Log Folder
+— are invoked as `menu_command` and handled in `menu.rs`. Everything else is a frontend
+store method called directly. Those used to make a round trip out to Rust and back as a
+`menu:action` event purely because the menu lived on the Rust side; with the menu in the
+webview, that event has no cargo and is gone.
+
+Two things Rust used to *push* are now *derived* instead: Repository's enabled state comes
+from `repos.selectedId` rather than `set_repo_selected`, and Open Recent renders from
+`settings.data.recentRoots` rather than being repopulated on every change. The one thing
+still pushed is `pane:visibility`, because Rust owns those booleans and outlives the
+webview — the frontend asks for them once on load, since unlike a native menu an HTML one
+is rebuilt by every reload.
 
 ---
 
@@ -694,6 +747,14 @@ Three rules for the dark palette:
 
 Set the Tauri window background colour to `--bg-app` so the window doesn't flash white
 before the webview paints.
+
+One token is an exception to rule 3's "one accent, status colours are semantic" framing:
+`--titlebar-close-hover` (`#c42b1c`) is Windows' own close-button red, and it exists
+because the caption is drawn by us now (§4.1). It sits close to `--status-error` and is
+kept separate on purpose — that token means "a git operation failed", this one means
+"this is the close button", and the two must be free to move apart. It is the one place
+the app defers to the OS palette instead of its own, because the muscle memory being
+served was trained by every other window on the desktop.
 
 Graph lane colours are a fixed palette of ~8 hues cycled by lane index, chosen to stay
 distinguishable from each other *and* from the accent and status colours on the dark

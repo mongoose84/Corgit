@@ -31,6 +31,13 @@
   --accent-muted: #262b5e;
   --accent-text: #ffffff;
 
+  /* The one place the app defers to Windows' palette instead of its own: a
+     close button that goes red on hover is learned behaviour from every other
+     window on the desktop, and this is Windows 11's value for it. Close to
+     --status-error and kept separate on purpose — that token means "a git
+     operation failed", and the two must be free to diverge. */
+  --titlebar-close-hover: #c42b1c;
+
   /* Semantic status colours. Distinct hues from --accent and from each other. */
   --status-dirty: #e3b341;
   --status-ahead: #3fb950;
@@ -82,6 +89,12 @@
 
   --row-height: 30px;
   --header-height: 34px;
+  /* The combined title bar (§4.1). 32px is the Windows caption height at 100%
+     DPI, and the bar it replaces was that plus a ~24px menu row — the whole
+     point of merging them. Deliberately not --header-height: a pane header
+     sits inside the window, this is the window's edge, and the two must be
+     free to move apart. */
+  --titlebar-height: 32px;
 
   color-scheme: dark;
 }

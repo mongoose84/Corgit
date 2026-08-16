@@ -1,5 +1,6 @@
 <script lang="ts">
   import Divider from './lib/Divider.svelte';
+  import TitleBar from './lib/TitleBar.svelte';
   import Welcome from './lib/Welcome.svelte';
   import RepoList from './lib/panes/RepoList.svelte';
   import CommitPane from './lib/panes/CommitPane.svelte';
@@ -10,6 +11,7 @@
   import { diff } from './lib/diff.svelte';
   import { settings } from './lib/settings.svelte';
   import { paneVisibility, startMenuListener } from './lib/menu.svelte';
+  import { startWindowFrame } from './lib/windowFrame.svelte';
 
   // Minimum usable widths (SPEC.md §4). Below these the panes stop being
   // readable, so they win over the stored fractions.
@@ -109,48 +111,68 @@
   void graph.start();
   void diff.start();
   void startMenuListener();
+  void startWindowFrame();
 </script>
 
-{#if !repos.ready}
-  <!-- Deliberately blank rather than a spinner. Startup is a few milliseconds
-       of reading two files; a spinner would only ever be seen as a flash. -->
-  <div class="booting"></div>
-{:else if repos.root === null}
-  <Welcome />
-{:else}
-  <main
-    bind:this={container}
-    bind:clientWidth={width}
-    style="--pane-left: {px.left}px; --divider-left: {showLeft ? DIVIDER : 0}px; --pane-middle: {px.middle}px; --divider-mid: {showMiddle ? DIVIDER : 0}px; --pane-info: {infoWidth}px"
-  >
-    {#if showLeft}
-      <RepoList />
-      <Divider
-        label="Resize repository list"
-        value={Math.round((px.left / usable) * 100)}
-        ondrag={dragLeft}
-        onrelease={() => void settings.flush()}
-        onreset={reset}
-      />
-    {/if}
-    {#if showMiddle}
-      <CommitPane />
-      <Divider
-        label="Resize commit pane"
-        value={Math.round(((px.left + px.middle) / usable) * 100)}
-        ondrag={dragMiddle}
-        onrelease={() => void settings.flush()}
-        onreset={reset}
-      />
-    {/if}
-    <GraphPane />
-    {#if infoOpen}
-      <CommitInfoPanel />
-    {/if}
-  </main>
-{/if}
+<!-- The title bar is outside the three states below, not repeated inside each
+     one: with `decorations: false` it is the only thing that can move, close
+     or restore the window, so it has to exist before settings have loaded and
+     on the welcome screen — not only once there is a repository list to sit
+     above. -->
+<div class="shell">
+  <TitleBar />
+
+  {#if !repos.ready}
+    <!-- Deliberately blank rather than a spinner. Startup is a few milliseconds
+         of reading two files; a spinner would only ever be seen as a flash. -->
+    <div class="booting"></div>
+  {:else if repos.root === null}
+    <Welcome />
+  {:else}
+    <main
+      bind:this={container}
+      bind:clientWidth={width}
+      style="--pane-left: {px.left}px; --divider-left: {showLeft ? DIVIDER : 0}px; --pane-middle: {px.middle}px; --divider-mid: {showMiddle ? DIVIDER : 0}px; --pane-info: {infoWidth}px"
+    >
+      {#if showLeft}
+        <RepoList />
+        <Divider
+          label="Resize repository list"
+          value={Math.round((px.left / usable) * 100)}
+          ondrag={dragLeft}
+          onrelease={() => void settings.flush()}
+          onreset={reset}
+        />
+      {/if}
+      {#if showMiddle}
+        <CommitPane />
+        <Divider
+          label="Resize commit pane"
+          value={Math.round(((px.left + px.middle) / usable) * 100)}
+          ondrag={dragMiddle}
+          onrelease={() => void settings.flush()}
+          onreset={reset}
+        />
+      {/if}
+      <GraphPane />
+      {#if infoOpen}
+        <CommitInfoPanel />
+      {/if}
+    </main>
+  {/if}
+</div>
 
 <style>
+  /* Title bar over content. The second track is `minmax(0, 1fr)` for the same
+     reason `main`'s row is, one level down: `1fr` alone has an auto minimum,
+     so a tall pane would push the grid past the window instead of scrolling
+     inside it — and here that would push the title bar off the top. */
+  .shell {
+    display: grid;
+    grid-template-rows: var(--titlebar-height) minmax(0, 1fr);
+    height: 100%;
+  }
+
   main {
     display: grid;
     grid-template-columns: var(--pane-left) var(--divider-left) var(--pane-middle) var(--divider-mid) 1fr var(--pane-info);
