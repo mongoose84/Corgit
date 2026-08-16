@@ -109,14 +109,14 @@ mod tests {
 
     #[test]
     fn missing_file_yields_an_empty_cache() {
-        let dir = TempDir::new("twogit-test-cache-missing");
+        let dir = TempDir::new("corgit-test-cache-missing");
         let cache = load(&dir.0, Path::new(r"C:\dev\code"));
         assert!(cache.statuses.is_empty());
     }
 
     #[test]
     fn corrupt_file_yields_an_empty_cache_and_is_removed() {
-        let dir = TempDir::new("twogit-test-cache-corrupt");
+        let dir = TempDir::new("corgit-test-cache-corrupt");
         let root = Path::new(r"C:\dev\code");
         fs::create_dir_all(&dir.0).unwrap();
         fs::write(path(&dir.0, root), b"{not json").unwrap();
@@ -129,7 +129,7 @@ mod tests {
 
     #[test]
     fn save_then_load_round_trips() {
-        let dir = TempDir::new("twogit-test-cache-roundtrip");
+        let dir = TempDir::new("corgit-test-cache-roundtrip");
         let root = Path::new(r"C:\dev\code");
 
         let mut cache = RootCache { version: CACHE_VERSION, statuses: HashMap::new(), last_fetch_at: HashMap::new() };
@@ -148,7 +148,7 @@ mod tests {
 
     #[test]
     fn different_roots_hash_to_different_files() {
-        let dir = TempDir::new("twogit-test-cache-hash");
+        let dir = TempDir::new("corgit-test-cache-hash");
         let a = path(&dir.0, Path::new(r"C:\dev\a"));
         let b = path(&dir.0, Path::new(r"C:\dev\b"));
         assert_ne!(a, b);
@@ -156,7 +156,7 @@ mod tests {
 
     #[test]
     fn same_root_different_case_hashes_the_same() {
-        let dir = TempDir::new("twogit-test-cache-case");
+        let dir = TempDir::new("corgit-test-cache-case");
         let a = path(&dir.0, Path::new(r"C:\dev\Code"));
         let b = path(&dir.0, Path::new(r"C:\DEV\code"));
         assert_eq!(a, b);
@@ -164,7 +164,7 @@ mod tests {
 
     #[test]
     fn unknown_version_yields_an_empty_cache() {
-        let dir = TempDir::new("twogit-test-cache-version");
+        let dir = TempDir::new("corgit-test-cache-version");
         let root = Path::new(r"C:\dev\code");
         fs::create_dir_all(&dir.0).unwrap();
         fs::write(path(&dir.0, root), br#"{"version":99,"statuses":{}}"#).unwrap();

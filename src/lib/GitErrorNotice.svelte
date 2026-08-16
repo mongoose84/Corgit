@@ -3,6 +3,7 @@
   // action button when one applies, and raw stderr behind a collapsible
   // "Details" toggle — "raw stderr always available" without dumping it in
   // the user's face by default.
+  import Mascot from './Mascot.svelte';
   import { translateGitError, type GitErrorAction } from './gitErrors';
 
   interface Props {
@@ -29,6 +30,11 @@
 
 <div class="notice">
   <div class="row">
+    <!-- Sorry, not alarmed — softening git's worst moments is this pose's
+         whole job (docs/mascot.md §5). Kept to 20px because the narrowest
+         place this notice appears is the 240px commit pane, where every pixel
+         he takes is one the message wraps out of. -->
+    <Mascot pose="mini-sorry" height={20} />
     <p class="message selectable">{translated.message}</p>
     <div class="actions">
       {#if action === 'pull' && onPull}
@@ -69,6 +75,9 @@
   }
 
   .message {
+    /* Takes the slack, so the dog stays tucked against the left edge instead
+       of being pushed apart from the text by `space-between`. */
+    flex: 1 1 auto;
     margin: 0;
     min-width: 0;
     overflow: hidden;

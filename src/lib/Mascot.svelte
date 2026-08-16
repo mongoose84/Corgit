@@ -1,141 +1,90 @@
 <script lang="ts">
   /*
-   * The twogit mascot — shown in the graph pane when nothing is checked out.
+   * The Corgit mascot — dead space and dead time only (SPEC.md §14.1). The
+   * poses and where each one belongs are in docs/mascot.md §5; the artwork is
+   * cut from the contact sheet by scripts/extract-mascot.py into ./mascot.
    *
-   * Built from the app mark's own parts so it reads as branding rather than
-   * clip-art: the two blue nodes of the mark become eyes, and the green merge
-   * node keeps its relationship to them, branching off to the right as an
-   * antenna. Colours come from the lane tokens, so it belongs to the graph it
-   * is standing in for.
+   * Raster, so there are no named parts to animate: a pose is one image, and
+   * the only motion available is a transform on the whole of it (§6). Working
+   * is the sole pose that takes it, because it stands in for a wait of unknown
+   * length; the rest are still.
    *
-   * Decorative only — the surrounding EmptyState copy carries the meaning, so
-   * this is hidden from assistive tech.
+   * Decorative in every placement — the surrounding copy carries the meaning,
+   * so this is hidden from assistive tech.
    */
+  import resting from './mascot/resting.png';
+  import content from './mascot/content.png';
+  import working from './mascot/working.png';
+  import sorry from './mascot/sorry.png';
+  import mark from './mascot/mark.png';
+  import miniWorking from './mascot/mini-working.png';
+  import miniSorry from './mascot/mini-sorry.png';
+
+  type Pose = 'resting' | 'content' | 'working' | 'sorry' | 'mark' | 'mini-working' | 'mini-sorry';
+
+  const SOURCES: Record<Pose, string> = {
+    resting,
+    content,
+    working,
+    sorry,
+    mark,
+    'mini-working': miniWorking,
+    'mini-sorry': miniSorry,
+  };
 
   interface Props {
-    /** Rendered width in px. Height follows the square viewBox. */
-    size?: number;
+    pose: Pose;
+    /** Rendered height in px. Width follows the pose's own aspect ratio —
+     *  they differ (the sleeping dog is wide, the sitting one tall), and
+     *  matching heights is what makes them look like one set. */
+    height: number;
   }
 
-  let { size = 104 }: Props = $props();
+  let { pose, height }: Props = $props();
 </script>
 
-<svg
+<img
   class="mascot"
-  width={size}
-  height={size}
-  viewBox="0 0 120 120"
-  fill="none"
+  class:trotting={pose === 'working' || pose === 'mini-working'}
+  src={SOURCES[pose]}
+  alt=""
   aria-hidden="true"
->
-  <!-- The merge node, branching off the head exactly as it branches off the
-       lane in the app mark. -->
-  <g class="antenna">
-    <line x1="83" y1="40" x2="95" y2="24" stroke="var(--lane-2)" stroke-width="4" stroke-linecap="round" />
-    <circle cx="97" cy="21" r="7" fill="var(--lane-2)" />
-  </g>
-
-  <!-- Head: the icon's squircle, softened. -->
-  <rect
-    x="24"
-    y="36"
-    width="72"
-    height="56"
-    rx="18"
-    fill="var(--bg-raised)"
-    stroke="var(--border-strong)"
-    stroke-width="2"
-  />
-
-  <!-- Feet, planted just under the head. -->
-  <g stroke="var(--border-strong)" stroke-width="4" stroke-linecap="round">
-    <line x1="45" y1="92" x2="45" y2="101" />
-    <line x1="75" y1="92" x2="75" y2="101" />
-  </g>
-
-  <!-- The two lane nodes, side by side. `.glance` translates, `.eye` blinks,
-       kept on separate elements so the two transforms don't fight. -->
-  <g class="glance">
-    <circle class="eye" cx="47" cy="59" r="6" fill="var(--lane-1)" />
-    <circle class="eye" cx="73" cy="59" r="6" fill="var(--lane-1)" />
-  </g>
-
-  <path
-    d="M51 76 Q60 84 69 76"
-    stroke="var(--text-muted)"
-    stroke-width="2.5"
-    stroke-linecap="round"
-  />
-</svg>
+  draggable="false"
+  style="height: {height}px"
+/>
 
 <style>
   .mascot {
     display: block;
-    overflow: visible;
+    width: auto;
+    /* Never a drop target, never a text selection, never in the way of a
+       click meant for what is underneath. */
+    pointer-events: none;
+    user-select: none;
+    -webkit-user-drag: none;
   }
 
-  /* Blink. The long flat stretch is the point — a mascot that blinks often
-     reads as broken rather than alive. */
-  .eye {
-    transform-box: fill-box;
-    transform-origin: center;
-    animation: blink 6.4s infinite;
+  /* The drawn motion lines do most of the work; this is the gait under them.
+     Continuous rather than idle-infrequent because it reports a live
+     operation — when it stops, the sweep is over. */
+  .trotting {
+    animation: trot 0.68s ease-in-out infinite;
   }
 
-  /* An idle look toward the repo list, on a period that shares no common
-     factor with the blink so the two never lock into a visible pattern. */
-  .glance {
-    transform-box: view-box;
-    animation: glance 11s infinite;
-  }
-
-  .antenna {
-    transform-box: view-box;
-    transform-origin: 83px 40px;
-    animation: bob 5.3s ease-in-out infinite;
-  }
-
-  @keyframes blink {
-    0%,
-    93%,
-    100% {
-      transform: scaleY(1);
-    }
-    95.5%,
-    96.5% {
-      transform: scaleY(0.1);
-    }
-  }
-
-  @keyframes glance {
-    0%,
-    28%,
-    52%,
-    100% {
-      transform: translateX(0);
-    }
-    36%,
-    46% {
-      transform: translateX(-2.5px);
-    }
-  }
-
-  @keyframes bob {
+  @keyframes trot {
     0%,
     100% {
-      transform: rotate(0deg);
+      transform: translate(0, 0);
     }
     50% {
-      transform: rotate(-7deg);
+      transform: translate(1.5%, -4%);
     }
   }
 
-  /* Idle decoration is exactly the kind of motion this setting exists to
-     stop — the mascot still renders, it just holds still. */
+  /* Idle decoration is exactly what this setting exists to stop. The mascot
+     still renders; it just holds still. */
   @media (prefers-reduced-motion: reduce) {
-    .eye,
-    .glance,
-    .antenna {
+    .trotting {
       animation: none;
     }
   }

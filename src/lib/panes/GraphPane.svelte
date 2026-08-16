@@ -83,13 +83,25 @@
 
 <Pane title="Graph">
   {#if !hasRepo}
-    <!-- The one place the mascot appears. The commit pane sits empty at the
-         same moment, and two of him on screen at once stops being charming. -->
-    <EmptyState message="No repository selected" hint="Select a repository to see its history">
-      {#snippet art()}
-        <Mascot />
-      {/snippet}
-    </EmptyState>
+    <!-- The dog lives here (SPEC §14.1). The commit pane sits empty at the
+         same moment and is deliberately left bare, because two of him on
+         screen at once stops being charming.
+
+         Two poses share the slot: he lies down once the whole herd is clean
+         and in sync, and sits up waiting otherwise (docs/mascot.md §5). -->
+    {#if repos.allClean}
+      <EmptyState message="All in sync" hint="Nothing needs you — select a repository to browse its history">
+        {#snippet art()}
+          <Mascot pose="content" height={112} />
+        {/snippet}
+      </EmptyState>
+    {:else}
+      <EmptyState message="Nothing to herd" hint="Select a repository to see its history">
+        {#snippet art()}
+          <Mascot pose="resting" height={132} />
+        {/snippet}
+      </EmptyState>
+    {/if}
   {:else if graph.loading && graph.rows.length === 0}
     <EmptyState message="Reading history…" />
   {:else if graph.error}

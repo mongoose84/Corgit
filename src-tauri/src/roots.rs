@@ -100,7 +100,7 @@ mod tests {
 
     #[test]
     fn missing_file_yields_no_pins() {
-        let dir = TempDir::new("twogit-test-roots-missing");
+        let dir = TempDir::new("corgit-test-roots-missing");
         let loaded = load(&dir.0, Path::new(r"C:\dev\code"));
         assert!(loaded.pins.is_empty());
         assert_eq!(loaded.last_selected, None);
@@ -108,7 +108,7 @@ mod tests {
 
     #[test]
     fn corrupt_file_yields_defaults() {
-        let dir = TempDir::new("twogit-test-roots-corrupt");
+        let dir = TempDir::new("corgit-test-roots-corrupt");
         let root = Path::new(r"C:\dev\code");
         fs::create_dir_all(dir.0.join("roots")).unwrap();
         fs::write(path(&dir.0, root), b"{not json").unwrap();
@@ -119,7 +119,7 @@ mod tests {
 
     #[test]
     fn save_then_load_round_trips() {
-        let dir = TempDir::new("twogit-test-roots-roundtrip");
+        let dir = TempDir::new("corgit-test-roots-roundtrip");
         let root = Path::new(r"C:\dev\code");
 
         let mut settings = RootSettings::default();
@@ -134,7 +134,7 @@ mod tests {
 
     #[test]
     fn different_roots_hash_to_different_files() {
-        let dir = TempDir::new("twogit-test-roots-hash");
+        let dir = TempDir::new("corgit-test-roots-hash");
         assert_ne!(
             path(&dir.0, Path::new(r"C:\dev\a")),
             path(&dir.0, Path::new(r"C:\dev\b")),
@@ -143,7 +143,7 @@ mod tests {
 
     #[test]
     fn unknown_version_yields_defaults() {
-        let dir = TempDir::new("twogit-test-roots-version");
+        let dir = TempDir::new("corgit-test-roots-version");
         let root = Path::new(r"C:\dev\code");
         fs::create_dir_all(dir.0.join("roots")).unwrap();
         fs::write(path(&dir.0, root), br#"{"version":99,"pins":["x"]}"#).unwrap();

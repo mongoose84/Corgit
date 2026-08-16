@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "twogit",
+  "productName": "Corgit",
   "version": "0.1.0",
-  "identifier": "dev.kronborg.twogit",
+  "identifier": "dev.kronborg.corgit",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "twogit",
+        "title": "Corgit",
         "width": 1400,
         "height": 900,
         "minWidth": 900,

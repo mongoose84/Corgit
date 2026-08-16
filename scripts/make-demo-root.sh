@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Builds a throwaway folder of repositories to open twogit against — the root
+# Builds a throwaway folder of repositories to open Corgit against — the root
 # the README screenshots were taken on.
 #
 # The screenshots exist to show the left pane doing its job, which means the
@@ -9,13 +9,13 @@
 # graph something to draw. Reproducing that by hand every time the UI changes
 # is how screenshots go stale, so it lives here instead.
 #
-#   bash scripts/make-demo-root.sh [target]      # default: %TEMP%/twogit-demo
+#   bash scripts/make-demo-root.sh [target]      # default: %TEMP%/corgit-demo
 #
-# Then open the printed folder in twogit. Nothing is written outside the
+# Then open the printed folder in Corgit. Nothing is written outside the
 # target and its sibling `-origins` folder, and neither is inside this repo.
 set -euo pipefail
 
-DEMO="${1:-${TEMP:-/tmp}/twogit-demo}"
+DEMO="${1:-${TEMP:-/tmp}/corgit-demo}"
 ORIGINS="$DEMO-origins"
 
 rm -rf "$DEMO" "$ORIGINS"
@@ -182,5 +182,5 @@ commit "feat: forward inbound hooks"
 git remote remove origin
 
 echo
-echo "Demo root ready — open this folder in twogit:"
+echo "Demo root ready — open this folder in Corgit:"
 echo "  $DEMO"

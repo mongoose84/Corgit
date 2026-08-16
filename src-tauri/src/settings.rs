@@ -74,7 +74,7 @@ pub fn load(config_dir: &Path) -> Settings {
         Ok(settings) if settings.version == SETTINGS_VERSION => settings,
         Ok(settings) => migrate(settings),
         Err(err) => {
-            eprintln!("twogit: settings unreadable, using defaults ({err})");
+            eprintln!("corgit: settings unreadable, using defaults ({err})");
             Settings::default()
         }
     }
@@ -84,7 +84,7 @@ pub fn load(config_dir: &Path) -> Settings {
 /// migrations land here as the schema grows.
 fn migrate(old: Settings) -> Settings {
     eprintln!(
-        "twogit: settings version {} not understood, using defaults",
+        "corgit: settings version {} not understood, using defaults",
         old.version
     );
     Settings::default()
@@ -117,14 +117,14 @@ mod tests {
 
     #[test]
     fn missing_file_yields_defaults() {
-        let dir = std::env::temp_dir().join("twogit-test-missing");
+        let dir = std::env::temp_dir().join("corgit-test-missing");
         let _ = fs::remove_dir_all(&dir);
         assert_eq!(load(&dir).scan_depth, 1);
     }
 
     #[test]
     fn corrupt_file_yields_defaults() {
-        let dir = std::env::temp_dir().join("twogit-test-corrupt");
+        let dir = std::env::temp_dir().join("corgit-test-corrupt");
         fs::create_dir_all(&dir).unwrap();
         fs::write(path(&dir), b"{not json").unwrap();
 
@@ -137,7 +137,7 @@ mod tests {
 
     #[test]
     fn save_then_load_round_trips() {
-        let dir = std::env::temp_dir().join("twogit-test-roundtrip");
+        let dir = std::env::temp_dir().join("corgit-test-roundtrip");
         let _ = fs::remove_dir_all(&dir);
 
         let mut settings = Settings::default();
@@ -154,7 +154,7 @@ mod tests {
 
     #[test]
     fn unknown_version_resets() {
-        let dir = std::env::temp_dir().join("twogit-test-version");
+        let dir = std::env::temp_dir().join("corgit-test-version");
         fs::create_dir_all(&dir).unwrap();
         fs::write(path(&dir), br#"{"version":99,"scanDepth":7}"#).unwrap();
 

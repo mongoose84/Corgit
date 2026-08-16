@@ -34,7 +34,7 @@ pub async fn fetch_background(repo: &Path) -> Result<(), String> {
 }
 
 /// `--no-rebase` is explicit: user config may set `pull.rebase=true`, and pull
-/// in twogit is always a merge (§2 — rebase is out of scope for v1).
+/// in Corgit is always a merge (§2 — rebase is out of scope for v1).
 pub async fn pull(repo: &Path) -> Result<(), String> {
     run(repo, &["pull", "--no-rebase"]).await
 }

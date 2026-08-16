@@ -1,6 +1,6 @@
 //! Running git (SPEC.md §3, §7, §8).
 //!
-//! Every git invocation in twogit goes through here, for two reasons: the
+//! Every git invocation in Corgit goes through here, for two reasons: the
 //! global in-flight cap lives in one place, and so does the Windows-specific
 //! "don't flash a console window" flag.
 
@@ -37,7 +37,7 @@ fn inflight() -> &'static Semaphore {
 ///
 /// `write` is whatever `git` resolves to on PATH — the documented entry point,
 /// which is where credential helpers, hooks and LFS are guaranteed to behave.
-/// The whole reason twogit shells out rather than linking libgit2 (§3) is to
+/// The whole reason Corgit shells out rather than linking libgit2 (§3) is to
 /// inherit those, so nothing that fetches, pulls, pushes or commits may take a
 /// shortcut around it.
 ///

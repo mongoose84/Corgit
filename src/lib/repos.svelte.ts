@@ -173,7 +173,7 @@ class RepoStore {
       const pins = await invoke<string[]>('toggle_pin', { repoId: id });
       this.pins = new Set(pins);
     } catch (err) {
-      console.warn('twogit: could not toggle pin', err);
+      console.warn('corgit: could not toggle pin', err);
     }
   }
 
@@ -184,12 +184,29 @@ class RepoStore {
       const pins = await invoke<string[]>('clear_pins');
       this.pins = new Set(pins);
     } catch (err) {
-      console.warn('twogit: could not clear pins', err);
+      console.warn('corgit: could not clear pins', err);
     }
   }
 
   status(id: string): RepoStatus | undefined {
     return this.statuses[id];
+  }
+
+  /**
+   * Every repository clean, in sync, and known to be so — the payoff state the
+   * *content* mascot reports (SPEC §14.1, docs/mascot.md §5). Deliberately
+   * strict: a sweep in flight, a repo whose status failed, or one not yet
+   * swept all count as not-yet-known rather than clean, because claiming
+   * "all in sync" over stale or missing data is the one way this state can
+   * lie to the user.
+   */
+  get allClean(): boolean {
+    if (this.sweeping || this.repos.length === 0) return false;
+    return this.repos.every((repo) => {
+      if (this.errors[repo.id]) return false;
+      const status = this.statuses[repo.id];
+      return status !== undefined && !isDirty(status) && status.ahead === 0 && status.behind === 0;
+    });
   }
 
   error(id: string): string | undefined {
@@ -295,12 +312,12 @@ class RepoStore {
   }
 
   /** Right-click → Open in Terminal (§5.1). Fire-and-forget, like
-   *  `openInVSCode` — nothing in twogit's own state changes because of it. */
+   *  `openInVSCode` — nothing in Corgit's own state changes because of it. */
   async openInTerminal(id: string): Promise<void> {
     try {
       await invoke('open_in_terminal', { repoId: id });
     } catch (err) {
-      console.warn('twogit: could not open a terminal', err);
+      console.warn('corgit: could not open a terminal', err);
     }
   }
 
@@ -383,7 +400,7 @@ class RepoStore {
         if (initial) await this.open(initial);
       }
     } catch (err) {
-      console.warn('twogit: could not restore the last folder', err);
+      console.warn('corgit: could not restore the last folder', err);
     } finally {
       this.ready = true;
     }
@@ -429,7 +446,7 @@ class RepoStore {
       this.applyRoot(await invoke<RootView>('refresh_root'));
     } catch (err) {
       this.sweeping = false;
-      console.warn('twogit: refresh failed', err);
+      console.warn('corgit: refresh failed', err);
     }
   }
 

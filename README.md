@@ -1,13 +1,13 @@
-# twogit
+# Corgit
 
 A fast dashboard over many local git repositories. Built for the case where you have
 dozens of repos in one folder, roughly five are active at a time, and you want to know at a
 glance which ones need attention.
 
 Four verbs — fetch, pull, commit, push — plus staging and branch switching. Not a general
-git client. See **[SPEC.md](SPEC.md)** for the full design.
+git client. See **[docs/SPEC.md](docs/SPEC.md)** for the full design.
 
-![twogit's three panes: repositories, working tree, commit graph](docs/screenshots/twogit.png)
+![Corgit's three panes: repositories, working tree, commit graph](docs/screenshots/corgit.png)
 
 Left: the hot set pinned above everything else, each row carrying its branch, one dirty
 dot and an ahead/behind badge. Middle: staged and unstaged files for the selected repo.
@@ -74,14 +74,14 @@ checked-in `#[ignore]`d tests rather than something to improvise later. Run them
 
 ```powershell
 cd src-tauri
-$env:TWOGIT_BENCH_ROOT = 'C:\dev\code'
+$env:CORGIT_BENCH_ROOT = 'C:\dev\code'
 cargo test --release --lib -- --ignored --nocapture bench_status_sweep
 cargo test --release --lib -- --ignored --nocapture bench_spawn_concurrency
 ```
 
 `bench_status_sweep` times discovery and the full sweep over a real folder.
 `bench_spawn_concurrency` times `git --version` at increasing concurrency; it does no
-repository work, so it separates "this machine creates processes slowly" from "twogit
+repository work, so it separates "this machine creates processes slowly" from "Corgit
 creates them one at a time".
 
 ## Layout
@@ -105,7 +105,8 @@ src/
     Popover.svelte           anchored overlay, used by row error badges
     GitErrorNotice.svelte    a failure plus the one action that resolves it
     EmptyState.svelte
-    Mascot.svelte
+    Mascot.svelte            the dog — one pose per state (docs/mascot.md)
+    mascot/                  the poses the app imports, cut from the sheet
     panes/
       Pane.svelte            shared header + scrolling body
       RepoList.svelte        left    — filter, pinned/all sections, sweep timing
@@ -133,7 +134,7 @@ src-tauri/
     watch.rs                 FS watchers on the hot set
     menu.rs                  the native Windows menu bar
 scripts/
-  make-icon.mjs              regenerates the placeholder icon source
+  extract-mascot.py          contact sheet → poses, app assets, icon source
   make-demo-root.sh          throwaway repos to screenshot against
 ```
 
@@ -144,7 +145,7 @@ scripts/
   pane yields first, then the left.
 - **Rust owns application state.** The frontend is a view. This is what keeps multi-window
   safe later — per-repo write queues and the global git semaphore are process-wide, so
-  twogit runs as one process with many windows rather than many processes (SPEC §9.2).
+  Corgit runs as one process with many windows rather than many processes (SPEC §9.2).
 - **Settings are advisory.** A corrupt or unreadable file resets to defaults and logs a
   warning; it never blocks startup.
 - **Discovery is depth 1.** Direct children of the root only — one directory read plus an
@@ -163,7 +164,7 @@ scripts/
   here that hop costs ~75 ms per call, more than `git status` spends working. Read-only
   commands go straight to the real binary. Anything that fetches, pulls, pushes or commits
   keeps the `git` on PATH, because inheriting credential helpers, hooks and LFS is the
-  entire reason twogit shells out rather than linking libgit2 (SPEC §3).
+  entire reason Corgit shells out rather than linking libgit2 (SPEC §3).
 - The repo-list header shows the **last sweep's wall clock**. The budget is 300 ms for 77
   repos (SPEC §1); a `tauri dev` build is unoptimised and will read slower than a release
   one.
@@ -185,5 +186,8 @@ Concurrency is working: 8 concurrent spawns cost 221 ms, not 8 × 114 ms.
 
 The remaining lever is therefore the **Defender/EDR exclusion** that SPEC §6 lists as a
 last resort — on this evidence it belongs first.
-- The icon is a placeholder. `node scripts/make-icon.mjs` regenerates the 512×512 source,
-  `npm run icon` expands it into the bundled set.
+- **The icon and the mascot come from one contact sheet.**
+  `python scripts/extract-mascot.py` cuts `docs/mascot/corgit.png` into the poses, copies
+  the ones the app imports into `src/lib/mascot/`, and writes the 512×512
+  `src-tauri/icon-source.png`; `npm run icon` expands that into the bundled set. Where each
+  pose is allowed to appear is SPEC §14.1, and why is [docs/mascot.md](docs/mascot.md).

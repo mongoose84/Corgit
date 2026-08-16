@@ -106,7 +106,7 @@ mod tests {
 
     #[test]
     fn finds_child_repos_and_ignores_plain_directories() {
-        let root = TempRoot::new("twogit-test-scan");
+        let root = TempRoot::new("corgit-test-scan");
         root.repo("billing");
         root.repo("api-gateway");
         root.plain_dir("notes");
@@ -118,7 +118,7 @@ mod tests {
 
     #[test]
     fn a_dot_git_file_counts_as_a_repo() {
-        let root = TempRoot::new("twogit-test-worktree");
+        let root = TempRoot::new("corgit-test-worktree");
         let worktree = root.0.join("linked");
         fs::create_dir_all(&worktree).unwrap();
         fs::write(worktree.join(".git"), b"gitdir: ../main/.git/worktrees/linked").unwrap();
@@ -128,7 +128,7 @@ mod tests {
 
     #[test]
     fn does_not_recurse_past_depth_one() {
-        let root = TempRoot::new("twogit-test-depth");
+        let root = TempRoot::new("corgit-test-depth");
         let nested = root.0.join("outer").join("inner");
         fs::create_dir_all(nested.join(".git")).unwrap();
 
@@ -137,17 +137,17 @@ mod tests {
 
     #[test]
     fn the_root_itself_can_be_the_repo() {
-        let root = TempRoot::new("twogit-test-self");
+        let root = TempRoot::new("corgit-test-self");
         fs::create_dir_all(root.0.join(".git")).unwrap();
         root.repo("child");
 
         let names: Vec<_> = scan(&root.0).into_iter().map(|r| r.name).collect();
 
-        assert_eq!(names, vec!["child", "twogit-test-self"]);
+        assert_eq!(names, vec!["child", "corgit-test-self"]);
     }
 
     #[test]
     fn a_missing_root_yields_nothing_rather_than_failing() {
-        assert!(scan(Path::new(r"C:\twogit\definitely\not\here")).is_empty());
+        assert!(scan(Path::new(r"C:\corgit\definitely\not\here")).is_empty());
     }
 }

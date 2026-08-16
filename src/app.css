@@ -1,5 +1,5 @@
 /*
- * twogit token layer — see SPEC.md §11.
+ * Corgit token layer — see SPEC.md §11.
  *
  * Every colour in the app comes from here. No hex literals in component
  * styles: adding a light theme later must cost one extra token block, not a
