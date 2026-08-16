@@ -1,0 +1,94 @@
+name: CI
+
+# Pull requests are the point — this is the gate. Pushes to main are covered
+# too so a merge that silently conflicts with something else still reports.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# A second push to the same PR makes the first run pointless, so cancel it.
+# Never cancel on main: those runs are the record of what actually landed.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Pure Node — no Tauri, no WebView2, nothing platform-specific — so this runs
+  # on Linux, where it is several times faster and cheaper than the Windows
+  # runner the Rust job needs.
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # `ci` rather than `install`: fails on a lockfile that disagrees with
+      # package.json instead of quietly resolving something newer, which is the
+      # difference between CI testing this commit and testing today's registry.
+      - run: npm ci
+
+      - name: Typecheck (svelte-check)
+        run: npm run check
+
+      - name: Unit tests (vitest)
+        run: npm test
+
+      # Catches what typechecking cannot: a Svelte compile error, a broken
+      # import path, a plugin that only fails when it actually bundles.
+      - name: Production build
+        run: npx vite build
+
+  # Windows because that is what v1 ships (§10) and what the code is written
+  # against — `#[cfg(windows)]` process flags, the Git-for-Windows launcher
+  # hop in git.rs, `wt.exe` discovery. A green Linux run would not mean much
+  # here, and building Tauri there needs a pile of GTK system packages.
+  backend:
+    name: Backend
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      # Rust builds here are minutes, not seconds; the cache is what keeps this
+      # job usable as a PR gate. Keyed on the manifests under src-tauri.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      # `-D warnings` is deliberate: clippy is only a gate if a warning fails
+      # the build. The one lint this codebase disagrees with is silenced at its
+      # own call site with a reason (see `graph.rs`), not muted globally.
+      - name: Lint (clippy)
+        working-directory: src-tauri
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Unit tests (cargo)
+        working-directory: src-tauri
+        run: cargo test
+
+  # Deliberately absent
+  # -------------------
+  # `cargo fmt --check`: the Rust here is hand-formatted — comment blocks and
+  # line breaks placed to be read — and rustfmt disagrees with it in ~79 places
+  # across every file, even with max_width tuned up. Gating on it would mean
+  # one large reformatting commit that throws that away. That is a real choice
+  # to make on its own merits, not a side effect of adding CI, so it is left
+  # out until someone decides to make it.
+  #
+  # `tauri build`: produces an NSIS installer and takes ~10 min. It belongs in
+  # a release workflow (§12, build step 10), not on every pull request.
