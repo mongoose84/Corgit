@@ -10,10 +10,11 @@
 //! already lives (§9.3: Rust owns state, but *behaviour* the frontend already
 //! has shouldn't grow a second copy here).
 //!
-//! "New Window" is intentionally absent — multi-window is a deferred,
-//! separate piece of work. "Check for Updates" (§12, build step 10) and
-//! "Open Log Folder" (no log file exists yet) are omitted for the same
-//! reason: a menu item with nothing behind it is worse than no item.
+//! "New Window" is intentionally absent — multi-window is deferred to v2
+//! (§2, §9.2). "Check for Updates" (§12, build step 10) is omitted for the
+//! same reason: a menu item with nothing behind it is worse than no item.
+//! "Open Log Folder" was omitted on those grounds too until there was a log
+//! file to open; there is one now (`lib.rs`'s `logging`), so it is here.
 
 use std::path::{Path, PathBuf};
 
@@ -137,7 +138,11 @@ fn build(
         .build()?;
 
     let about = MenuItemBuilder::with_id("about", "About").build(app)?;
-    let help_menu = SubmenuBuilder::new(app, "Help").item(&about).build()?;
+    // No longer omitted (see this module's header): there is a log file now,
+    // and a release build has no console, so this is the only way to reach it
+    // without knowing where Tauri puts `app_log_dir`.
+    let open_logs = MenuItemBuilder::with_id("open-logs", "Open Log Folder").build(app)?;
+    let help_menu = SubmenuBuilder::new(app, "Help").item(&about).item(&open_logs).build()?;
 
     let menu = MenuBuilder::new(app)
         .item(&file_menu)
@@ -171,6 +176,7 @@ fn register_event_handler(app: &AppHandle) {
             "toggle-repo-list" => toggle_visibility(app, |v| &mut v.repo_list),
             "toggle-commit-pane" => toggle_visibility(app, |v| &mut v.commit_pane),
             "about" => show_about(app),
+            "open-logs" => open_log_folder(app),
             "open-folder" => emit_action(app, MenuAction::OpenFolder),
             "reset-pane-sizes" => emit_action(app, MenuAction::ResetPaneSizes),
             "fetch" => emit_action(app, MenuAction::Fetch),
@@ -187,7 +193,7 @@ fn register_event_handler(app: &AppHandle) {
 
 fn emit_action(app: &AppHandle, action: MenuAction) {
     if let Err(err) = app.emit(MENU_ACTION_EVENT, action) {
-        eprintln!("corgit: could not forward menu action ({err})");
+        log::warn!("could not forward menu action ({err})");
     }
 }
 
@@ -207,7 +213,32 @@ fn toggle_visibility(app: &AppHandle, field: impl Fn(&mut PaneVisibility) -> &mu
     let _ = state.menu.commit_pane_check.set_checked(visibility.commit_pane);
 
     if let Err(err) = app.emit(PANE_VISIBILITY_EVENT, visibility) {
-        eprintln!("corgit: could not publish pane visibility ({err})");
+        log::warn!("could not publish pane visibility ({err})");
+    }
+}
+
+/// Help ▸ Open Log Folder — reveals the directory `lib.rs`'s `logging` writes
+/// to. The folder is created eagerly rather than assumed: on a clean install
+/// nothing has been logged yet, and a menu item that opens nothing reads as
+/// broken rather than as "no problems so far".
+///
+/// Shells out the same way `open_in_vscode` does, and is `cfg`-gated for the
+/// same reason (§10) — there is no portable "reveal this folder".
+fn open_log_folder(app: &AppHandle) {
+    let Ok(dir) = app.path().app_log_dir() else {
+        log::warn!("no log directory to open");
+        return;
+    };
+    if let Err(err) = std::fs::create_dir_all(&dir) {
+        log::warn!("could not create the log folder ({err})");
+        return;
+    }
+
+    let opener = if cfg!(windows) { "explorer" } else { "xdg-open" };
+    // `explorer` exits non-zero even when it succeeds, so the spawn is all
+    // that can be checked here — the status is deliberately not waited on.
+    if let Err(err) = std::process::Command::new(opener).arg(&dir).spawn() {
+        log::warn!("could not open the log folder ({err})");
     }
 }
 
@@ -238,7 +269,7 @@ pub fn set_repo_selected(app: &AppHandle, selected: bool) {
 pub fn refresh_open_recent(app: &AppHandle, recent_roots: &[PathBuf]) {
     let state = app.state::<crate::AppState>();
     if let Err(err) = fill_open_recent(&state.menu.open_recent, recent_roots) {
-        eprintln!("corgit: could not refresh Open Recent menu ({err})");
+        log::warn!("could not refresh Open Recent menu ({err})");
     }
 }
 

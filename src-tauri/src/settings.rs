@@ -77,7 +77,7 @@ pub fn load(config_dir: &Path) -> Settings {
         Ok(settings) if settings.version == SETTINGS_VERSION => settings,
         Ok(settings) => migrate(settings),
         Err(err) => {
-            eprintln!("corgit: settings unreadable, using defaults ({err})");
+            log::warn!("settings unreadable, using defaults ({err})");
             Settings::default()
         }
     }
@@ -86,10 +86,7 @@ pub fn load(config_dir: &Path) -> Settings {
 /// No older versions exist yet, so anything unrecognised resets. Real
 /// migrations land here as the schema grows.
 fn migrate(old: Settings) -> Settings {
-    eprintln!(
-        "corgit: settings version {} not understood, using defaults",
-        old.version
-    );
+    log::warn!("settings version {} not understood, using defaults", old.version);
     Settings::default()
 }
 

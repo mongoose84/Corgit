@@ -1,4 +1,7 @@
-import { defineConfig } from 'vite';
+// `vitest/config` rather than `vite`: same function, but its type knows about
+// the `test` block below. Importing it from `vite` typechecks everything else
+// and then rejects that key.
+import { defineConfig } from 'vitest/config';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
 
 // Tauri sets this when developing against a device on the network.
@@ -28,5 +31,14 @@ export default defineConfig({
     // Vite 8 minifies through rolldown/oxc; naming esbuild here would pull in
     // a dependency that no longer ships with Vite.
     minify: !process.env.TAURI_ENV_DEBUG,
+  },
+
+  test: {
+    // Only the pure modules — lane layout, branch-name checking, error
+    // translation. Everything else in `src/` is either a Svelte component or a
+    // store whose whole job is talking to Tauri, and neither is worth a DOM or
+    // an IPC mock to assert: the logic that can be *silently wrong* lives in
+    // these three files, and none of it needs a browser to run.
+    include: ['src/**/*.test.ts'],
   },
 });

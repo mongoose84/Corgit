@@ -111,6 +111,42 @@ struct RootState {
     selected: Option<String>,
 }
 
+impl RootState {
+    /// Adopt a fresh discovery scan, dropping what a repo that is no longer
+    /// there leaves behind. Everything pruned here is regenerable — a status,
+    /// an error, a fetch timestamp — so dropping it costs at most one sweep.
+    ///
+    /// **`pins` is deliberately not pruned**, and that omission is the whole
+    /// reason this is a named method rather than a run of inline `retain`
+    /// calls. A repo missing from *one* scan is not necessarily gone: a
+    /// disconnected network drive, a folder briefly held by another process,
+    /// and a repo mid-re-clone all look exactly like deletion from here. A
+    /// pin is the user's own choice with no other source (§9.5 rule 5), so
+    /// guessing wrong about it is not recoverable — and `set_selected_repo`
+    /// writes this whole file on every selection change, which would turn the
+    /// guess permanent on the user's very next click.
+    ///
+    /// A pin left behind for a repo that really is gone costs one path string
+    /// and renders as nothing: the repo list and the hot-set watchers both
+    /// walk `repos` and look pins up, never the reverse.
+    fn adopt_repos(&mut self, repos: Vec<Repo>) {
+        let known = |id: &String| repos.iter().any(|repo| &repo.id == id);
+
+        self.statuses.retain(|id, _| known(id));
+        self.errors.retain(|id, _| known(id));
+        self.last_fetch_at.retain(|id, _| known(id));
+        self.auth_needed.retain(known);
+        // Unlike a pin, the selection is not the user's authored state — it is
+        // where they happen to be — and a selection naming a repo the list no
+        // longer shows would leave the middle pane describing nothing.
+        if self.selected.as_ref().is_some_and(|id| !known(id)) {
+            self.selected = None;
+        }
+
+        self.repos = repos;
+    }
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RootView {
@@ -227,8 +263,11 @@ fn open_root(path: PathBuf, app: AppHandle) -> Result<RootView, String> {
     cached.statuses.retain(|id, _| repos.iter().any(|repo| &repo.id == id));
     cached.last_fetch_at.retain(|id, _| repos.iter().any(|repo| &repo.id == id));
 
-    let mut root_settings = roots::load(&state.config_dir, &root);
-    root_settings.pins.retain(|id| repos.iter().any(|repo| &repo.id == id));
+    // Pins are carried over exactly as stored — never filtered against this
+    // scan. Same reasoning as `RootState::adopt_repos`: a repo missing right
+    // now may be a disconnected drive rather than a deletion, and this value
+    // is what the next `set_selected_repo` writes back to disk.
+    let root_settings = roots::load(&state.config_dir, &root);
     let last_selected = root_settings
         .last_selected
         .clone()
@@ -300,21 +339,9 @@ fn refresh_root(app: AppHandle) -> Result<RootView, String> {
             return Err("No folder is open".to_string());
         };
 
-        let repos = discovery::scan(&root.path);
-        // Otherwise a deleted repo keeps its last known status forever.
-        root.statuses.retain(|id, _| repos.iter().any(|repo| &repo.id == id));
-        root.errors.retain(|id, _| repos.iter().any(|repo| &repo.id == id));
-        root.last_fetch_at.retain(|id, _| repos.iter().any(|repo| &repo.id == id));
-        root.auth_needed.retain(|id| repos.iter().any(|repo| &repo.id == id));
-        // A repo dropped from the root loses its pin too — nothing left to
-        // pin. `toggle_pin` is what persists this to disk; a deleted repo
-        // never toggles again, so this in-memory prune is the only cleanup
-        // it gets, same as `statuses`/`errors` above.
-        root.pins.retain(|id| repos.iter().any(|repo| &repo.id == id));
-        if root.selected.as_deref().is_some_and(|id| !repos.iter().any(|repo| repo.id == id)) {
-            root.selected = None;
-        }
-        root.repos = repos;
+        // Otherwise a deleted repo keeps its last known status forever. See
+        // `adopt_repos` for why pins are the one thing this does not touch.
+        root.adopt_repos(discovery::scan(&root.path));
 
         (
             root.generation,
@@ -605,7 +632,10 @@ fn persist_root_settings(app: &AppHandle, root_path: &Path, pins: HashSet<String
     let state = app.state::<AppState>();
     let settings = roots::RootSettings { version: roots::ROOTS_VERSION, pins, last_selected };
     if let Err(err) = roots::save(&state.config_dir, root_path, &settings) {
-        eprintln!("corgit: could not save root settings ({err})");
+        // `error`, not `warn`: unlike the status cache this file is the only
+        // copy of the user's pins (§9.5 rule 5), so a failed write here is
+        // silent data loss rather than a cache miss.
+        log::error!("could not save root settings ({err})");
     }
 }
 
@@ -765,7 +795,7 @@ pub(crate) async fn emit_repo_status(app: &AppHandle, repo_id: &str, path: &Path
         error: status.as_ref().err().cloned(),
     };
     if let Err(err) = app.emit(REPO_STATUS_EVENT, event) {
-        eprintln!("corgit: could not publish repo status ({err})");
+        log::warn!("could not publish repo status ({err})");
     }
 }
 
@@ -783,7 +813,7 @@ fn persist_cache(
     let state = app.state::<AppState>();
     let on_disk = RootCache { version: cache::CACHE_VERSION, statuses, last_fetch_at };
     if let Err(err) = cache::save(&state.cache_dir, root_path, &on_disk) {
-        eprintln!("corgit: could not save status cache ({err})");
+        log::warn!("could not save status cache ({err})");
     }
 }
 
@@ -860,7 +890,7 @@ async fn sweep(app: AppHandle, generation: u64, repos: Vec<Repo>) {
             persist_cache(&app, &event.root, event.statuses.clone(), last_fetch_at);
 
             if let Err(err) = app.emit(SWEEP_EVENT, event) {
-                eprintln!("corgit: could not publish sweep results ({err})");
+                log::warn!("could not publish sweep results ({err})");
             }
 
             // Cleared only now: the guard has to cover the cache write and
@@ -1180,7 +1210,7 @@ async fn fetch_sweep(app: AppHandle, generation: u64, repos: Vec<Repo>) {
 
         let event = FetchSweepEvent { root: root_path, last_fetch_at, auth_needed, elapsed_ms };
         if let Err(err) = app.emit(FETCH_SWEEP_EVENT, event) {
-            eprintln!("corgit: could not publish fetch sweep results ({err})");
+            log::warn!("could not publish fetch sweep results ({err})");
         }
 
         // A fetch just moved refs/remotes/*, which is what the status
@@ -1258,7 +1288,7 @@ fn remember_root(app: &AppHandle, root: &Path) {
         settings.recent_roots.truncate(MAX_RECENT_ROOTS);
 
         if let Err(err) = settings::save(&state.config_dir, &settings) {
-            eprintln!("corgit: could not save recent roots ({err})");
+            log::warn!("could not save recent roots ({err})");
         }
         settings.recent_roots.clone()
     };
@@ -1288,9 +1318,41 @@ fn focus_existing_window(app: &AppHandle, _args: Vec<String>, _cwd: String) {
     let _ = window.set_focus();
 }
 
+/// Where a failure goes when there is no console to print it to.
+///
+/// `main.rs` builds release with `windows_subsystem = "windows"`, so every
+/// `eprintln!` in a shipped build writes to a closed handle — a cache that
+/// silently stops saving, a root-settings write that silently fails, and a git
+/// process killed at its budget (§7.3) all left no trace whatsoever. A file in
+/// the log dir is what makes those diagnosable after the fact; Help ▸ Open Log
+/// Folder (§4.1) is what makes it reachable without knowing where `%APPDATA%`
+/// keeps it.
+///
+/// `Info` rather than `Debug`: `tao`/`wry` are extremely chatty below Info, and
+/// a log nobody can skim is one nobody reads. Corgit's own messages are all
+/// warnings or errors, so none of them are lost to this floor.
+fn logging() -> tauri::plugin::TauriPlugin<tauri::Wry> {
+    let mut builder = tauri_plugin_log::Builder::new()
+        .level(log::LevelFilter::Info)
+        .target(tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir {
+            file_name: Some("corgit".to_string()),
+        }));
+
+    // Only useful where a console exists to read it, which by construction is
+    // never the case in the builds this plugin is here for.
+    if cfg!(debug_assertions) {
+        builder = builder.target(tauri_plugin_log::Target::new(
+            tauri_plugin_log::TargetKind::Stderr,
+        ));
+    }
+
+    builder.build()
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(focus_existing_window))
+        .plugin(logging())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let config_dir = app.path().app_config_dir()?;
@@ -1303,7 +1365,7 @@ pub fn run() {
             // shows the 500 ms budget is tight.
             let git = tauri::async_runtime::block_on(git::probe());
             if !git.available {
-                eprintln!("corgit: no usable git on PATH");
+                log::error!("no usable git on PATH");
             }
 
             // No repo is open yet, so nothing is selected and the panes
@@ -1385,6 +1447,88 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn repo(id: &str) -> Repo {
+        Repo { id: id.to_string(), name: id.to_string(), path: PathBuf::from(id) }
+    }
+
+    fn root_with(repos: &[&str], pins: &[&str], selected: Option<&str>) -> RootState {
+        RootState {
+            generation: 1,
+            path: PathBuf::from("root"),
+            repos: repos.iter().map(|id| repo(id)).collect(),
+            statuses: repos
+                .iter()
+                .map(|id| (id.to_string(), RepoStatus::default()))
+                .collect(),
+            errors: HashMap::new(),
+            last_fetch_at: repos.iter().map(|id| (id.to_string(), 1_700_000_000)).collect(),
+            auth_needed: HashSet::new(),
+            pins: pins.iter().map(|id| id.to_string()).collect(),
+            selected: selected.map(str::to_string),
+        }
+    }
+
+    /// The bug this method exists to prevent: a repo can vanish from a scan
+    /// without being deleted — a disconnected network drive is the usual way —
+    /// and `set_selected_repo` persists `pins` wholesale on the user's next
+    /// click. Pruning here made that transient miss permanent (§9.5 rule 5).
+    #[test]
+    fn a_repo_missing_from_a_rescan_keeps_its_pin() {
+        let mut root = root_with(&["api", "billing"], &["api", "billing"], None);
+
+        root.adopt_repos(vec![repo("billing")]);
+
+        assert!(root.pins.contains("api"), "a pin is the user's own choice, not a cache");
+        assert!(root.pins.contains("billing"));
+    }
+
+    /// The other half: everything a sweep can regenerate *is* dropped, so a
+    /// genuinely deleted repo does not keep a stale status forever.
+    #[test]
+    fn a_repo_missing_from_a_rescan_loses_its_regenerable_state() {
+        let mut root = root_with(&["api", "billing"], &[], None);
+        root.errors.insert("api".to_string(), "boom".to_string());
+        root.auth_needed.insert("api".to_string());
+
+        root.adopt_repos(vec![repo("billing")]);
+
+        assert!(!root.statuses.contains_key("api"));
+        assert!(!root.errors.contains_key("api"));
+        assert!(!root.last_fetch_at.contains_key("api"));
+        assert!(!root.auth_needed.contains("api"));
+        assert_eq!(root.repos, vec![repo("billing")]);
+    }
+
+    /// Unlike a pin, a selection naming a repo the list no longer shows would
+    /// leave the middle pane describing nothing.
+    #[test]
+    fn a_selection_on_a_vanished_repo_is_cleared_but_one_still_present_is_kept() {
+        let mut root = root_with(&["api", "billing"], &[], Some("api"));
+        root.adopt_repos(vec![repo("billing")]);
+        assert_eq!(root.selected, None);
+
+        let mut root = root_with(&["api", "billing"], &[], Some("billing"));
+        root.adopt_repos(vec![repo("billing")]);
+        assert_eq!(root.selected.as_deref(), Some("billing"));
+    }
+
+    /// A pin surviving for a repo that really is gone has to be harmless, or
+    /// the rule above would trade one bug for another. Both consumers walk
+    /// `repos` and look pins up, so an unmatched pin contributes nothing.
+    #[test]
+    fn a_pin_with_no_matching_repo_contributes_nothing_to_the_hot_set() {
+        let root = root_with(&["billing"], &["api", "billing"], None);
+
+        let hot: Vec<&str> = root
+            .repos
+            .iter()
+            .filter(|repo| root.pins.contains(&repo.id) || root.selected.as_deref() == Some(&repo.id))
+            .map(|repo| repo.id.as_str())
+            .collect();
+
+        assert_eq!(hot, vec!["billing"]);
+    }
 
     /// §6: "5–10 min, jittered" — verified against the default 300 s setting
     /// rather than a mocked clock, since the jitter source is real wall-clock

@@ -35,6 +35,11 @@ dunce = "1.0.5"
 # debounce" the spec asks for without hand-rolled event coalescing.
 notify = "6"
 notify-debouncer-mini = "0.4"
+# Release builds are `windows_subsystem = "windows"` (main.rs) — no console, so
+# anything printed to stderr goes nowhere. A rotating file in the log dir is
+# the only way a failure that happens on a user's machine leaves a trace.
+tauri-plugin-log = "2.9.0"
+log = "0.4.33"
 
 [profile.release]
 codegen-units = 1

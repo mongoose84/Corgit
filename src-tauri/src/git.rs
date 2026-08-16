@@ -50,6 +50,13 @@ const FSMONITOR_MIN_VERSION: (u32, u32) = (2, 37);
 /// *all 77* is 300 ms, so a single read reaching 30 s is not slow, it is stuck.
 const READ_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// The startup probe, and the tightest budget of the lot because it is the
+/// only one that blocks the app from existing: `run`'s setup hook waits on it
+/// (§3, ~20 ms expected). §1 gives cold start 500 ms total, so anything near
+/// this is already a failure — the point is only that the user gets a window
+/// saying "no usable git" instead of an app that never opens.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Local writes — add, restore, commit, switch, branch. Deliberately the most
 /// generous of the three: §3 shells out to system git precisely so that hooks
 /// run, and a pre-commit hook running a test suite is doing its job rather
@@ -150,7 +157,9 @@ pub async fn probe() -> GitInfo {
     // Probes the write binary deliberately: it is the one whose absence would
     // be fatal, and the read binary is derived from it.
     // `--version` needs no repo, so any working directory will do.
-    let Ok(output) = run_in(&binaries().write, Path::new("."), &["--version"], None, &[]).await else {
+    let Ok(output) =
+        run_in(&binaries().write, Path::new("."), &["--version"], None, &[], PROBE_TIMEOUT).await
+    else {
         return GitInfo::default();
     };
     if !output.ok {
@@ -295,10 +304,14 @@ async fn run_in(
 
     let Ok(waited) = tokio::time::timeout(budget, run).await else {
         // `run` is dropped here, taking the `Child` with it; `kill_on_drop`
-        // above makes that an actual kill rather than an orphan. Phrased as
-        // something Corgit did, because it is — git did not fail, it was
-        // stopped — and worded so §13's translation can pick it up.
-        return Err(format!("git timed out after {}s and was stopped", budget.as_secs()));
+        // above makes that an actual kill rather than an orphan.
+        //
+        // Logged as well as returned: the caller surfaces this to whoever
+        // triggered it, but a fetch killed by the background sweep (§6) has no
+        // one watching, and "which repo, which command" is exactly what you
+        // would want to know afterwards.
+        log::warn!("killed `git {}` in {} after {:?}", args.join(" "), cwd.display(), budget);
+        return Err(timed_out_message(budget));
     };
     let output = waited?;
 
@@ -312,9 +325,45 @@ async fn run_in(
     })
 }
 
+/// Phrased as something Corgit did rather than something git reported, because
+/// that is what happened — git did not fail, it was stopped.
+///
+/// The substring "timed out" is load-bearing: `gitErrors.ts` keys its §13
+/// translation off it, so this wording is a contract across the IPC boundary
+/// rather than only prose. The test below is what keeps the two in step.
+fn timed_out_message(budget: Duration) -> String {
+    format!("git timed out after {}s and was stopped", budget.as_secs())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `gitErrors.ts` matches `lower.includes('timed out')`. If that substring
+    /// ever leaves this message the frontend silently stops translating a
+    /// timeout — it degrades to raw text with no Retry action, which is easy
+    /// to miss by eye and impossible to miss here.
+    #[test]
+    fn a_timeout_message_stays_translatable_by_the_frontend() {
+        let message = timed_out_message(NETWORK_TIMEOUT);
+        assert!(message.to_lowercase().contains("timed out"), "{message}");
+    }
+
+    #[test]
+    fn a_timeout_message_names_the_budget_it_exceeded() {
+        assert!(timed_out_message(Duration::from_secs(120)).contains("120"));
+    }
+
+    /// Not arbitrary ordering: each budget is bounded by what that class of
+    /// work can legitimately take (§7.3's comment block). A read outliving a
+    /// fetch, or a fetch outliving a hook-firing commit, would mean one of the
+    /// constants was edited without its reasoning.
+    #[test]
+    fn budgets_are_ordered_by_how_long_the_work_can_honestly_take() {
+        assert!(PROBE_TIMEOUT < READ_TIMEOUT, "the probe blocks startup; it must be the tightest");
+        assert!(READ_TIMEOUT < NETWORK_TIMEOUT, "a local read must not outlive a fetch");
+        assert!(NETWORK_TIMEOUT < LOCAL_WRITE_TIMEOUT, "hooks make commit the most generous case");
+    }
 
     #[test]
     fn version_gate_reads_major_minor() {

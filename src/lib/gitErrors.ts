@@ -26,6 +26,14 @@ interface Rule {
 
 const RULES: Rule[] = [
   {
+    // Both Corgit giving up on a wedged git process (`git.rs`'s budgets) and
+    // git's own "Connection timed out" land here. The advice is the same
+    // either way, and so is the only useful next step.
+    match: (lower) => lower.includes('timed out'),
+    message: 'Git stopped responding, so Corgit cancelled it',
+    action: 'retry',
+  },
+  {
     match: (lower) => lower.includes('non-fast-forward') || lower.includes('fetch first'),
     message: "Remote has commits you don't have",
     action: 'pull',
