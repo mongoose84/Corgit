@@ -33,6 +33,37 @@ pub struct RepoStatus {
     pub conflicted: u32,
 }
 
+/// Whether a branch must be **published** (`push -u origin HEAD`) rather than
+/// plainly pushed (§8.7).
+///
+/// Two states qualify. No upstream at all is the obvious one. The second is an
+/// upstream whose *branch name differs from the local branch's* — `feature-x`
+/// tracking `origin/main` — because git's default `push.default = simple`
+/// refuses a bare `push` outright there, making it the one operation
+/// guaranteed to fail, while publish succeeds and re-points the upstream.
+///
+/// **This duplicates `needsPublish` in `repos.svelte.ts`, and has to.** The
+/// frontend decides which button to *show*; `commit_and_push` decides, in
+/// Rust, which command to *run* — one button press, two decisions, on opposite
+/// sides of the IPC boundary with no way to share the code. They were allowed
+/// to drift once already: the Rust half checked only `upstream.is_some()`, so
+/// Commit & Push ran a `push` that could not succeed on exactly the branches
+/// Corgit itself had created (see `branch.rs`'s `--no-track`). Tests pin both
+/// halves to the same cases; change one and change the other.
+pub fn needs_publish(branch: &str, upstream: Option<&str>) -> bool {
+    match upstream {
+        None => true,
+        Some(upstream) => upstream_branch(upstream) != branch,
+    }
+}
+
+/// `origin/feature/x` → `feature/x`. Only the first segment is the remote, so
+/// a branch whose own name contains a `/` survives — the same rule, and the
+/// same assumption about remote names, as `branch.rs`'s `local_name`.
+fn upstream_branch(upstream: &str) -> &str {
+    upstream.split_once('/').map_or(upstream, |(_, rest)| rest)
+}
+
 pub async fn query(repo: &Path) -> Result<RepoStatus, String> {
     let output = git::read(repo, &["status", "--porcelain=v2", "--branch", "-z"]).await?;
     if !output.ok {
@@ -227,6 +258,45 @@ mod tests {
     /// Builds the NUL-terminated shape git actually emits.
     fn joined(records: &[&str]) -> String {
         records.iter().map(|r| format!("{r}\0")).collect()
+    }
+
+    /*
+     * These mirror `repoStatus.test.ts`'s `needsPublish` cases one for one, on
+     * purpose: the two are the same rule applied on either side of the IPC
+     * boundary, and the only thing keeping them in step is that both suites
+     * cover the same table. A case added on one side belongs on the other.
+     */
+
+    #[test]
+    fn no_upstream_needs_publishing() {
+        assert!(needs_publish("enhance-quality", None));
+    }
+
+    #[test]
+    fn tracking_its_own_name_is_already_published() {
+        assert!(!needs_publish("feature-x", Some("origin/feature-x")));
+        assert!(!needs_publish("feature-x", Some("fork/feature-x")));
+    }
+
+    /// The state Corgit created itself until `branch.rs` grew `--no-track`,
+    /// and the one that made Commit & Push run a `git push` that could not
+    /// succeed. Nothing repairs an existing branch but a publish.
+    #[test]
+    fn tracking_a_differently_named_branch_needs_publishing() {
+        assert!(needs_publish("Update_the_titlebar", Some("origin/main")));
+    }
+
+    /// Only the first segment is the remote, so a slash in the branch's own
+    /// name must not read as a mismatch — `jk/thing` is a common shape, and
+    /// getting it wrong would force a publish on every one of them.
+    #[test]
+    fn a_slash_in_the_branch_name_is_not_a_mismatch() {
+        assert!(!needs_publish("jk/retry", Some("origin/jk/retry")));
+    }
+
+    #[test]
+    fn a_shared_prefix_is_still_a_mismatch() {
+        assert!(needs_publish("retry", Some("origin/jk/retry")));
     }
 
     #[test]

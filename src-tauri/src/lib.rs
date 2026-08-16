@@ -723,7 +723,14 @@ async fn publish_branch(repo_id: String, app: AppHandle) -> Result<(), String> {
 
 /// Commit, then push in one step. Whether that push needs `-u origin` is
 /// decided up front from the known status, before the commit runs, since a
-/// fresh commit does not change whether an upstream exists.
+/// fresh commit does not change what the branch tracks.
+///
+/// That decision is `status::needs_publish`, the same rule the frontend's
+/// `needsPublish` uses to label the button — one press, two decisions, and the
+/// only reason they are two is that this one happens on the far side of the
+/// IPC boundary. Deciding it here with a *narrower* rule than the label used
+/// is what made this the last path still failing on a branch whose upstream
+/// name did not match: the button read "Publish Branch" and this ran `push`.
 ///
 /// A stale answer costs nothing worse than a clear error: `push` on a branch
 /// that turns out to have no upstream stops with git's own "no upstream"
@@ -732,12 +739,12 @@ async fn publish_branch(repo_id: String, app: AppHandle) -> Result<(), String> {
 /// just committed to, because both refspecs resolve `HEAD` when git runs.
 #[tauri::command]
 async fn commit_and_push(repo_id: String, message: String, app: AppHandle) -> Result<(), String> {
-    let needs_publish = !has_upstream(&app, &repo_id);
-    if needs_publish {
-        // Detached HEAD fails here rather than after `commit::commit` has
-        // already written a commit that the push would then not carry.
-        current_branch(&app, &repo_id)?;
-    }
+    // Detached HEAD fails here rather than after `commit::commit` has already
+    // written a commit that the push would then not carry. It is its own check
+    // rather than a consequence of `needs_publish`, which reports `false` for
+    // a detached HEAD (there is no branch to publish) and would otherwise send
+    // it down the plain-push path to fail in git's words instead of ours.
+    let needs_publish = publish_needed(&app, &repo_id)?;
 
     write_and_refresh(&app, repo_id, |path| async move {
         commit::commit(&path, &message).await?;
@@ -759,13 +766,26 @@ fn current_branch(app: &AppHandle, repo_id: &str) -> Result<String, String> {
         .ok_or_else(|| "No branch to publish (detached HEAD)".to_string())
 }
 
-fn has_upstream(app: &AppHandle, repo_id: &str) -> bool {
+/// Push or publish, for Commit & Push — `status::needs_publish` asked against
+/// the cached status, erroring on the detached HEAD that neither can serve.
+///
+/// Read from the currently known status for the same reason `current_branch`
+/// is: this only picks between two commands that both push `HEAD`, so a stale
+/// answer cannot send a commit somewhere unintended. The worst case is a clear
+/// error — `push` on a branch that turns out to need publishing stops with
+/// git's own message, and `publish` on one that did not re-points an upstream
+/// at the branch it was already tracking.
+fn publish_needed(app: &AppHandle, repo_id: &str) -> Result<bool, String> {
     let state = app.state::<AppState>();
     let current = state.root.lock().expect("root mutex poisoned");
-    current
-        .as_ref()
-        .and_then(|root| root.statuses.get(repo_id))
-        .is_some_and(|status| status.upstream.is_some())
+    let root = current.as_ref().ok_or_else(|| "No folder is open".to_string())?;
+    let status = root.statuses.get(repo_id).ok_or_else(|| "That repository has no status yet".to_string())?;
+    let branch = status
+        .branch
+        .as_deref()
+        .ok_or_else(|| "No branch to publish (detached HEAD)".to_string())?;
+
+    Ok(status::needs_publish(branch, status.upstream.as_deref()))
 }
 
 /// Records this repo's fetch attempt and clears any "auth needed" flag (§8.7,
