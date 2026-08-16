@@ -55,6 +55,16 @@ pub async fn switch_remote_tracking(repo: &Path, remote_ref: &str) -> Result<(),
 /// upstream — a branch created off `origin/foo` is deliberately *not* tracking
 /// it, since that is a different intent from "switch to that remote branch"
 /// (which `switch_remote_tracking` above already covers).
+///
+/// `--no-track` is what actually enforces that, and it is not optional: git's
+/// `branch.autoSetupMerge` defaults to `true`, so a *remote-tracking* start
+/// point silently configures the new branch to track it. Off `origin/main`
+/// that produced a branch whose upstream was `origin/main` — which made
+/// `needsPublish` (§8.7) see an upstream and offer **Push** instead of
+/// **Publish Branch**, and a bare `git push` then fails under the default
+/// `push.default = simple` because the names don't match. It fails safe there,
+/// but only by luck: under `push.default = upstream` the same button would
+/// have pushed a feature branch straight onto `main`.
 pub async fn create(repo: &Path, name: &str, start_point: &str, checkout: bool) -> Result<(), String> {
     let output = git::write(repo, &create_args(name, start_point, checkout)).await?;
     if !output.ok {
@@ -65,9 +75,9 @@ pub async fn create(repo: &Path, name: &str, start_point: &str, checkout: bool) 
 
 fn create_args<'a>(name: &'a str, start_point: &'a str, checkout: bool) -> Vec<&'a str> {
     if checkout {
-        vec!["switch", "-c", name, start_point]
+        vec!["switch", "--no-track", "-c", name, start_point]
     } else {
-        vec!["branch", name, start_point]
+        vec!["branch", "--no-track", name, start_point]
     }
 }
 
@@ -114,18 +124,33 @@ mod tests {
 
     #[test]
     fn creating_without_checkout_leaves_head_alone() {
-        assert_eq!(create_args("feature-x", "main", false), ["branch", "feature-x", "main"]);
+        assert_eq!(create_args("feature-x", "main", false), ["branch", "--no-track", "feature-x", "main"]);
     }
 
     #[test]
     fn creating_with_checkout_is_one_atomic_switch() {
-        assert_eq!(create_args("feature-x", "main", true), ["switch", "-c", "feature-x", "main"]);
+        assert_eq!(
+            create_args("feature-x", "main", true),
+            ["switch", "--no-track", "-c", "feature-x", "main"]
+        );
     }
 
-    /// Never `--track`: a branch cut from a remote badge is not the same
-    /// intent as switching to that remote branch (see `create`'s docs).
+    /// A branch cut from a remote badge is not the same intent as switching to
+    /// that remote branch (see `create`'s docs), so it must come out with no
+    /// upstream at all.
+    ///
+    /// This test used to assert the *absence of `--track`*, and passed
+    /// throughout the period the behaviour was broken: nothing was ever adding
+    /// `--track`, and it was never how the upstream got set. Git's
+    /// `branch.autoSetupMerge` default does it on its own for a
+    /// remote-tracking start point, so only an explicit `--no-track` prevents
+    /// it. Assert the flag that has to be *present*; the one that has to be
+    /// absent was never in danger of appearing.
     #[test]
     fn creating_from_a_remote_ref_does_not_set_an_upstream() {
-        assert!(!create_args("feature-x", "origin/feature-x", true).contains(&"--track"));
+        for checkout in [true, false] {
+            let args = create_args("feature-x", "origin/feature-x", checkout);
+            assert!(args.contains(&"--no-track"), "{args:?} would inherit origin/feature-x as upstream");
+        }
     }
 }
