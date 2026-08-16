@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { isDirty, repos, type Repo, type RepoStatus } from '../repos.svelte';
+  import { isDirty, needsPublish, repos, type Repo, type RepoStatus } from '../repos.svelte';
   import ContextMenu from '../ContextMenu.svelte';
   import Popover from '../Popover.svelte';
   import GitErrorNotice from '../GitErrorNotice.svelte';
@@ -16,6 +16,14 @@
   const dirty = $derived(status !== undefined && isDirty(status));
   // Detached HEAD has no branch name; the short oid is the honest substitute.
   const branch = $derived(status?.branch ?? status?.head ?? '');
+  // Ahead/behind come from `# branch.ab`, which git only emits when an
+  // upstream exists — so a branch with twelve unpushed commits and no upstream
+  // reports ahead 0 and renders exactly like a synced repo. Marking the name
+  // rather than adding a badge keeps this off the badge strip, which §5.1
+  // reserves for "does this need me?": unpublished is a fact about the branch,
+  // not a repo that needs attention. It also costs no width, and the strip is
+  // already what squeezes the name to an ellipsis on a narrow pane.
+  const unpublished = $derived(status !== undefined && needsPublish(status));
   const pinned = $derived(repos.pins.has(repo.id));
   // The background fetch sweep stopped retrying this repo (§8.7, §13) — a
   // manual fetch is what clears it. Shown alongside the other badges rather
@@ -135,7 +143,12 @@
       >!</span>
     {/if}
     {#if status}
-      <span class="branch" class:detached={!status.branch}>{branch}</span>
+      <span
+        class="branch"
+        class:detached={!status.branch}
+        class:unpublished
+        title={unpublished ? `${branch} is not published — no upstream branch on the remote` : undefined}
+      >{branch}</span>
 
       {#if status.conflicted > 0}
         <span class="badge conflict" title="Merge conflict">⚠</span>
@@ -264,6 +277,18 @@
 
   .branch.detached {
     font-family: var(--font-mono);
+  }
+
+  /* No upstream (§8.7) — the branch exists only on this machine. Underlined
+     in the ahead badge's colour because that is the same condition taken to
+     its limit: nothing on an unpublished branch has been pushed. A decoration
+     rather than a badge, so the row gains a state without gaining a column.
+     Mutually exclusive with `.detached`, which has no branch to publish. */
+  .branch.unpublished {
+    color: var(--text-secondary);
+    text-decoration: underline dashed var(--status-ahead);
+    text-decoration-thickness: 1px;
+    text-underline-offset: 3px;
   }
 
   .dot {

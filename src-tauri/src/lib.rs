@@ -667,36 +667,43 @@ async fn merge_abort(repo_id: String, app: AppHandle) -> Result<(), String> {
     write_and_refresh(&app, repo_id, |path| async move { remote::merge_abort(&path).await }).await
 }
 
-/// A branch with no upstream configured (§8.7) — the branch name comes from
-/// the repo's currently known status rather than a frontend-supplied
-/// argument, so there is one source of truth for what "the current branch"
-/// means.
+/// A branch with no upstream configured (§8.7). `remote::publish` pushes
+/// `HEAD`, so the known branch name is only a guard here — it turns the one
+/// case git would refuse anyway, a detached HEAD, into a sentence that says so.
 #[tauri::command]
 async fn publish_branch(repo_id: String, app: AppHandle) -> Result<(), String> {
-    let branch = current_branch(&app, &repo_id)?;
-    write_and_refresh(&app, repo_id, |path| async move { remote::publish(&path, &branch).await }).await
+    current_branch(&app, &repo_id)?;
+    write_and_refresh(&app, repo_id, |path| async move { remote::publish(&path).await }).await
 }
 
-/// Commit, then push in one step. Whether that push needs `-u origin
-/// <branch>` is decided up front from the known status, before the commit
-/// runs, since a fresh commit does not change whether an upstream exists.
+/// Commit, then push in one step. Whether that push needs `-u origin` is
+/// decided up front from the known status, before the commit runs, since a
+/// fresh commit does not change whether an upstream exists.
+///
+/// A stale answer costs nothing worse than a clear error: `push` on a branch
+/// that turns out to have no upstream stops with git's own "no upstream"
+/// message, and `publish` on one that turns out to have an upstream re-points
+/// it at the branch's own name. Neither can push a branch other than the one
+/// just committed to, because both refspecs resolve `HEAD` when git runs.
 #[tauri::command]
 async fn commit_and_push(repo_id: String, message: String, app: AppHandle) -> Result<(), String> {
-    let branch = if has_upstream(&app, &repo_id) { None } else { Some(current_branch(&app, &repo_id)?) };
+    let needs_publish = !has_upstream(&app, &repo_id);
+    if needs_publish {
+        // Detached HEAD fails here rather than after `commit::commit` has
+        // already written a commit that the push would then not carry.
+        current_branch(&app, &repo_id)?;
+    }
 
     write_and_refresh(&app, repo_id, |path| async move {
         commit::commit(&path, &message).await?;
-        match branch {
-            Some(branch) => remote::publish(&path, &branch).await,
-            None => remote::push(&path).await,
-        }
+        if needs_publish { remote::publish(&path).await } else { remote::push(&path).await }
     })
     .await
 }
 
-/// Read from the currently known status rather than querying git fresh —
-/// good enough for "which branch am I about to publish", and avoids a spawn
-/// on a command that already has a status right there.
+/// Read from the currently known status rather than querying git fresh — this
+/// only ever decides whether to *refuse*, never what gets pushed, so a stale
+/// answer cannot send a commit somewhere unintended.
 fn current_branch(app: &AppHandle, repo_id: &str) -> Result<String, String> {
     let state = app.state::<AppState>();
     let current = state.root.lock().expect("root mutex poisoned");

@@ -1,6 +1,6 @@
 import { listen } from '@tauri-apps/api/event';
 
-import { repos } from './repos.svelte';
+import { needsPublish, repos } from './repos.svelte';
 import { settings, DEFAULT_PANE_WIDTHS } from './settings.svelte';
 import { inTauri } from './tauri';
 
@@ -77,7 +77,7 @@ function dispatch(action: MenuAction): void {
 async function pushOrPublish(): Promise<void> {
   const id = repos.selectedId;
   const status = id ? repos.status(id) : undefined;
-  if (status?.upstream === null) {
+  if (status !== undefined && needsPublish(status)) {
     await repos.publish();
   } else {
     await repos.push();

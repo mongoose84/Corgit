@@ -133,6 +133,13 @@ fn parse_refs(raw: &str) -> Vec<RefBadge> {
 fn parse_ref(line: &str) -> Option<RefBadge> {
     let (refname, commit) = line.split_once('\u{1f}')?;
 
+    // clippy::question_mark wants the last arm folded into a `?` on the
+    // `refs/remotes/` prefix. That would work, but it breaks the symmetry the
+    // three arms are readable *because of*: two namespaces map to their kind,
+    // and anything else — a tag, a note, `refs/stash` — is not a badge (§2).
+    // Kept as a dispatch, silenced deliberately rather than by loosening the
+    // lint level for the whole crate.
+    #[allow(clippy::question_mark)]
     let (short, kind) = if let Some(name) = refname.strip_prefix("refs/heads/") {
         (name, RefKind::Local)
     } else if let Some(name) = refname.strip_prefix("refs/remotes/") {
