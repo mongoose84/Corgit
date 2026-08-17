@@ -401,6 +401,15 @@ async fn unstage_paths(repo_id: String, paths: Vec<String>, app: AppHandle) -> R
         .await
 }
 
+/// Discard the unstaged changes to these paths (§5.2, §8.6). The same shape as
+/// every other write — the destructive part lives entirely in
+/// `commit::discard`'s flags, and the confirmation entirely in the frontend.
+#[tauri::command]
+async fn discard_paths(repo_id: String, paths: Vec<String>, app: AppHandle) -> Result<(), String> {
+    write_and_refresh(&app, repo_id, |path| async move { commit::discard(&path, &paths).await })
+        .await
+}
+
 #[tauri::command]
 async fn stage_all(repo_id: String, app: AppHandle) -> Result<(), String> {
     write_and_refresh(&app, repo_id, |path| async move { commit::stage_all(&path).await }).await
@@ -1491,6 +1500,7 @@ pub fn run() {
             file_diff,
             stage_paths,
             unstage_paths,
+            discard_paths,
             stage_all,
             unstage_all,
             commit_repo,

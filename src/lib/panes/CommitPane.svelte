@@ -4,6 +4,7 @@
   import EmptyState from '../EmptyState.svelte';
   import GitErrorNotice from '../GitErrorNotice.svelte';
   import Glyph from '../Glyph.svelte';
+  import DiscardDialog from '../DiscardDialog.svelte';
   import { needsPublish, repos, type FileEntry } from '../repos.svelte';
   import { diff, type DiffSource } from '../diff.svelte';
 
@@ -31,6 +32,48 @@
 
   function sectionLabel(shown: number, total: number): string {
     return shown === total ? `${total}` : `${shown} of ${total}`;
+  }
+
+  // Discard (§5.2) — the only thing in the pane that destroys work, so it is
+  // scoped as narrowly as it can honestly be and confirmed every time.
+  //
+  // *Changes* only, and only its tracked rows. A staged row's Discard could
+  // only mean "throw away the staged work as well", which is not what a button
+  // sitting beside − reads as; unstage first and the row appears here, where
+  // discarding it means one plain thing. Untracked files are excluded because
+  // git has nothing to restore them from: discarding one could only be `git
+  // clean` deleting it outright, and Corgit does not delete files.
+  //
+  // A raw `Set` in `$state` is not deeply reactive in Svelte 5, so `pick`
+  // reassigns rather than mutating — same idiom as `repos.pins`.
+  let picked = $state<Set<string>>(new Set());
+  /** Non-null while the confirmation is up; the value is the exact list the
+   *  dialog is showing. */
+  let confirming = $state<FileEntry[] | null>(null);
+
+  const discardable = $derived((files?.unstaged ?? []).filter((entry) => entry.status !== '?'));
+  /** The intersection, never `picked` itself: a path can leave the list under
+   *  us — a sweep, an FS watcher, someone staging it in a terminal — and a
+   *  stale tick must not survive into a discard. */
+  const selected = $derived(discardable.filter((entry) => picked.has(entry.path)));
+
+  // A selection means nothing in a different repo, and the paths may not even
+  // exist there. Same guarded shape as GraphPane's diff-closing effect: this
+  // must fire on a repo change, not on every touch of what it reads.
+  let lastRepoId: string | undefined = undefined;
+  $effect(() => {
+    const id = repos.selectedId;
+    if (id !== lastRepoId) {
+      lastRepoId = id;
+      picked = new Set();
+    }
+  });
+
+  function pick(path: string, checked: boolean) {
+    const next = new Set(picked);
+    if (checked) next.add(path);
+    else next.delete(path);
+    picked = next;
   }
 
   /** Which two sides the right pane compares (§5.4). It has to come from the
@@ -141,6 +184,25 @@
     busy = true;
     try {
       await repos.unstageAll();
+    } finally {
+      busy = false;
+    }
+  }
+
+  /** Runs what the dialog confirmed. Only the paths that actually went are
+   *  dropped from the selection: a failed discard leaves its rows ticked so
+   *  the same Discard press retries them, rather than silently emptying the
+   *  selection as though it had worked. */
+  async function discard(entries: readonly FileEntry[]) {
+    const paths = entries.map((entry) => entry.path);
+    if (paths.length === 0) return;
+
+    busy = true;
+    try {
+      if (await repos.discardPaths(paths)) {
+        const gone = new Set(paths);
+        picked = new Set([...picked].filter((path) => !gone.has(path)));
+      }
     } finally {
       busy = false;
     }
@@ -286,6 +348,24 @@
           {/if}
         </span>
       </div>
+      <!-- Only while something is picked, and on its own line rather than in
+           the header: at this pane's width the header already carries a count
+           and *stage all*, and a bar that has to be read before pressing
+           Discard should not be the thing that gets squeezed. -->
+      {#if selected.length > 0}
+        <div class="selection-bar">
+          <span class="selection-count">{selected.length} selected</span>
+          <button
+            type="button"
+            class="link danger"
+            disabled={busy}
+            onclick={() => (confirming = selected)}
+          >↺ discard</button>
+          <button type="button" class="link" disabled={busy} onclick={() => (picked = new Set())}>
+            clear
+          </button>
+        </div>
+      {/if}
       {#if files.unstaged.length === 0}
         <p class="section-empty">No changes</p>
       {:else}
@@ -299,6 +379,10 @@
                 onToggle={() => stagePath(entry.path)}
                 onOpen={() => openDiff('unstaged', entry)}
                 selected={isOpen('unstaged', entry)}
+                selectable
+                checked={picked.has(entry.path)}
+                onCheck={entry.status === '?' ? undefined : (on) => pick(entry.path, on)}
+                onDiscard={entry.status === '?' ? undefined : () => (confirming = [entry])}
               />
             </li>
           {/each}
@@ -307,6 +391,14 @@
     {/if}
   {/if}
 </Pane>
+
+{#if confirming}
+  <DiscardDialog
+    entries={confirming}
+    onDiscard={() => discard(confirming ?? [])}
+    onClose={() => (confirming = null)}
+  />
+{/if}
 
 <style>
   .conflict-banner {
@@ -530,6 +622,31 @@
     color: var(--text-primary);
     background: none;
     border-color: transparent;
+  }
+
+  /* Indented to the depth of the file rows' checkbox column, so the count
+     reads as belonging to the ticks below it rather than to the header above. */
+  .selection-bar {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: 0 var(--space-3) var(--space-1);
+  }
+
+  .selection-count {
+    font-size: var(--text-xs);
+    color: var(--text-secondary);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* The link that destroys work, coloured like the row's ↺ (§11's --danger). */
+  .link.danger:not(:disabled) {
+    color: var(--danger-hover);
+  }
+
+  .link.danger:hover:not(:disabled) {
+    color: var(--danger-hover);
+    text-decoration: underline;
   }
 
   .section-empty {
