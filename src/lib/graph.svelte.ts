@@ -81,6 +81,17 @@ class GraphStore {
 
   private laneState: LaneState = emptyLaneState();
 
+  /** Bumped by every first-page load; a response carrying a stale token is
+   *  dropped. Two `reload`s really do overlap in normal use — a commit or a
+   *  pull emits `status:repo` from `write_and_refresh`, and the hot repo's FS
+   *  watcher emits a second one ~200 ms later (§6), both while `graph_page` is
+   *  still running. Without this the later one read `this.laneState` back
+   *  *after* its await, by which point the earlier reload had published the
+   *  lane state left over at the bottom of its page, and laid page 1 out as if
+   *  it continued those lanes: every still-open lane drew a `through` line up
+   *  and off the top of a graph with nothing above it. */
+  private loadToken = 0;
+
   refsByHash = $derived.by(() => {
     const map = new Map<string, RefBadge[]>();
     for (const ref of this.refs) {
@@ -167,27 +178,32 @@ class GraphStore {
   private async reload(): Promise<void> {
     const id = this.repoId;
     if (!id) return;
+    const token = ++this.loadToken;
 
     this.loading = true;
-    this.laneState = emptyLaneState();
     try {
       const [page, refs] = await Promise.all([
         invoke<GraphPage>('graph_page', { repoId: id, skip: 0 }),
         invoke<RefBadge[]>('graph_refs', { repoId: id }),
       ]);
-      if (this.repoId !== id) return;
+      if (this.repoId !== id || this.loadToken !== token) return;
 
-      const laid = layoutRows(page.commits, this.laneState);
+      // Always from an empty state, never from `this.laneState`: a first page
+      // continues nothing, and reading the field back after an await is what
+      // let a concurrent reload's leftovers become this page's phantom lanes.
+      const laid = layoutRows(page.commits, emptyLaneState());
       this.rows = laid.rows;
       this.laneState = laid.state;
       this.hasMore = page.hasMore;
       this.refs = refs;
       this.error = null;
     } catch (err) {
-      if (this.repoId !== id) return;
+      if (this.repoId !== id || this.loadToken !== token) return;
       this.error = String(err);
     } finally {
-      if (this.repoId === id) this.loading = false;
+      // Only the newest load owns the spinner; an outdated one clearing it
+      // would say "loaded" over rows still being replaced.
+      if (this.repoId === id && this.loadToken === token) this.loading = false;
     }
   }
 
@@ -197,12 +213,21 @@ class GraphStore {
     const id = this.repoId;
     if (!id || this.loadingMore || !this.hasMore) return;
 
+    // Both captured before the await for the same reason `reload` no longer
+    // reads them after one: this page continues *these* rows, and a reload
+    // landing meanwhile replaces both the rows and the lanes they left open.
+    const token = this.loadToken;
+    const base = this.laneState;
+
     this.loadingMore = true;
     try {
       const page = await invoke<GraphPage>('graph_page', { repoId: id, skip: this.rows.length });
-      if (this.repoId !== id) return;
+      // A reload landed while this was in flight — these commits continue rows
+      // that are no longer on screen, so appending them would duplicate or
+      // misplace them. The reload already published a correct first page.
+      if (this.repoId !== id || this.loadToken !== token) return;
 
-      const laid = layoutRows(page.commits, this.laneState);
+      const laid = layoutRows(page.commits, base);
       this.rows = [...this.rows, ...laid.rows];
       this.laneState = laid.state;
       this.hasMore = page.hasMore;
