@@ -16,6 +16,29 @@ pub async fn unstage(repo: &Path, paths: &[String]) -> Result<(), String> {
     run_pathspec(repo, "restore", &["--staged", "--"], paths).await
 }
 
+/// Discard the *unstaged* changes to these paths (§8.6): restore the working
+/// tree from the index, leaving whatever is staged for them untouched.
+///
+/// The flags are the entire safety property of this function, which is why
+/// they are a named constant with a test on them. `--worktree` alone takes its
+/// source from the index; adding `--staged` silently moves that source to HEAD
+/// and takes the staged work with it — unrecoverable, and reported as success,
+/// which is the same class of failure §8.3 refuses force-checkout for.
+///
+/// Untracked paths cannot be discarded and must not be passed: git has nothing
+/// to restore them from, so the only way to remove one would be `git clean`
+/// deleting it outright. It rejects an unmatched pathspec by failing the whole
+/// invocation rather than skipping that path, so a single untracked entry
+/// would abandon the entire discard — nothing is half-done, which is the
+/// failure mode to want, but the caller is still what keeps them out (§5.2).
+pub async fn discard(repo: &Path, paths: &[String]) -> Result<(), String> {
+    run_pathspec(repo, "restore", DISCARD_FLAGS, paths).await
+}
+
+/// Named so the "working tree only" rule above is something a test can hold
+/// onto — the failure it guards against destroys work and reports success.
+const DISCARD_FLAGS: &[&str] = &["--worktree", "--"];
+
 /// "Stage all" must reach files hidden by the middle pane's 100-entry cap
 /// (§5.2), so it stages the whole tree rather than a path list the frontend
 /// gathered from what it could see.
@@ -67,4 +90,33 @@ async fn run(repo: &Path, args: &[&str]) -> Result<(), String> {
 fn full_message(stderr: &str) -> String {
     let trimmed = stderr.trim();
     if trimmed.is_empty() { "git failed".to_string() } else { trimmed.to_string() }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The whole point of [`DISCARD_FLAGS`], and the reason it is a constant:
+    /// `--worktree` restores from the *index*, so a partly-staged file keeps
+    /// its staged half. `--staged --worktree` would restore from HEAD instead
+    /// and destroy that half too — a one-word edit, no visible difference in
+    /// the UI, and no way to get the work back.
+    #[test]
+    fn discard_restores_the_worktree_from_the_index_only() {
+        assert_eq!(DISCARD_FLAGS, ["--worktree", "--"]);
+        assert!(
+            !DISCARD_FLAGS.contains(&"--staged"),
+            "discard must never reach the index: that restores from HEAD and takes staged work"
+        );
+    }
+
+    /// A `restore` with no paths would be a no-op at best; `git restore` with
+    /// only `--` and nothing after it errors. Either way an empty selection is
+    /// the caller's business, not git's.
+    #[tokio::test]
+    async fn an_empty_path_list_runs_no_git_at_all() {
+        // No repo needed: the guard is hit before anything is spawned, so a
+        // path that does not exist proves the early return rather than luck.
+        assert!(discard(Path::new("\\\\?\\nonexistent"), &[]).await.is_ok());
+    }
 }

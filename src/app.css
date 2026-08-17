@@ -38,6 +38,21 @@
      operation failed", and the two must be free to diverge. */
   --titlebar-close-hover: #c42b1c;
 
+  /* Destructive confirmation — the Discard button and its dialog (§5.2). Kept
+     apart from --status-error for the same reason --titlebar-close-hover is:
+     that token reports something that already failed, this one offers to
+     destroy work that is still there, and the two must be free to diverge.
+     Same four-token shape as --accent because it is styled the same way —
+     muted at rest, solid on hover — and deeper than --status-error so the
+     filled state carries white text at contrast rather than glowing. */
+  --danger: #da3633;
+  --danger-hover: #f85149;
+  /* Dark enough that --danger-hover clears 4.5:1 as label text on it — the
+     resting Discard button is red-on-red, and 12px is not a size to be
+     generous about. */
+  --danger-muted: #351417;
+  --danger-text: #ffffff;
+
   /* Semantic status colours. Distinct hues from --accent and from each other. */
   --status-dirty: #e3b341;
   --status-ahead: #3fb950;

@@ -298,6 +298,19 @@ class RepoStore {
     return this.write('unstage_paths', { paths });
   }
 
+  /** Throw away the *unstaged* changes to these paths (§5.2, §8.6) — the one
+   *  write in the app that destroys work rather than moving it between the
+   *  index and the working tree, which is why the pane confirms it first.
+   *
+   *  Untracked paths must never reach here: git has nothing to restore them
+   *  from, so the command would fail on the pathspec — and because git rejects
+   *  a pathspec list wholesale rather than per path, one stray untracked entry
+   *  would take a whole multi-file discard down with it. `CommitPane` is what
+   *  keeps them out. */
+  async discardPaths(paths: string[]): Promise<boolean> {
+    return this.write('discard_paths', { paths });
+  }
+
   async stageAll(): Promise<boolean> {
     return this.write('stage_all', {});
   }
