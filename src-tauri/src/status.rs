@@ -31,6 +31,16 @@ pub struct RepoStatus {
     pub untracked: u32,
     /// Unmerged paths — a merge conflict, which blocks commit and push (§13).
     pub conflicted: u32,
+    /// Distinct paths git reported anything about — the number the row's badge
+    /// shows (§5.1). Deliberately *not* `staged + unstaged + untracked +
+    /// conflicted`: git reports one record per path with a state on each side,
+    /// so a file edited, staged, then edited again (`MM`) lands in both
+    /// `staged` and `unstaged`. Summing those is right for "is anything going
+    /// on here", which is all the dot ever asked, and wrong the moment the row
+    /// prints a number — "3 files" for two files is the kind of small lie that
+    /// makes someone open the repo to check. One record, one file, counted
+    /// here where the records are already in front of us.
+    pub changed_files: u32,
 }
 
 /// Whether a branch must be **published** (`push -u origin HEAD`) rather than
@@ -199,8 +209,14 @@ pub fn parse(raw: &str) -> RepoStatus {
                 // be counted as a change.
                 records.next();
             }
-            Some(b'u') => status.conflicted += 1,
-            Some(b'?') => status.untracked += 1,
+            Some(b'u') => {
+                status.conflicted += 1;
+                status.changed_files += 1;
+            }
+            Some(b'?') => {
+                status.untracked += 1;
+                status.changed_files += 1;
+            }
             _ => {}
         }
     }
@@ -237,7 +253,9 @@ fn header(record: &str, status: &mut RepoStatus) {
 }
 
 /// A changed entry is `<type> <XY> …`, where X is the staged state and Y the
-/// unstaged one, `.` meaning unmodified. A single path can be both.
+/// unstaged one, `.` meaning unmodified. A single path can be both — which is
+/// why `changed_files` is incremented once here rather than derived from the
+/// two sides afterwards.
 fn tally(record: &str, status: &mut RepoStatus) {
     let field = record.as_bytes();
     if field.len() < 4 {
@@ -249,6 +267,7 @@ fn tally(record: &str, status: &mut RepoStatus) {
     if field[3] != b'.' {
         status.unstaged += 1;
     }
+    status.changed_files += 1;
 }
 
 #[cfg(test)]
@@ -343,6 +362,55 @@ mod tests {
         assert!(is_dirty(&status));
     }
 
+    /// The case the row's badge exists to get right, and the one the per-side
+    /// totals cannot express: `src/lib.rs` is staged *and* modified again, so
+    /// `staged + unstaged + untracked` is 5 for four files. The badge must say
+    /// four.
+    #[test]
+    fn a_partly_staged_file_counts_as_one_changed_file() {
+        let status = parse(&joined(&[
+            "1 M. N... 100644 100644 100644 aaa bbb src/main.rs",
+            "1 .M N... 100644 100644 100644 ccc ddd README.md",
+            "1 MM N... 100644 100644 100644 eee fff src/lib.rs",
+            "? notes.txt",
+        ]));
+
+        assert_eq!(status.staged + status.unstaged + status.untracked, 5);
+        assert_eq!(status.changed_files, 4);
+    }
+
+    /// Conflicts are files too. The row draws ⚠ instead of the count while any
+    /// exist (§5.1), but `changed_files` is the working tree's size, not the
+    /// badge's, and `is_dirty` reads it in the frontend.
+    #[test]
+    fn conflicts_and_untracked_files_are_counted() {
+        let status = parse(&joined(&[
+            "u UU N... 100644 100644 100644 100644 aaa bbb ccc src/conflict.rs",
+            "? notes.txt",
+        ]));
+
+        assert_eq!(status.changed_files, 2);
+    }
+
+    /// The invariant the frontend's `isDirty` leans on: anything that makes a
+    /// repo dirty by the old per-side sum also shows up as at least one
+    /// changed file. Were the two able to disagree, a repo would render clean
+    /// while holding uncommitted work — §5.1's one unforgivable failure.
+    #[test]
+    fn nothing_is_dirty_without_a_changed_file() {
+        for record in [
+            "1 M. N... 100644 100644 100644 aaa bbb src/main.rs",
+            "1 .M N... 100644 100644 100644 aaa bbb src/main.rs",
+            "1 MM N... 100644 100644 100644 aaa bbb src/main.rs",
+            "u UU N... 100644 100644 100644 100644 aaa bbb ccc src/main.rs",
+            "? notes.txt",
+        ] {
+            let status = parse(&joined(&[record]));
+            assert!(is_dirty(&status), "{record}");
+            assert!(status.changed_files > 0, "{record}");
+        }
+    }
+
     #[test]
     fn rename_original_path_is_not_read_as_a_record() {
         // The original path deliberately starts with "1" — read as a record it
@@ -356,6 +424,9 @@ mod tests {
         assert_eq!(status.staged, 1);
         assert_eq!(status.unstaged, 0);
         assert_eq!(status.untracked, 1);
+        // The rename is one file, not two: the original path is a record of
+        // its own, and counting it would inflate the row's badge.
+        assert_eq!(status.changed_files, 2);
     }
 
     #[test]

@@ -39,7 +39,7 @@ First paint renders from cache. It never waits on git.
 ### In (v1)
 
 - Repo discovery by scanning configured root folders
-- Per-repo status: branch, dirty indicator, ahead/behind
+- Per-repo status: branch, changed-files count, ahead/behind
 - Stage / unstage files (file-level)
 - Commit (staged files only)
 - Push, including "Publish branch" for a branch with no upstream
@@ -223,10 +223,25 @@ A **filter box** sits between them. Typing filters both sections by substring on
 only** — not branch, not path. This is the primary navigation tool for 77 repos; it is not
 optional.
 
-**Row contents:** repo name · current branch · dirty dot · ahead/behind badge.
+**Row contents:** repo name · current branch · changed-files badge · ahead/behind badge.
 
-The **dirty dot** is a single dot — one state, no distinction between staged and unstaged.
-The row answers "does this need me?", nothing finer. Detail lives in the middle pane.
+The **changed-files badge** is a filled dot grown enough to hold a number — the count of
+files with uncommitted changes, and nothing finer. No distinction between staged and
+unstaged; that detail lives in the middle pane. The row answers "does this need me?", and
+the number answers "how much?", which is the difference between a typo fix and an
+afternoon's work and is worth the two extra glyphs.
+
+The count is **distinct paths**, not the sum of the per-side totals: git reports one record
+per path with a state on each side, so a file that is staged and then edited again appears
+in both. Summing was correct while the row drew a dot — anything non-zero meant the same
+thing — and became a small lie the moment the row printed a number, so `RepoStatus` carries
+its own `changed_files` counted off the records themselves (§8.2).
+
+It stays a **fill**, not coloured text like ahead/behind: those are read after you have
+decided a row is interesting; this one is what makes you decide, and a solid shape is what
+survives a scan down 77 rows. The fill is **neutral** (`--count-bg`), not a status colour:
+the badge's presence is the state, its number is a quantity, and a hue on it says the same
+thing twice in a palette where every hue already means something else (§11).
 
 **Row-level Pull.** A repo that is behind shows a pull affordance on hover — the dashboard's
 whole thesis is acting without navigating, and forcing a select-then-cross-the-window trip
@@ -797,6 +812,18 @@ Three rules for the dark palette:
 Set the Tauri window background colour to `--bg-app` so the window doesn't flash white
 before the webview paints.
 
+Rule 3 has a corollary that the changed-files badge (§5.1) was the first thing to find:
+**a quantity is not a state, and takes no hue.** Every colour in the palette is spoken for
+— amber dirty, orange behind, green ahead, red failed, indigo the accent — so a filled
+badge tried in any of them inherits a meaning it does not have. Amber read as a warning
+about a repo that was merely edited; blue read as the accent whatever its hue angle, because
+at a glance down 77 rows "saturated and cool" *is* the accent. It fills with `--count-bg`,
+a neutral one step lighter than `--bg-active`, and inks with `--count-text`. The state is
+already carried by the badge existing at all; the colour was saying it a second time.
+
+This is the rule for any counter added later. Status colours mean "this repo is in state X";
+neutral means "here is a number".
+
 One token is an exception to rule 3's "one accent, status colours are semantic" framing:
 `--titlebar-close-hover` (`#c42b1c`) is Windows' own close-button red, and it exists
 because the caption is drawn by us now (§4.1). It sits close to `--status-error` and is
@@ -923,7 +950,7 @@ where the verb fits (Fetch), because that reads as chrome, not decoration.
 
 Resolved: Svelte 5 · filter matches repo name only · 60 s sweep with re-entrancy guard ·
 graph shows all refs, switcher dedupes local/remote · dark only · auto-update yes, signing
-deferred (§12) · single dirty dot · row-level Pull · close quits · one root, one window,
+deferred (§12) · one dirty badge carrying a changed-files count (§5.1) · row-level Pull · close quits · one root, one window,
 one process, with a recent list (§9) · absolute `dd-MM-yyyy HH:mm:ss` timestamps · native
 menu bar (§4.1) · window restores the last selected repo · multi-window deferred to v2
 (§2, §9.2).

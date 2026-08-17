@@ -13,6 +13,7 @@ function status(overrides: Partial<RepoStatus> = {}): RepoStatus {
     unstaged: 0,
     untracked: 0,
     conflicted: 0,
+    changedFiles: 0,
     ...overrides,
   };
 }
@@ -83,5 +84,15 @@ describe('isDirty (§5.1)', () => {
 
   test.each(['staged', 'unstaged', 'untracked', 'conflicted'] as const)('%s alone is dirty', (field) => {
     expect(isDirty(status({ [field]: 1 }))).toBe(true);
+  });
+
+  /** `changedFiles` is what the badge prints, but it must never be what
+   *  decides whether the badge appears: a status missing it — an older cache,
+   *  a partial fixture — has to still read as dirty rather than render a repo
+   *  full of work as clean. The parser keeps the two in step (`status.rs`'s
+   *  `nothing_is_dirty_without_a_changed_file`); this pins which way the
+   *  frontend fails if they ever part. */
+  test('a status with counts but no changedFiles is still dirty', () => {
+    expect(isDirty(status({ unstaged: 2, changedFiles: 0 }))).toBe(true);
   });
 });
