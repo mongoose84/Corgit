@@ -187,17 +187,33 @@ pub struct CommitFileEntry {
     pub deletions: Option<u32>,
 }
 
-/// `git diff-tree --no-commit-id --raw --numstat -r -z <hash>` plus
-/// `git show -s --format=… <hash>` (§8.5), run concurrently since neither
+/// `git diff-tree --no-commit-id -m --first-parent --root --raw --numstat -r -z <hash>`
+/// plus `git show -s --format=… <hash>` (§8.5), run concurrently since neither
 /// depends on the other's result. `--raw` and `--numstat` combine into a
 /// single call (unlike `--name-status`, which git treats as exclusive with
 /// `--numstat`) — the status letter from one block, the +/− counts from the
 /// other.
+///
+/// **`-m --first-parent` and `--root` are what make merges and the root commit
+/// show anything at all.** Bare `diff-tree` prints *nothing* for either: a
+/// merge because git will not pick a parent to diff against on its own, a root
+/// commit because it has no parent to diff against. The graph feeds this from
+/// a plain `git log --all` (no `--no-merges`), so both are selectable rows, and
+/// without these flags every merge in a PR-merging repo opened a details pane
+/// reading "No files changed" — the panel confidently lying about history it
+/// had read correctly.
+///
+/// `--cc` is the other way to make a merge non-empty and is deliberately *not*
+/// used: on a merge that resolved trivially it emits the numstat block with no
+/// `--raw` block at all, and `parse_raw_and_numstat` zips the two by position,
+/// so the file list would come back empty again — the same bug wearing a
+/// different flag. `-m --first-parent` also answers the question the pane is
+/// actually asking: "what did this merge bring in", not "how was it resolved".
 pub async fn details(repo: &Path, hash: &str) -> Result<CommitDetails, String> {
-    let diff_tree_args = ["diff-tree", "--no-commit-id", "--raw", "--numstat", "-r", "-z", hash];
+    let files_args = diff_tree_args(hash);
     let show_args = ["show", "-s", "--format=%H%x1f%an%x1f%ae%x1f%ct%x1f%B", hash];
     let (files_result, meta_result) =
-        tokio::join!(git::read(repo, &diff_tree_args), git::read(repo, &show_args));
+        tokio::join!(git::read(repo, &files_args), git::read(repo, &show_args));
 
     let files_output = files_result?;
     if !files_output.ok {
@@ -210,6 +226,27 @@ pub async fn details(repo: &Path, hash: &str) -> Result<CommitDetails, String> {
 
     let files = parse_raw_and_numstat(&files_output.stdout);
     parse_show(&meta_output.stdout, files)
+}
+
+/// Its own function, and tested, for the same reason `branch::create_args` is:
+/// the flags *are* the behaviour here, and three of them look droppable to
+/// anyone who only ever selects an ordinary commit while checking.
+fn diff_tree_args(hash: &str) -> [&str; 10] {
+    [
+        "diff-tree",
+        "--no-commit-id",
+        // Split a merge into one diff per parent, then keep only the first —
+        // together they are one diff, not N. An octopus merge would otherwise
+        // repeat every path once per parent.
+        "-m",
+        "--first-parent",
+        "--root",
+        "--raw",
+        "--numstat",
+        "-r",
+        "-z",
+        hash,
+    ]
 }
 
 /// `--raw --numstat -r -z` prints two format blocks back to back, describing
@@ -483,5 +520,24 @@ mod tests {
     #[test]
     fn show_with_no_output_is_an_error() {
         assert!(parse_show("", vec![]).is_err());
+    }
+
+    /// Guards the three flags that make a merge and a root commit list their
+    /// files instead of coming back empty. Bare `diff-tree` prints nothing for
+    /// either, and the graph (`git log --all`, no `--no-merges`) makes both
+    /// selectable rows — so dropping any of these silently returns the pane to
+    /// reading "No files changed" over history it read fine.
+    #[test]
+    fn diff_tree_covers_merges_and_the_root_commit() {
+        let args = diff_tree_args("a3f9c21");
+
+        assert!(args.contains(&"-m"), "a merge diffs against no parent without -m");
+        assert!(args.contains(&"--first-parent"), "-m alone repeats every path once per parent");
+        assert!(args.contains(&"--root"), "the root commit has no parent to diff against");
+        // `--cc` would make merges non-empty too, but emits no `--raw` block on
+        // a trivially-resolved merge, and `parse_raw_and_numstat` zips the two
+        // blocks by position — so it lands back on an empty file list.
+        assert!(!args.contains(&"--cc"), "--cc breaks the raw/numstat positional zip");
+        assert_eq!(args.last(), Some(&"a3f9c21"), "the revision stays last");
     }
 }
