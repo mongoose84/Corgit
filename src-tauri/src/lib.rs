@@ -185,6 +185,18 @@ struct RepoStatusEvent {
     repo_id: String,
     status: Option<RepoStatus>,
     error: Option<String>,
+    /// The pane's rows, carried only when this repo is the selected one —
+    /// `None` for every other repo, which is what keeps the §1 memory budget
+    /// to counts alone for the other 76.
+    ///
+    /// This is what lets the frontend stop calling `repo_files` after every
+    /// write: that call re-ran the same `git status` this event was already
+    /// built from (§8.2). It also closes a staleness gap that had nothing to
+    /// do with speed — a stage done in the user's terminal reaches here
+    /// through `watch.rs`, and used to refresh the row's badge while leaving
+    /// the pane underneath it showing the pre-stage list until the repo was
+    /// reselected.
+    files: Option<FileChanges>,
 }
 
 #[tauri::command]
@@ -842,8 +854,33 @@ where
 /// debounced FS-watcher callbacks (§6) can call it directly, the same way
 /// `write_and_refresh` does after every mutating command.
 pub(crate) async fn emit_repo_status(app: &AppHandle, repo_id: &str, path: &Path) {
-    let status = status::query(path).await;
     let state = app.state::<AppState>();
+
+    // Whether the middle pane is looking at this repo decides how much of the
+    // read to keep: paths for the selected repo, counts for everyone else.
+    // Asked *before* the git call rather than after, because the answer picks
+    // the command — deciding afterwards would mean a second `git status` for
+    // the paths, which is precisely the spawn this exists to remove.
+    //
+    // Racing the user's selection here is harmless in the direction that
+    // matters: a selection that moves on mid-read publishes file lists the
+    // frontend drops, whereas one that arrives late leaves the pane to
+    // `repo_files`, which selection calls anyway.
+    let selected = {
+        let current = state.root.lock().expect("root mutex poisoned");
+        current
+            .as_ref()
+            .is_some_and(|root| root.selected.as_deref() == Some(repo_id))
+    };
+
+    let (status, files) = if selected {
+        match status::query_with_files(path).await {
+            Ok((status, files)) => (Ok(status), Some(files)),
+            Err(err) => (Err(err), None),
+        }
+    } else {
+        (status::query(path).await, None)
+    };
 
     let published = {
         let mut current = state.root.lock().expect("root mutex poisoned");
@@ -874,6 +911,7 @@ pub(crate) async fn emit_repo_status(app: &AppHandle, repo_id: &str, path: &Path
         repo_id: repo_id.to_string(),
         status: status.as_ref().ok().cloned(),
         error: status.as_ref().err().cloned(),
+        files,
     };
     if let Err(err) = app.emit(REPO_STATUS_EVENT, event) {
         log::warn!("could not publish repo status ({err})");
