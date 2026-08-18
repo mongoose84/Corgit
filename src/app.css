@@ -60,6 +60,25 @@
   --status-error: #f85149;
   --status-conflict: #f85149;
 
+  /* The repo row's changed-files badge (§5.1) — the app's one filled badge,
+     and deliberately *not* one of the status colours above. Every hue in this
+     file already means something: amber is dirty, orange behind, green ahead,
+     red failed, indigo the accent. A count of files is not a state, it is a
+     quantity, and it borrowed the wrong connotation from whichever hue it was
+     given — amber read as a warning, blue as the accent. Neutral is the only
+     thing left that says "here is a number" and nothing more, which is the
+     conclusion VS Code's badge, GitHub's counters and every unread pill on the
+     desktop arrived at too. The state is carried by the badge being there at
+     all; the colour was saying it twice.
+
+     One step lighter than --bg-active on purpose: the badge has to hold its
+     shape on a hovered (#26292e), active (#2d3138) and selected
+     (--accent-muted) row, and anything dimmer dissolves into one of the three.
+     Text near-white for ~7.5:1 on it — these are the smallest digits in the
+     app, and the count is the whole point of the badge. */
+  --count-bg: #3f4650;
+  --count-text: #eceef1;
+
   /* Graph lanes, cycled by lane index. Eight hues, readable on --bg-surface,
      and separated from the accent and status colours above. */
   --lane-1: #58a6ff;

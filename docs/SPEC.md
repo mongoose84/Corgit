@@ -39,7 +39,7 @@ First paint renders from cache. It never waits on git.
 ### In (v1)
 
 - Repo discovery by scanning configured root folders
-- Per-repo status: branch, dirty indicator, ahead/behind
+- Per-repo status: branch, changed-files count, ahead/behind
 - Stage / unstage files (file-level)
 - Commit (staged files only)
 - Push, including "Publish branch" for a branch with no upstream
@@ -130,6 +130,11 @@ percentages above are defaults, not constraints. Minimum widths prevent collapse
 unusable. The same is true of the boundary inside the diff view (§5.4), and *View ▸ Reset
 Pane Sizes* returns every draggable boundary in the window — not only the pane ones — to
 its default.
+
+A fourth column — the **commit info panel** (§5.2) — opens to the right of the graph on a
+commit selection. It is fixed-width and deliberately outside all of the above: no divider,
+no stored fraction, nothing to reset. The graph's track absorbs it, and opening it must
+never resize the two panes to its left.
 
 ### 4.1 Title bar and menu
 
@@ -223,10 +228,25 @@ A **filter box** sits between them. Typing filters both sections by substring on
 only** — not branch, not path. This is the primary navigation tool for 77 repos; it is not
 optional.
 
-**Row contents:** repo name · current branch · dirty dot · ahead/behind badge.
+**Row contents:** repo name · current branch · changed-files badge · ahead/behind badge.
 
-The **dirty dot** is a single dot — one state, no distinction between staged and unstaged.
-The row answers "does this need me?", nothing finer. Detail lives in the middle pane.
+The **changed-files badge** is a filled dot grown enough to hold a number — the count of
+files with uncommitted changes, and nothing finer. No distinction between staged and
+unstaged; that detail lives in the middle pane. The row answers "does this need me?", and
+the number answers "how much?", which is the difference between a typo fix and an
+afternoon's work and is worth the two extra glyphs.
+
+The count is **distinct paths**, not the sum of the per-side totals: git reports one record
+per path with a state on each side, so a file that is staged and then edited again appears
+in both. Summing was correct while the row drew a dot — anything non-zero meant the same
+thing — and became a small lie the moment the row printed a number, so `RepoStatus` carries
+its own `changed_files` counted off the records themselves (§8.2).
+
+It stays a **fill**, not coloured text like ahead/behind: those are read after you have
+decided a row is interesting; this one is what makes you decide, and a solid shape is what
+survives a scan down 77 rows. The fill is **neutral** (`--count-bg`), not a status colour:
+the badge's presence is the state, its number is a quantity, and a hue on it says the same
+thing twice in a palette where every hue already means something else (§11).
 
 **Row-level Pull.** A repo that is behind shows a pull affordance on hover — the dashboard's
 whole thesis is acting without navigating, and forcing a select-then-cross-the-window trip
@@ -255,12 +275,13 @@ shuffle. Position stability matters more than sorting cleverness for a mouse-fir
 **Staleness:** cold repos are refreshed by the sweep, so a badge can lag reality by up to
 one sweep interval. Accepted.
 
-### 5.2 Middle pane — two modes
+### 5.2 Middle pane, and the commit info panel
 
-The pane is **modal**, driven by graph selection.
+The middle pane is the **working tree**, always. Commit details are a **fourth column**
+that opens beside the graph — see the end of this section for why that replaced the
+original modal design.
 
-**Mode A — Working tree** (default; active when the graph's *Uncommitted Changes* node is
-selected):
+**Working tree** (the middle pane's only mode):
 
 ```
 [ commit message textarea ]
@@ -303,21 +324,48 @@ Changes (14)                [+ stage all]
     destroys work git cannot give back. `git revert` and `git reset` stay out of v1 (§2) —
     this is neither.
 
-**Mode B — Commit details** (active when a commit is selected in the graph):
+**Commit info panel** — a fourth column, opening to the right of the graph whenever a
+commit is selected:
 
 ```
-← Back to changes
+COMMIT                                        ✕
 a3f9c21  feat: add retry logic
-Jeppe Kronborg · 2026-08-12 14:03
+Local   ▸ main
+Remote  ▸ origin/main
+Jeppe Kronborg · 12-08-2026 14:03:11
 [ full commit message ]
 
-Files (7)
-  M  src/main.rs
-  A  src/retry.rs
+Changed in this commit                         7
+  M  src/main.rs            +5  −0
+  A  src/retry.rs          +12  −0
 ```
 
 Read-only. Clicking a file opens that commit's diff against its parent in the right pane
 (§5.4) — the same viewer the working-tree rows use.
+
+**Why a column and not a mode.** The original design made this Mode B of the middle pane,
+with a *← Back to changes* affordance. That was wrong in a way only visible once both
+existed: reading a commit and staging work are not alternatives, and putting them in one
+slot meant every glance at history cost the staging state its place on screen. A fixed
+320 px column costs the graph width it can spare and costs the middle pane nothing.
+
+It is **not resizable** and has no stored fraction — the graph's `1fr` track absorbs it
+(§4). The only constraint it adds is that the graph must still clear its minimum width
+while the panel is open.
+
+**Closing it is deselecting the commit**, and there are three ways, because for a while
+there was effectively one and it was a trap:
+
+- the panel's own ✕;
+- the *Uncommitted Changes* node — the semantic "back to the working tree", but it only
+  exists when the tree is dirty, which is what made the ✕ the sole exit on a clean repo;
+- **Esc**, or a click on empty graph background past the last row.
+
+**Clicking the already-selected row does nothing.** Selection is sticky here exactly as it
+is in the repo list; a toggle would mean an accidental double-click opens the column,
+reflows the graph, closes it and reflows again, with the row moving under the cursor. The
+implementation must also make re-selection *inert* rather than merely idempotent — see
+§8.5 on why re-fetching an immutable commit is a visible regression, not a no-op.
 
 ### 5.3 Graph (right)
 
@@ -328,8 +376,8 @@ the graph keeps its scroll position and loaded pages, so glancing between the tw
 Selected repo only — one repo at a time, so graph cost never multiplies by 77.
 
 - **Synthetic "Uncommitted Changes" node** pinned at the top when the working tree is dirty.
-  Clicking it returns the middle pane to Mode A. This is what ties the two panes into one
-  coherent surface.
+  Clicking it clears the commit selection, closing the info panel (§5.2). This is what ties
+  the panes into one coherent surface.
 - Rows: graph lanes · hash (short) · message · author · date · ref badges (branches, tags,
   `origin/*`).
 - **The HEAD commit's row is marked.** Its dot is drawn larger with a halo, and the row
@@ -344,7 +392,8 @@ Selected repo only — one repo at a time, so graph cost never multiplies by 77.
   fixed-width and right-aligned; at 19 characters it costs ~140 px, so it is laid out
   before the message column gets its remaining space.
 - Loads **300 commits at a time** with a "Load more" row at the bottom.
-- Click a commit → middle pane Mode B.
+- Click a commit → the commit info panel opens beside the graph (§5.2). Clicking the same
+  row again leaves it open; Esc or a click on empty background past the last row closes it.
 - Right-click a commit → Copy hash, Copy message, Open in VS Code. (Thin by design — the
   graph is a viewer in v1.)
 
@@ -576,9 +625,35 @@ Run `git commit-graph write --reachable` on first load of a large repo, and cons
 ### 8.5 Commit details
 
 ```
-git diff-tree --no-commit-id --name-status -r -z <hash>
+git diff-tree --no-commit-id -m --first-parent --root --raw --numstat -r -z <hash>
 git show -s --format=%H%x1f%an%x1f%ae%x1f%ct%x1f%B <hash>
 ```
+
+`--raw --numstat` together, rather than `--name-status`: git treats that one as exclusive
+with `--numstat`, and the panel wants both halves — the status letter from the raw block,
+the per-file +/− from the numstat block. They describe the same files in the same order,
+so they are zipped **by position**, which sidesteps matching rename pairs across the two
+blocks entirely.
+
+**`-m --first-parent` and `--root` are load-bearing.** Bare `diff-tree` prints nothing at
+all for a merge (it will not pick a parent on its own) and nothing for the root commit (it
+has none). The graph is a plain `git log --all` with no `--no-merges` (§8.4), so both are
+selectable rows — and without these flags every merge in a PR-merging repo opened a panel
+reading "no files changed" over history that had been read correctly. `--first-parent`
+because `-m` alone emits one diff per parent, repeating every path on an octopus merge.
+
+`--cc` is the other way to make a merge non-empty and is **rejected**: on a
+trivially-resolved merge it emits the numstat block with no raw block at all, and the
+positional zip above then produces an empty list — the same bug wearing a different flag.
+`-m --first-parent` also answers the question the panel is asking ("what did this merge
+bring in") rather than "how was it resolved", which is why the panel labels a merge's file
+list as compared with the first parent (§5.2).
+
+**A commit is immutable, so its details are fetched once.** Nothing re-reads them — not the
+`status:repo` event that reloads the graph, and not re-selecting the same row. This is the
+same reasoning as `isLive` in the diff store (§5.4), and it is a correctness point, not an
+optimisation: the fetch nulls the details it is replacing, so a redundant one blanks the
+panel to its loading state and discards its scroll position.
 
 ### 8.6 Staging and commit
 
@@ -797,6 +872,18 @@ Three rules for the dark palette:
 Set the Tauri window background colour to `--bg-app` so the window doesn't flash white
 before the webview paints.
 
+Rule 3 has a corollary that the changed-files badge (§5.1) was the first thing to find:
+**a quantity is not a state, and takes no hue.** Every colour in the palette is spoken for
+— amber dirty, orange behind, green ahead, red failed, indigo the accent — so a filled
+badge tried in any of them inherits a meaning it does not have. Amber read as a warning
+about a repo that was merely edited; blue read as the accent whatever its hue angle, because
+at a glance down 77 rows "saturated and cool" *is* the accent. It fills with `--count-bg`,
+a neutral one step lighter than `--bg-active`, and inks with `--count-text`. The state is
+already carried by the badge existing at all; the colour was saying it a second time.
+
+This is the rule for any counter added later. Status colours mean "this repo is in state X";
+neutral means "here is a number".
+
 One token is an exception to rule 3's "one accent, status colours are semantic" framing:
 `--titlebar-close-hover` (`#c42b1c`) is Windows' own close-button red, and it exists
 because the caption is drawn by us now (§4.1). It sits close to `--status-error` and is
@@ -923,7 +1010,7 @@ where the verb fits (Fetch), because that reads as chrome, not decoration.
 
 Resolved: Svelte 5 · filter matches repo name only · 60 s sweep with re-entrancy guard ·
 graph shows all refs, switcher dedupes local/remote · dark only · auto-update yes, signing
-deferred (§12) · single dirty dot · row-level Pull · close quits · one root, one window,
+deferred (§12) · one dirty badge carrying a changed-files count (§5.1) · row-level Pull · close quits · one root, one window,
 one process, with a recent list (§9) · absolute `dd-MM-yyyy HH:mm:ss` timestamps · native
 menu bar (§4.1) · window restores the last selected repo · multi-window deferred to v2
 (§2, §9.2).
@@ -951,10 +1038,10 @@ Each step ends somewhere useful:
    `status --porcelain=v2`, populate the repo list.
    *Already useful on its own.*
 3. **Cache + sweep** — per-root cache, instant first paint, focus-gated 60 s sweep
-4. **Middle pane Mode A** — staging, commit
+4. **Middle pane** — staging, commit
 5. **Remotes** — push, publish branch, pull, background fetch sweep, ahead/behind
 6. **Graph** — log parsing, lane layout, virtualized rows, Uncommitted Changes node
-7. **Middle pane Mode B** — commit details
+7. **Commit info panel** — commit details (built as a middle-pane mode, moved to its own column; §5.2)
 8. **Branch switching + conflict detection**
 9. **Polish** — pins, filter, watchers on hot repos, context menus, error translation,
    native menu bar, single-instance enforcement + recent roots

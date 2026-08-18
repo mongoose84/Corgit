@@ -48,6 +48,7 @@
   // loaded set in graph.svelte.ts; this only slices the precomputed result.
   const OVERSCAN = 8;
   let scrollEl: HTMLElement | undefined = $state();
+  let spacerEl: HTMLElement | undefined = $state();
   let scrollTop = $state(0);
   let viewportHeight = $state(0);
 
@@ -61,6 +62,30 @@
 
   function onScroll() {
     if (scrollEl) scrollTop = scrollEl.scrollTop;
+  }
+
+  // Deselecting the commit — which is what closes the info panel (§5.2). Two
+  // ways in, because until now there was effectively only one and it was a
+  // trap: the *Uncommitted Changes* node is the semantic "back to the working
+  // tree", but it only exists `{#if dirty}`, so on a clean repo the panel's
+  // own 22 px × was the sole way out of it.
+  //
+  // Deliberately *not* a toggle on the row itself. Selection is sticky
+  // everywhere else (`repos.select` re-selects rather than clears), and the
+  // panel is a 320 px column the graph's `1fr` track gives up — so a
+  // double-click near a row would open it, reflow, close it and reflow again
+  // with the row moving under the cursor.
+  function deselect() {
+    graph.select('working-tree');
+  }
+
+  // Only a click that landed on the scroll container or the virtualization
+  // spacer, i.e. the empty space past the last row. Testing the target rather
+  // than relying on rows to stop propagation keeps this independent of
+  // GraphRow's internals — and of the "Load more" button, which lives in the
+  // same scroll box.
+  function onBackgroundClick(event: MouseEvent) {
+    if (event.target === scrollEl || event.target === spacerEl) deselect();
   }
 
   // Branch switching (§8.3, §8.4, build step 8) — double-click a ref badge
@@ -78,6 +103,18 @@
   // Non-null while the Create Branch dialog is up; the value is the start
   // point the new branch will be cut from (§8.3).
   let createFrom = $state<string | null>(null);
+
+  // Esc closes the info panel (§5.2). Guarded three ways: the panel has to be
+  // open; the graph has to be the view on screen, since DiffView owns Esc
+  // while the diff tab is showing and one press must not close two things;
+  // and the context menu gets it first. The menu is the only overlay needing
+  // that check — both dialogs handle Esc on the dialog element and stop it
+  // propagating, so it never reaches this window listener while one is up.
+  function onKeydown(event: KeyboardEvent) {
+    if (event.key !== 'Escape') return;
+    if (diff.view !== 'graph' || menu !== null) return;
+    if (graph.selection !== 'working-tree') deselect();
+  }
 
   // Only local names: git rejects a new branch that collides with one, and the
   // remote-tracking badges sharing the graph are a different namespace.
@@ -133,6 +170,8 @@
     ]);
   }
 </script>
+
+<svelte:window onkeydown={onKeydown} />
 
 <Pane title="Graph">
   {#snippet tabs()}
@@ -243,8 +282,19 @@
         {#if graph.rows.length === 0}
           <EmptyState message="No commits yet" hint="Make the first commit to see history here" />
         {:else}
-          <div class="scroll" bind:this={scrollEl} bind:clientHeight={viewportHeight} onscroll={onScroll}>
-            <div class="spacer" style="height: {totalHeight}px">
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <!-- The keyboard equivalent is Esc (`onKeydown`), which is why this
+               needs no key handler of its own: there is nothing to focus here,
+               the click target *is* the absence of a row. -->
+          <!-- svelte-ignore a11y_click_events_have_key_events -->
+          <div
+            class="scroll"
+            bind:this={scrollEl}
+            bind:clientHeight={viewportHeight}
+            onscroll={onScroll}
+            onclick={onBackgroundClick}
+          >
+            <div class="spacer" bind:this={spacerEl} style="height: {totalHeight}px">
               <div class="window" style="transform: translateY({topOffset}px)">
                 {#each visibleRows as row (row.commit.hash)}
                   <GraphRow

@@ -31,6 +31,11 @@ export interface RepoStatus {
   unstaged: number;
   untracked: number;
   conflicted: number;
+  /** Distinct changed paths — what the row's badge shows. Not the sum of the
+   *  four above: a file staged and then edited again is counted on both sides
+   *  there, so only the backend, which has the per-path records, can say how
+   *  many *files* are involved (§5.1). */
+  changedFiles: number;
 }
 
 export interface GitInfo {
@@ -96,8 +101,15 @@ interface RepoStatusEvent {
   error: string | null;
 }
 
-/** The dirty dot is one state — the row answers "does this need me?", nothing
- *  finer (§5.1). Detail belongs in the middle pane. */
+/** Whether the working tree has anything in it at all — the row answers "does
+ *  this need me?", and the badge's count answers "how much?" (§5.1). Staged
+ *  versus unstaged is still the middle pane's job.
+ *
+ *  Kept as the sum of the four rather than `changedFiles > 0` so that a status
+ *  from anywhere — an older cache, a hand-built fixture — cannot render a repo
+ *  holding work as clean. `parse` in `status.rs` guarantees the two agree, and
+ *  a test there pins it; this is the direction to be wrong in if they ever
+ *  don't. */
 export function isDirty(status: RepoStatus): boolean {
   return status.staged + status.unstaged + status.untracked + status.conflicted > 0;
 }

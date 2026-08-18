@@ -21,7 +21,13 @@ use serde::{Deserialize, Serialize};
 use crate::atomicfile;
 use crate::status::RepoStatus;
 
-pub const CACHE_VERSION: u32 = 1;
+/// Bumped to 2 when `RepoStatus` gained `changed_files`. `RepoStatus` is
+/// `#[serde(default)]`, so a v1 file would have loaded happily — and painted a
+/// dirty repo's badge as "0 files" until the first sweep corrected it. Cheaper
+/// to throw the old file away: the cost is one cold sweep, once, which is the
+/// state every first-ever open of a root starts from anyway. A new count field
+/// is exactly what this constant is for.
+pub const CACHE_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]

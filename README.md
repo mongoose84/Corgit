@@ -13,8 +13,8 @@ git client. See **[docs/SPEC.md](docs/SPEC.md)** for the full design.
 
 ![Corgit's three panes: repositories, working tree, commit graph](docs/screenshots/corgit.png)
 
-Left: the hot set pinned above everything else, each row carrying its branch, one dirty
-dot and an ahead/behind badge. Middle: staged and unstaged files for the selected repo.
+Left: the hot set pinned above everything else, each row carrying its branch, a badge
+counting its changed files and an ahead/behind badge. Middle: staged and unstaged files for the selected repo.
 Right: the graph, with the *Uncommitted Changes* node on top and the HEAD commit's row
 marked by a larger dot and a tint of its own lane colour — or, behind the other tab in
 that pane's header, a side-by-side diff of whichever file was last clicked.
@@ -133,7 +133,7 @@ src/
     panes/
       Pane.svelte            shared header + scrolling body
       RepoList.svelte        left    — filter, pinned/all sections, sweep timing
-      RepoRow.svelte         pin · name · branch · dirty dot · ahead/behind
+      RepoRow.svelte         pin · name · branch · changed files · ahead/behind
       CommitPane.svelte      middle  — message, staging, the four verbs
       FileRow.svelte         status letter · path · stage/unstage on hover
       GraphPane.svelte       right   — virtualization, branch switching

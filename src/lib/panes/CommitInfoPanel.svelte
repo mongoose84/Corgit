@@ -27,10 +27,17 @@
   // Same "which one is HEAD" emphasis a graph row gives its badges (§8.3).
   const currentBranch = $derived(graph.repoId ? (repos.status(graph.repoId)?.branch ?? null) : null);
   const isCurrent = (ref: RefBadge) => ref.kind === 'local' && ref.name === currentBranch;
-  // The commit's own lane in the graph (GraphRow.svelte's `currentBadgeStyle`
-  // twin) — this panel never lays out lanes itself, but the selected commit
-  // is always one of the currently rendered rows, so the lookup always hits.
-  const currentLane = $derived(details ? (graph.rows.find((row) => row.commit.hash === details.hash)?.lane ?? 0) : 0);
+  // The selected commit's own graph row. This panel never lays out lanes
+  // itself, but the selection can only have come from a rendered row, so the
+  // lookup always hits — and it answers both of the questions below.
+  const row = $derived(details ? graph.rows.find((r) => r.commit.hash === details.hash) : undefined);
+  // Its lane, for the badge colour (GraphRow.svelte's `currentBadgeStyle` twin).
+  const currentLane = $derived(row?.lane ?? 0);
+  // A merge's file list is its diff against the *first* parent (§8.5) — "what
+  // this merge brought in", not "how it was resolved". The pane has to say
+  // which, because the same count means two different things and the user
+  // cannot tell them apart from the number.
+  const isMerge = $derived((row?.commit.parents.length ?? 0) > 1);
 
   function currentBadgeStyle(lane: number): string {
     const color = laneColorVar(lane);
@@ -100,12 +107,25 @@
     <p class="commit-meta">{details.author} · {formatCommitDate(details.timestamp)}</p>
     <pre class="commit-message selectable">{details.message}</pre>
 
+    <!-- Not "Files". A branch created off this commit puts its own name in the
+         Local badges above, and "Files (7)" under it reads as "7 files changed
+         on this branch" — which is never what this is. The list is always this
+         one commit's own diff against its parent, and the heading is the only
+         place that can say so. -->
     <div class="section">
-      <span class="section-title">Files</span>
+      <span class="section-title">{isMerge ? 'Changed in this merge' : 'Changed in this commit'}</span>
       <span class="count">{details.files.length}</span>
     </div>
+    {#if isMerge}
+      <p class="section-note">Compared with the first parent — what the merge brought in.</p>
+    {/if}
     {#if details.files.length === 0}
-      <p class="section-empty">No files changed</p>
+      <!-- Now a statement of fact rather than a shrug: with `-m --first-parent
+           --root` (§8.5) an empty list means the commit really is empty, not
+           that the query failed to name a side to compare against. -->
+      <p class="section-empty">
+        {isMerge ? 'This merge brought in no changes' : 'This commit changed no files'}
+      </p>
     {:else}
       <ul>
         {#each details.files as entry (entry.path)}
@@ -276,6 +296,17 @@
     font-size: var(--text-xs);
     color: var(--text-disabled);
     font-variant-numeric: tabular-nums;
+  }
+
+  /* Sits between the section header and the rows it qualifies, so it reads as
+     a caption on the list rather than as a first entry in it — hence muted
+     rather than disabled, and no row height. */
+  .section-note {
+    margin: 0;
+    padding: 0 var(--space-3) var(--space-2);
+    font-size: var(--text-xs);
+    line-height: 1.4;
+    color: var(--text-muted);
   }
 
   .section-empty {

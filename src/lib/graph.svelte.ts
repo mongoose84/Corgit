@@ -134,9 +134,20 @@ class GraphStore {
     this.laneState = emptyLaneState();
   }
 
-  /** Drives the middle pane's mode (§5.2): `working-tree` clears Mode B's
-   *  data, any other value is a commit hash whose details get fetched. */
+  /** Drives the commit info panel (§5.2): `working-tree` closes it, any other
+   *  value is a commit hash whose details get fetched.
+   *
+   *  Re-selecting the row that is already selected is inert. Without the guard
+   *  it re-ran `loadDetails`, which nulls `details` *before* it fetches — so a
+   *  second click on the selected row flashed the panel back to "Reading
+   *  commit…", threw away its scroll position, and shelled out to git again
+   *  for a commit whose details cannot have changed. (Immutability is the same
+   *  reason `diff.svelte.ts`'s `isLive` never reloads a commit's diff.)
+   *
+   *  A failed fetch is the one case where the repeat click means something:
+   *  there is nothing to preserve, so it retries. */
   select(selection: GraphSelection): void {
+    if (this.selection === selection && this.detailsError === null) return;
     this.selection = selection;
     if (selection === 'working-tree') {
       this.clearDetails();

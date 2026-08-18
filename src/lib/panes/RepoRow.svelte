@@ -34,6 +34,11 @@
       ? `${branch} tracks ${status?.upstream} — a differently-named branch, so Push cannot work. Publish will point it at origin/${branch}.`
       : `${branch} is not published — no upstream branch on the remote`,
   );
+  // The badge shows a bare number, so the accessible name and the tooltip are
+  // the only places that can say what it counts.
+  const changedLabel = $derived(
+    `${status?.changedFiles ?? 0} file${status?.changedFiles === 1 ? '' : 's'} with uncommitted changes`,
+  );
   const pinned = $derived(repos.pins.has(repo.id));
   // The background fetch sweep stopped retrying this repo (§8.7, §13) — a
   // manual fetch is what clears it. Shown alongside the other badges rather
@@ -163,9 +168,11 @@
       {#if status.conflicted > 0}
         <span class="badge conflict" title="Merge conflict">⚠</span>
       {:else if dirty}
-        <!-- One dot, one state. The row answers "does this need me?" (§5.1);
-             staged versus unstaged is the middle pane's job. -->
-        <span class="dot" title="Uncommitted changes" aria-label="Uncommitted changes"></span>
+        <!-- One number, one state. The row still answers "does this need me?"
+             (§5.1) — staged versus unstaged remains the middle pane's job —
+             but the count is what turns "something changed here" into "this is
+             a two-line fix, that one is an afternoon" without a click. -->
+        <span class="count" title={changedLabel} aria-label={changedLabel}>{status.changedFiles}</span>
       {/if}
 
       {#if status.ahead > 0}
@@ -301,12 +308,32 @@
     text-underline-offset: 3px;
   }
 
-  .dot {
+  /* The dirty dot, grown enough to hold its own count — VS Code's SCM badge.
+     Filled rather than coloured text like the ahead/behind badges: those are
+     read after you have already decided a row is interesting, this one is what
+     makes you decide, and a solid shape survives being scanned at 77 rows.
+     Neutral rather than a status hue — see --count-bg for why a number is not
+     a state.
+     A circle at one digit, stretching to a pill at two or three — `min-width`
+     with a symmetric `padding` and a radius past half the height, so 3 and 128
+     are the same object rather than two differently-shaped ones. */
+  .count {
+    display: flex;
+    align-items: center;
+    justify-content: center;
     flex: 0 0 auto;
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    background: var(--status-dirty);
+    min-width: 16px;
+    height: 16px;
+    padding: 0 5px;
+    border-radius: 8px;
+    background: var(--count-bg);
+    color: var(--count-text);
+    font-size: var(--text-xs);
+    /* Digits share a width, so counts line up down the strip and a row does
+       not twitch sideways when 9 becomes 10. */
+    font-variant-numeric: tabular-nums;
+    font-weight: 600;
+    line-height: 1;
   }
 
   .badge {
