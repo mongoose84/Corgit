@@ -75,11 +75,39 @@ fn upstream_branch(upstream: &str) -> &str {
 }
 
 pub async fn query(repo: &Path) -> Result<RepoStatus, String> {
+    Ok(parse(&read_status(repo).await?))
+}
+
+/// Both shapes from **one** `git status` (§8.2 — "this single call populates the
+/// repo row *and* the middle pane", which until now it did not).
+///
+/// The two reads it replaces were the same command run twice: every stage,
+/// unstage, discard and commit ran `emit_repo_status`'s counts read and then
+/// the frontend's `repo_files` read, back to back, on the same repo. Measured
+/// on the 69-repo bench root, a `git status` spawn costs 60–340 ms of which
+/// 85–95 % is process creation and 2–10 ms is git reading the repository — so
+/// the second spawn cost about as much as the first and learned nothing new.
+///
+/// Parsing the output twice rather than in one walk is deliberate. `parse` and
+/// `parse_files` disagree about what a record means — one counts a path once,
+/// the other files it under each side it appears on — and both are pinned by
+/// their own tests. A merged walk would have to keep both rules in one body to
+/// save microseconds of string scanning next to a spawn measured in tens of
+/// milliseconds. The spawn was the cost; it is the one that is gone.
+pub async fn query_with_files(repo: &Path) -> Result<(RepoStatus, FileChanges), String> {
+    let raw = read_status(repo).await?;
+    Ok((parse(&raw), parse_files(&raw)))
+}
+
+/// `--branch` is carried even when only the file lists are wanted: the header
+/// records cost one line of output each and `parse_files` skips them, which is
+/// cheaper than having two call sites that could drift into two commands.
+async fn read_status(repo: &Path) -> Result<String, String> {
     let output = git::read(repo, &["status", "--porcelain=v2", "--branch", "-z"]).await?;
     if !output.ok {
         return Err(full_message(&output.stderr));
     }
-    Ok(parse(&output.stdout))
+    Ok(output.stdout)
 }
 
 /// Rows capped per §5.2: at 100 the header must read `Changes (100 of 3,412)`,
@@ -110,11 +138,7 @@ pub struct FileChanges {
 }
 
 pub async fn query_files(repo: &Path) -> Result<FileChanges, String> {
-    let output = git::read(repo, &["status", "--porcelain=v2", "-z"]).await?;
-    if !output.ok {
-        return Err(full_message(&output.stderr));
-    }
-    Ok(parse_files(&output.stdout))
+    Ok(parse_files(&read_status(repo).await?))
 }
 
 fn parse_files(raw: &str) -> FileChanges {
@@ -513,6 +537,56 @@ mod tests {
 
         assert_eq!(files.staged.len(), MAX_FILES_PER_SECTION);
         assert_eq!(files.staged_total, 150);
+    }
+
+    /// `query_with_files` hands one read to both parsers, so the badge and
+    /// the pane below it are now literally the same bytes — this is what says
+    /// so. `changed_files` counts a path once; the file lists file it under
+    /// each side it appears on, so the union of the two lists is the set the
+    /// badge counts. Were these to drift, a row would say "4 files" over a
+    /// pane listing three.
+    #[test]
+    fn the_badge_counts_exactly_the_paths_the_pane_lists() {
+        let raw = joined(&[
+            "# branch.head main",
+            "1 M. N... 100644 100644 100644 aaa bbb src/main.rs",
+            "1 .M N... 100644 100644 100644 ccc ddd README.md",
+            "1 MM N... 100644 100644 100644 eee fff src/lib.rs",
+            "2 R. N... 100644 100644 100644 aaa bbb R100 src/new.rs",
+            "1-old-name.rs",
+            "u UU N... 100644 100644 100644 100644 aaa bbb ccc src/conflict.rs",
+            "? notes.txt",
+        ]);
+
+        let status = parse(&raw);
+        let files = parse_files(&raw);
+
+        let listed: std::collections::HashSet<&str> = files
+            .staged
+            .iter()
+            .chain(&files.unstaged)
+            .chain(&files.conflicted)
+            .map(|entry| entry.path.as_str())
+            .collect();
+
+        assert_eq!(status.changed_files as usize, listed.len());
+    }
+
+    /// The header records `parse_files` has to walk past now that both
+    /// parsers read one `--branch` invocation. A `#` line read as a change
+    /// would put "branch.head main" in the middle pane.
+    #[test]
+    fn branch_headers_are_not_read_as_files() {
+        let files = parse_files(&joined(&[
+            "# branch.oid a3f9c21ee0c1a5b8d4e7f2039182736451a9c0de",
+            "# branch.head main",
+            "# branch.upstream origin/main",
+            "# branch.ab +3 -12",
+            "? notes.txt",
+        ]));
+
+        assert_eq!(files.unstaged, vec![FileEntry { path: "notes.txt".into(), status: '?' }]);
+        assert!(files.staged.is_empty());
     }
 
     #[test]

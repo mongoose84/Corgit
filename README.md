@@ -24,7 +24,7 @@ The screenshot is taken against a throwaway folder of repositories built by
 with no upstream — so it can be reproduced whenever the UI moves.
 
 **Status: build step 9 of 10.** Everything through branch switching and conflict detection
-works; the polish pass is landing (pins, filter, watchers on hot repos, context menus, error
+works; the polish pass is landing (pins, filter, per-repo watchers, context menus, error
 translation, the combined title bar and menu), and the read-only diff viewer (§5.4) is in. Multi-window,
 and shipping with auto-update, are what remain.
 
@@ -154,7 +154,7 @@ src-tauri/
     remote.rs                fetch, pull, push, publish
     branch.rs                switching to a local or remote-tracking branch
     graph.rs                 `git log` paging and the ref badges
-    watch.rs                 FS watchers on the hot set
+    watch.rs                 one FS watcher per repo, tree included
     menu.rs                  the native Windows menu bar
 scripts/
   extract-mascot.py          contact sheet → poses, app assets, icon source
@@ -174,10 +174,17 @@ scripts/
 - **Discovery is depth 1.** Direct children of the root only — one directory read plus an
   `exists()` per child, so it needs no progress UI (SPEC §8.1). The root itself counts too,
   so opening a single repository shows that repository rather than nothing.
-- **The hot set is the FS-watch budget.** Pinned repos plus the selected one get watchers on
-  `.git/HEAD`, `.git/refs` and `.git/index`; every other repo waits for the 60 s sweep. So
-  pinning is a latency decision as much as a layout one, which is why it costs one click on
-  the row rather than a trip through a context menu (SPEC §5.1, §6).
+- **Every repo is watched, working tree included.** One recursive watcher per repo covers
+  the tree and `.git` together: on Windows a subtree watch is a single handle no matter how
+  deep the tree goes, so all 69 cost 17 ms to establish, 73 handles and 4.4 MB. SPEC §6 used
+  to say never watch the working tree, and that rule was reasoned about inotify — where a
+  recursive watch really does cost a descriptor per directory — so it now applies to the
+  Linux build (§10) and not to this one.
+- **The status sweep is a reconciliation pass, not the refresh mechanism.** Most 60 s ticks
+  cover only the repos no watcher would take (a network share, a linked worktree), which is
+  usually none of them and costs nothing; every fifth tick is a full pass. Pinning is
+  therefore about where a repo sits in the list, not how fast it updates — it still costs one
+  click on the row, because it earned that as navigation for 77 rows (SPEC §5.1, §6).
 - **First paint never waits on git.** `open_root` returns the discovered list immediately
   and the status sweep fills the rows in afterwards, over one batched event.
 - **Concurrency is capped globally at 8 git processes**, by a static semaphore in `git.rs`
@@ -197,18 +204,38 @@ scripts/
 | | |
 | --- | --- |
 | Discovery, 69 repos | **5.6 ms** |
-| Status sweep, best observed | **1.4 s** |
-| Status sweep, frequently | **5.9 s** |
+| Full status sweep, best observed | **1.2 s** |
+| Full status sweep, frequently | **6 s** |
+| Full sweeps per minute, steady state | **0** |
 | Budget (SPEC §1) | 300 ms |
 
-The sweep is spawn-bound, not git-bound. On this machine `cmd.exe /c ver` — a bare process
-spawn doing nothing — costs **83 ms**, and `git --version` costs **88 ms** against a full
-`git status` at **116 ms**. Skipping untracked files (`-uno`) saves 4 ms of 157, so the
-`core.fsmonitor` remedy in SPEC §6 is aimed at a cost this machine does not have.
-Concurrency is working: 8 concurrent spawns cost 221 ms, not 8 × 114 ms.
+**The sweep is spawn-bound, not git-bound, and that is what decided the architecture.** A
+`git version` — which opens no repository at all — costs **85.7 ms** wall here: 19.5 ms
+user, 29.7 ms kernel, 36.5 ms waiting. `cmd.exe /c ver` costs about the same, so this is the
+machine and not git. Against that floor a full `git status --porcelain=v2 --branch -z`
+averages **71.8 ms** (min 59.6, max 339.8 on a 32k-file repo), which puts git's own work at
+**2–10 ms for 66 of the 69 repos**.
 
-The remaining lever is therefore the **Defender/EDR exclusion** that SPEC §6 lists as a
-last resort — on this evidence it belongs first.
+Two measurements rule out the obvious fixes:
+
+- **Concurrency is already saturated.** Best of six rounds over 69 repos: limit 4 → 1904 ms,
+  8 → 1328 ms, 16 → 1233 ms, 32 → 1217 ms, 64 → 1200 ms. Raising the cap from 8 buys 7 % and
+  then nothing.
+- **Flag tuning does nothing.** `-uno` saves 82 ms on the 32k-file repo and ≈4 ms elsewhere;
+  `-uall` and `--no-renames` are free. The `core.fsmonitor` remedy in SPEC §6 is aimed at the
+  5–15 % of a status read that is actually git.
+
+Rounds are bimodal — either ~1.2 s or ~6 s — and **`git version` is bimodal identically**,
+which is the measurement that settles it: the slow mode has nothing to do with reading
+repositories. 69 spawns cannot fit in 300 ms on this machine at any concurrency, so the
+budget is reachable only by not spawning, which is what the per-repo watchers are for.
+
+A **Defender/EDR exclusion** for the repo roots and `git.exe` remains the largest single
+lever on the spawn cost itself. This machine runs Microsoft Defender for Endpoint, so that
+is not a setting you can change from here.
+
+Reproduce with `cargo test --release --lib -- --ignored --nocapture bench_status_sweep` and
+`bench_spawn_concurrency` (SPEC §1, §16).
 - **The icon and the mascot come from one contact sheet.**
   `python scripts/extract-mascot.py` cuts `docs/mascot/corgit.png` into the poses, copies
   the ones the app imports into `src/lib/mascot/`, and writes the 512×512
