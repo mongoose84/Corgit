@@ -47,6 +47,10 @@ pub struct Settings {
     /// Direct children of a root only (§8.1). Present so the value is
     /// inspectable, not because deeper scanning is supported.
     pub scan_depth: u32,
+    /// The status sweep's tick, not how often every repo is read (§6). Most
+    /// ticks cover only repos with no working FS watcher; every fifth is a
+    /// full pass, so this is also the reconciliation interval divided by
+    /// `RECONCILE_EVERY`.
     pub status_sweep_secs: u64,
     pub fetch_sweep_secs: u64,
     pub recent_roots: Vec<PathBuf>,

@@ -215,7 +215,10 @@ is rebuilt by every reload.
 
 Two sections, each alphabetical:
 
-- **Pinned** — the hot set. This is also the FS-watch budget (§6). Every row carries a pin
+- **Pinned** — the hot set (§6). This used to be the FS-watch budget as well, and is not any
+  more: every repo is watched on Windows, so pinning buys position in the list, not
+  freshness. Keep the one-click affordance anyway — it earned it as navigation for 77 rows,
+  which is what it now is. Every row carries a pin
   toggle in a reserved leading gutter, hover-revealed on unpinned rows and always drawn on
   pinned ones — the set only earns its keep if putting a repo in it costs one click, and a
   right-click-only affordance is not discoverable. Clicking the pin must not also select
@@ -467,23 +470,63 @@ One file at a time, read-only, opened by clicking a file row in either §5.2 mod
 
 ## 6. Data & refresh model
 
-### Hot vs cold
+### Hot vs cold — a layout distinction, not a refresh one
 
-**Hot** = pinned repos ∪ currently selected repo.
-**Cold** = everything else.
+**Hot** = pinned repos ∪ currently selected repo. **Cold** = everything else.
 
-Hot repos get FS watchers for instant feedback. Cold repos rely on the sweep. Because the
-status sweep is cheap enough to cover all 77, hot/cold is a **latency and UI** distinction,
-not a correctness one.
+This once decided who got FS watchers. It no longer does: on Windows every repo is watched
+(below), so hot/cold survives only as a **layout and ordering** idea — the *Pinned* section
+of §5.1. Pinning is where a repo appears, not how fast it updates.
 
-### Watchers (hot only)
+That reverses an earlier decision, and the earlier reasoning was not wrong — it was
+measured on the wrong platform. See below.
 
-Watch `.git/HEAD`, `.git/refs/**`, `.git/index` — small, bounded, and catches commits,
-branch switches and staging done in a terminal. **Never watch the working tree**; watching
-77 trees means watching 77 `node_modules` and blowing past inotify limits. Working-tree
-changes are caught by the sweep and by window focus.
+### Watchers
 
-Debounce watcher events ~200 ms — git writes several files per operation.
+**Where the platform gives subtree watches, watch the whole working tree, one watch per
+repo.** On Windows that is `ReadDirectoryChangesW`, which watches a subtree through a
+single handle *regardless of its depth* — so 77 repos cost 77 handles, not 77 × every
+directory beneath them. Measured over the 69-repo bench root: **17.3 ms to establish all of
+them, +73 handles, +4.4 MB** — nothing against §1's 150 MB.
+
+**Where it does not, watch `.git/HEAD`, `.git/refs/**`, `.git/index` only**, and leave
+working-tree changes to the sweep. This is the original v1 rule and it stays correct on
+inotify platforms, where a recursive watch costs one descriptor per directory and 77 trees
+means 77 `node_modules` and a blown `max_user_watches`. Linux is a v2 deliverable (§10);
+this is one of the places the two platforms genuinely differ rather than one being a
+portable subset of the other.
+
+**Why this is worth the asymmetry.** The status sweep costs one `git status` process per
+repo, and process creation — not git — is 85–95 % of that. Measured on the bench machine: a
+bare `git version`, which opens no repository at all, costs 85.7 ms wall (19.5 ms user,
+29.7 ms kernel, 36.5 ms waiting), while git's own work on a typical repo is 2–10 ms. 69
+repos therefore cost 1.2 s at best and ≈6 s often, whatever the concurrency — raising the
+in-flight cap from 8 to 16 buys 7 %, and to 32 buys nothing. **§1's 300 ms budget is
+unreachable for as long as a tick spawns one process per repo.** Watching the trees is not a
+latency optimisation layered on the sweep; it is what removes the periodic 69-process work
+altogether. Steady state is ~0 spawns per tick.
+
+Debounce `.git` events ~200 ms — git writes several files per operation, and these are the
+ones the user is waiting on after a terminal command. Debounce working-tree events longer,
+~1 s: nobody is watching those land.
+
+**Build churn, not handle count, is the cost to manage.** A `cargo build` or a webpack run
+fires thousands of events for paths git will never report. Two defences, both of which may
+only ever make a refresh *late*, never wrong:
+
+1. **Coalesce per repo** — at most one status read per repo per ~2 s, however many events
+   arrive. A minute-long build costs that repo ≤30 reads, not thousands.
+2. **Skip the usual build outputs before debouncing** — `node_modules`, `target`, `dist`,
+   `bin`, `obj`, `.next`, `.venv`. This is a guess and it is allowed to be wrong: a repo
+   that really does track `dist/` gets its refresh from the reconciliation sweep instead.
+   Correctness never rests on the list being right.
+
+**A repo whose watcher cannot be established must not be treated as though it were** — a
+network share, a permissions failure, a `.git` file rather than a directory. Those repos
+stay on the sweep interval. Mixed mode is the normal case, not an error path.
+
+**An overflow is a lost history, not a lost repo.** When the platform reports that it
+dropped events, treat that repo's status as unknown and read it outright.
 
 ### The two sweeps
 
@@ -493,11 +536,23 @@ repos.
 | | Status sweep | Fetch sweep |
 | --- | --- | --- |
 | Network | No | Yes |
-| Cost | ~5–20 ms/repo | ~0.5–2 s/repo |
+| Cost | ~60–340 ms/repo, almost all of it process creation | ~0.5–2 s/repo |
 | Detects | dirty, staged, conflicted, branch, **ahead** | **behind** |
-| Interval | 60 s | 5–10 min, jittered |
+| Interval | 60 s unwatched-only, full pass every 5th tick | 5–10 min, jittered |
 | Concurrency | 8 | 4 |
 | Runs when unfocused | No | No |
+
+**The status sweep is a reconciliation pass, not the refresh mechanism.** The watchers keep
+the rows current; the sweep exists to repair what they can miss — an unwatchable repo, a
+dropped-event overflow, anything that happened while the window was blurred. It is still
+what runs on focus gain.
+
+It keeps a 60 s tick, but most ticks cover **only the repos with no working watcher**,
+which is normally none of them and therefore costs nothing at all — no processes, no event,
+no cache write. Every fifth tick is a full pass over every repo, which is the one that
+still costs 69 processes and is why it happens every five minutes rather than every
+minute. An unwatchable repo is not made to wait for that: it is on the 60 s cadence it
+always had.
 
 **Re-entrancy guard:** a sweep never starts while one is in flight — the tick is skipped,
 not queued. At 77 repos the status sweep should finish in ~150 ms and never collide, so
@@ -509,13 +564,23 @@ aborted outright rather than left running and skipping their own ticks; on focus
 restart and the root gets an immediate status sweep. With no tray and close-means-quit
 (§9.1), the app has no background lifetime at all — background CPU is zero, not merely low.
 
+**The watchers are dropped on blur too, for that same promise.** Left running they would
+wake the app on every background build — *low* CPU rather than *no* CPU, a weaker guarantee
+than the one above, and the one above is worth keeping. Re-establishing all of them costs
+17 ms, and the focus-gain sweep already covers whatever changed while they were gone.
+
 Fetch additionally: skips repos with no remote, skips repos fetched within the last
 interval, and records `last_fetch_at` per repo.
 
 ### Making `git status` fast on Windows
 
-`git status` cost is dominated by untracked-file scanning. Git ≥ 2.37 ships a built-in
-FSMonitor daemon that makes this near-instant:
+This section used to open by asserting that `git status` cost is dominated by untracked-file
+scanning. **On the bench machine it is not, and the measurement is worth keeping because of
+where it redirects the effort.** `-uno` saves 82 ms on a 32k-file repo and ≈4 ms on every
+other one; `-uall` and `--no-renames` change nothing at all. Untracked scanning is a
+rounding error next to the 60–85 ms it costs merely to *start a process* here.
+
+So the FSMonitor remedy below is aimed at the 5–15 % of a status read that is actually git:
 
 ```
 git config core.fsmonitor true
@@ -523,10 +588,16 @@ git config core.untrackedCache true
 ```
 
 Corgit should **offer** this per repo (a one-click banner), never apply it silently — it
-modifies the user's config.
+modifies the user's config. It is worth having for the genuinely large repos, where git's
+own work does clear the spawn floor, and worth nothing for the rest.
 
-If the status sweep still measures slow, add a Defender exclusion for the repo roots and
-`git.exe` before touching the architecture.
+A Defender or EDR exclusion for the repo roots and `git.exe` remains the largest single
+lever on spawn cost, and on a managed machine it is the one you cannot pull yourself. The
+bench machine runs Microsoft Defender for Endpoint, where a trivial `cmd.exe /c ver` costs
+the same ~80 ms — so this is machine-wide rather than anything about git.
+
+**Neither of those changes the architecture, which is the point of the watchers above:** the
+sweep cannot meet §1's budget by getting better at spawning, only by not spawning.
 
 ---
 
