@@ -61,15 +61,12 @@
 
   const badgeTone = $derived(tone(entry.status));
 
-  /** Ellipsized head-first so the filename stays visible (§5.2) — CSS
-   *  `text-overflow: ellipsis` only ever trims the tail, so the head has to
-   *  be trimmed by hand. */
-  function headEllipsis(path: string, max: number): string {
-    if (path.length <= max) return path;
-    return `…${path.slice(path.length - (max - 1))}`;
-  }
-
-  const shown = $derived(headEllipsis(entry.path, 44));
+  /** Filename and the directory it sits in, split so they can be styled and
+   *  trimmed apart (§5.2). Git reports POSIX separators even on Windows, so
+   *  one split character is enough. A file at the repo root has no directory
+   *  half, and nothing is drawn for it. */
+  const name = $derived(entry.path.slice(entry.path.lastIndexOf('/') + 1));
+  const dir = $derived(entry.path.slice(0, Math.max(entry.path.lastIndexOf('/'), 0)));
 </script>
 
 <div class="file-row" class:selected>
@@ -78,7 +75,10 @@
        clicked is a lie, and the full path is on the title attribute anyway. -->
   <button type="button" class="open" onclick={onOpen} title="Show the diff for {entry.path}">
     <span class="status status-{badgeTone}" title={entry.status}>{entry.status}</span>
-    <span class="path">{shown}</span>
+    <span class="name">{name}</span>
+    {#if dir}
+      <span class="dir">{dir}</span>
+    {/if}
     {#if stats}
       <span class="stats">
         {#if stats.insertions === null && stats.deletions === null}
@@ -176,13 +176,29 @@
     color: var(--status-dirty);
   }
 
-  .path {
-    flex: 1 1 auto;
+  /* The filename is what the row is *for*, so it gets full contrast and only
+     shrinks once the directory beside it has nothing left to give — hence the
+     lopsided shrink factors below rather than a plain `1`. Both halves are
+     tail-trimmed by CSS: a path that runs out of room should lose its deepest
+     folder, not the segment that says which project it is in. */
+  .name {
+    flex: 0 1 auto;
     min-width: 0;
     overflow: hidden;
+    text-overflow: ellipsis;
     white-space: nowrap;
     font-size: var(--text-sm);
     color: var(--text-primary);
+  }
+
+  .dir {
+    flex: 0 100 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: var(--text-xs);
+    color: var(--text-muted);
   }
 
   .toggle {
@@ -229,8 +245,12 @@
     color: var(--danger-hover);
   }
 
+  /* Pushed to the right edge by its own margin rather than by a growing path:
+     neither the name nor the directory grows any more, and a row whose file
+     sits at the repo root has no directory element at all to do it. */
   .stats {
     flex: 0 0 auto;
+    margin-left: auto;
     display: flex;
     gap: var(--space-1);
     font-size: var(--text-xs);

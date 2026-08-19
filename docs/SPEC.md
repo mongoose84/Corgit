@@ -293,19 +293,29 @@ original modal design.
 Staged Changes (2)          [− unstage all]
   M  src/main.rs
 Changes (14)                [+ stage all]
-  M  README.md                  [↺] [+]
-  M  src/lib.rs                 [↺] [+]
-  D  old.txt                    [↺] [+]
-  ?  notes.txt                       [+]
+  M  README.md                        [↺] [+]
+  M  lib.rs      src                  [↺] [+]
+  D  old.txt     docs/archive         [↺] [+]
+  ?  notes.txt   docs                      [+]
 ```
 
 - **Commit commits staged files only.** Disabled when nothing is staged or the message is
   empty.
-- File rows: status letter, path (ellipsized head-first so the filename stays visible),
-  hover reveals `+`/`−` stage/unstage buttons. **Click a file → its diff opens in the right
-  pane** (§5.4). The section the row is in decides which two sides get compared, because
-  that is the only thing that knows: a partly-staged file appears in both lists at once
-  with a different diff on each.
+- File rows: status letter, **filename**, then the directory trailing behind it in muted
+  smaller type; hover reveals `+`/`−` stage/unstage buttons. The filename leads because it
+  is what the row is for and what the eye scans a list of changes by — a left-aligned full
+  path buries it behind however deep the file happens to sit. When the row runs out of
+  room the directory is trimmed first, and both halves are trimmed at the tail: what a
+  path can afford to lose is its deepest folder, not the segment naming the project. The
+  full path stays on the row's tooltip.
+- **Never a folder row.** Status is read with `-uall` (§8.2) so a wholly-untracked
+  directory is listed as its files rather than collapsed to `? dir/`. Collapsed, staging
+  the row replaced it with N file rows — the thing you looked at was not the thing you
+  acted on — and the repo row's untracked count meant folders while every count beside it
+  meant files.
+- **Click a file → its diff opens in the right pane** (§5.4). The section the row is in
+  decides which two sides get compared, because that is the only thing that knows: a
+  partly-staged file appears in both lists at once with a different diff on each.
 - **File list is capped at 100 entries per section.** The header must then read
   `Changes (100 of 3,412)`. "Stage all" still stages everything and its tooltip says so
   explicitly — the user must never commit files the UI silently hid.
@@ -638,12 +648,16 @@ Repos nested deeper are out of scope by design: open that folder as its own root
 ### 8.2 Status — one command gives everything
 
 ```
-git --no-optional-locks status --porcelain=v2 --branch -z
+git --no-optional-locks status --porcelain=v2 --branch -uall -z
 ```
 
 Yields `# branch.head`, `# branch.upstream`, `# branch.ab +N -M`, plus `1`/`2` (changed /
 renamed), `u` (unmerged → conflict state), `?` (untracked) records. Parse NUL-delimited.
 This single call populates the repo row *and* the middle pane.
+
+`-uall` is for §5.2's "never a folder row", not for speed, and it costs nothing: the
+measurement below found `-uall` no different from the default, because untracked scanning
+is a rounding error next to what it costs to start the process.
 
 ### 8.3 Branches
 

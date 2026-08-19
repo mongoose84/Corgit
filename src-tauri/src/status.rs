@@ -102,8 +102,16 @@ pub async fn query_with_files(repo: &Path) -> Result<(RepoStatus, FileChanges), 
 /// `--branch` is carried even when only the file lists are wanted: the header
 /// records cost one line of output each and `parse_files` skips them, which is
 /// cheaper than having two call sites that could drift into two commands.
+///
+/// `-uall` because git's default collapses a wholly-untracked directory into a
+/// single `? dir/` record, and the middle pane then shows a folder that turns
+/// into N files the moment it is staged — the row you looked at is not the row
+/// you acted on (§5.2). It also makes the repo row's untracked count mean
+/// files, the same unit as every other count beside it. Free, on the numbers
+/// in §6: `-uall` measured no different from the default, because untracked
+/// scanning is a rounding error next to the spawn.
 async fn read_status(repo: &Path) -> Result<String, String> {
-    let output = git::read(repo, &["status", "--porcelain=v2", "--branch", "-z"]).await?;
+    let output = git::read(repo, &["status", "--porcelain=v2", "--branch", "-uall", "-z"]).await?;
     if !output.ok {
         return Err(full_message(&output.stderr));
     }
