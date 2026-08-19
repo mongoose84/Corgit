@@ -11,11 +11,23 @@
     disabled?: boolean;
     /** Opens this file's diff in the right pane (§5.4). Required, not optional:
      *  every file row in the app is a way into the diff view, and a row that
-     *  silently was not would be indistinguishable from one that failed. */
-    onOpen: () => void;
-    /** This row's diff is the one currently open — marked so the file lists and
-     *  the right pane's tab cannot disagree about what is being shown. */
+     *  silently was not would be indistinguishable from one that failed.
+     *
+     *  Handed the click rather than called bare, because in the working-tree
+     *  lists the modifier keys decide whether this is an open at all: ctrl and
+     *  shift build a selection instead (§5.2). */
+    onOpen: (event: MouseEvent) => void;
+    /** Part of the pane's current selection — the highlight a batch action
+     *  will act on. In the read-only commit info panel there is no selection
+     *  to build, so it marks the open row instead. */
     selected?: boolean;
+    /** This row's diff is the one the right pane is showing — a separate fact
+     *  from `selected` now that a selection can be several rows and can leave
+     *  the open one out, and marked separately so the two cannot be confused
+     *  for each other. */
+    showingDiff?: boolean;
+    /** Right-click. Absent on a read-only row, which has no menu. */
+    onContextMenu?: (event: MouseEvent) => void;
     /** Absent on an untracked row — git has nothing to restore it from, so
      *  discard does not apply to it (§5.2) — and on every staged row, where
      *  discarding would have to mean throwing away the staged work too, which
@@ -30,6 +42,8 @@
     disabled = false,
     onOpen,
     selected = false,
+    showingDiff = false,
+    onContextMenu,
     onDiscard,
   }: Props = $props();
 
@@ -69,7 +83,8 @@
   const dir = $derived(entry.path.slice(0, Math.max(entry.path.lastIndexOf('/'), 0)));
 </script>
 
-<div class="file-row" class:selected>
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<div class="file-row" class:selected class:showing={showingDiff} oncontextmenu={onContextMenu}>
   <!-- The path is deliberately not `.selectable` here, unlike everywhere else
        readable in the app: `cursor: text` on something that opens a diff when
        clicked is a lie, and the full path is on the title attribute anyway. -->
@@ -131,11 +146,22 @@
     background: var(--bg-hover);
   }
 
-  /* Declared after the hover rule so the open file stays marked while the
-     pointer is elsewhere in the list — which file is showing is a standing
-     fact, not a transient one (§5.3's HEAD-row reasoning). */
+  /* Declared after the hover rule so a selected file stays marked while the
+     pointer is elsewhere in the list — what is selected is a standing fact,
+     not a transient one (§5.3's HEAD-row reasoning). */
   .file-row.selected {
     background: var(--accent-muted);
+  }
+
+  /* The row whose diff is up. A bar rather than a second background, because
+     it has to be readable *on top of* the selection fill: with a multi-row
+     selection every row is already accent-muted, and a fill that only differed
+     in shade would make the open row indistinguishable from the rest. Drawn
+     with a border so it costs no layout — the padding compensates so text does
+     not shift by 2px as the diff moves down the list. */
+  .file-row.showing {
+    border-left: 2px solid var(--accent);
+    padding-left: calc(var(--space-3) - 2px);
   }
 
   /* The row itself (§5.4). A button rather than a click handler on the div, so

@@ -5,8 +5,19 @@
   import GitErrorNotice from '../GitErrorNotice.svelte';
   import Glyph from '../Glyph.svelte';
   import DiscardDialog from '../DiscardDialog.svelte';
+  import ContextMenu from '../ContextMenu.svelte';
   import { needsPublish, repos, type FileEntry } from '../repos.svelte';
   import { diff, type DiffSource } from '../diff.svelte';
+  import {
+    extend,
+    isSelected,
+    prune,
+    selectOne,
+    selectedRows,
+    toggle,
+    type FileSection,
+    type FileSelection,
+  } from '../fileSelection';
 
   // Mode A (working tree) — SPEC.md §5.2. Commit details (Mode B) live in
   // their own panel (graph.svelte.ts + CommitInfoPanel.svelte) rather than
@@ -44,13 +55,39 @@
   // git has nothing to restore them from: discarding one could only be `git
   // clean` deleting it outright, and Corgit does not delete files.
   //
-  // One row at a time: the per-row ↺ is the whole of it. A tick column made
-  // the list read as a form rather than a list of changes, and the dialog
-  // still takes a list, so a batch discard can come back without this pane
-  // having to carry a selection between renders.
+  // Still no tick column — that is what made *Changes* read as a form to be
+  // filled in rather than a list of what changed. A batch is built by
+  // ctrl/shift-clicking rows instead (§5.2), which costs the list nothing when
+  // nobody is using it, and reaches discard through the same dialog.
   /** Non-null while the confirmation is up; the value is the exact list the
    *  dialog is showing. */
   let confirming = $state<FileEntry[] | null>(null);
+
+  /** Ctrl/shift-click selection over one section's rows (§5.2). Lives here and
+   *  not in `repos.svelte.ts`: it is about what is on screen, and the store
+   *  mirrors backend state rather than holding state of its own. */
+  let selection = $state<FileSelection | null>(null);
+
+  /** The right-click menu, holding the rows it was opened on rather than
+   *  re-deriving them: a sweep or an FS watcher can rewrite the file list while
+   *  a menu is up (§7), and *Stage 3 files* has to stage the three that were
+   *  counted. */
+  let menu = $state<{ x: number; y: number; section: FileSection; entries: FileEntry[] } | null>(
+    null,
+  );
+
+  function rowsFor(section: FileSection): readonly FileEntry[] {
+    return (section === 'staged' ? files?.staged : files?.unstaged) ?? [];
+  }
+
+  // Staging a selection is the ordinary end of it: the rows leave the section
+  // and the selection empties itself, rather than lingering as a highlight over
+  // whatever slid up into their place. Also covers switching repos, and another
+  // window or a terminal changing the tree underneath us.
+  $effect(() => {
+    const pruned = prune(selection, rowsFor(selection?.section ?? 'unstaged'));
+    if (pruned !== selection) selection = pruned;
+  });
 
   /** Which two sides the right pane compares (§5.4). It has to come from the
    *  section rather than from the entry: the same path sits in both lists
@@ -62,15 +99,93 @@
     return entry.status === '?' ? { kind: 'untracked' } : { kind: 'unstaged' };
   }
 
-  function openDiff(section: 'staged' | 'unstaged', entry: FileEntry) {
+  function openDiff(section: FileSection, entry: FileEntry) {
     const id = repos.selectedId;
     if (!id) return;
     diff.show(id, entry.path, sourceFor(section, entry));
   }
 
-  function isOpen(section: 'staged' | 'unstaged', entry: FileEntry): boolean {
+  function isOpen(section: FileSection, entry: FileEntry): boolean {
     const id = repos.selectedId;
     return id !== undefined && diff.isOpen(id, entry.path, sourceFor(section, entry));
+  }
+
+  /** A modified click builds the selection; a plain one is what it always was,
+   *  a way into the diff. Deliberately not both: opening a diff per ctrl-click
+   *  would spawn a `git diff` for every row picked on the way to staging six of
+   *  them, and leave the right pane showing whichever one happened to be
+   *  last. */
+  function rowClick(section: FileSection, entry: FileEntry, event: MouseEvent) {
+    // `metaKey` for the Mac this does not ship on yet (§10) — one clause now
+    // costs less than the bug report later.
+    if (event.ctrlKey || event.metaKey) {
+      selection = toggle(selection, section, entry.path);
+      return;
+    }
+    if (event.shiftKey) {
+      selection = extend(selection, section, entry.path, rowsFor(section));
+      return;
+    }
+    selection = selectOne(section, entry.path);
+    openDiff(section, entry);
+  }
+
+  /** Right-click acts on the selection when the row is in it, and on that row
+   *  alone otherwise — right-clicking outside a selection replaces it, the way
+   *  every file list does, so the menu can never act on rows the user cannot
+   *  see are picked. */
+  function openMenu(section: FileSection, entry: FileEntry, event: MouseEvent) {
+    event.preventDefault();
+    if (!isSelected(selection, section, entry.path)) selection = selectOne(section, entry.path);
+    menu = {
+      x: event.clientX,
+      y: event.clientY,
+      section,
+      entries: selectedRows(selection, section, rowsFor(section)),
+    };
+  }
+
+  function plural(count: number): string {
+    return `${count} file${count === 1 ? '' : 's'}`;
+  }
+
+  /** Built per section, because the two do not share a verb: `+` and `−` are
+   *  opposites, and discard means one plain thing in *Changes* and something
+   *  else entirely beside a staged row (§5.2). */
+  function menuItems(section: FileSection, entries: FileEntry[]) {
+    const paths = entries.map((entry) => entry.path);
+    const items = [];
+
+    if (section === 'staged') {
+      items.push({ label: `Unstage ${plural(paths.length)}`, onSelect: () => void unstage(paths) });
+    } else {
+      items.push({ label: `Stage ${plural(paths.length)}`, onSelect: () => void stage(paths) });
+      // Untracked rows are dropped rather than blocking the item: git has
+      // nothing to restore them from, and it rejects a pathspec list wholesale,
+      // so one `?` row would take the whole discard down with it. The label
+      // says how many survive when that is fewer than were picked, and the
+      // dialog then lists exactly those paths.
+      const tracked = entries.filter((entry) => entry.status !== '?');
+      if (tracked.length > 0) {
+        const label =
+          tracked.length === entries.length
+            ? `Discard changes to ${plural(tracked.length)}…`
+            : `Discard changes to ${plural(tracked.length)} (skipping untracked)…`;
+        items.push({ label, onSelect: () => (confirming = tracked) });
+      }
+    }
+
+    // One row only: `explorer /select,` takes a single path, so N files would
+    // mean N windows rather than one window with them all picked out. Hiding it
+    // beats offering something that misbehaves at three files.
+    if (paths.length === 1) {
+      items.push({
+        label: 'Reveal in File Explorer',
+        onSelect: () => void repos.revealInExplorer(paths[0]),
+      });
+    }
+
+    return items;
   }
 
   async function doCommit() {
@@ -129,19 +244,21 @@
     }
   }
 
-  async function stagePath(path: string) {
+  async function stage(paths: string[]) {
+    if (paths.length === 0) return;
     busy = true;
     try {
-      await repos.stagePaths([path]);
+      await repos.stagePaths(paths);
     } finally {
       busy = false;
     }
   }
 
-  async function unstagePath(path: string) {
+  async function unstage(paths: string[]) {
+    if (paths.length === 0) return;
     busy = true;
     try {
-      await repos.unstagePaths([path]);
+      await repos.unstagePaths(paths);
     } finally {
       busy = false;
     }
@@ -290,13 +407,20 @@
         <ul>
           {#each files.staged as entry (entry.path)}
             <li>
+              <!-- The row's own − unstages that row and no other, even with
+                   several selected: it is attached to one row and points at one
+                   row, and a button that quietly acted on five would be §5.2's
+                   tick column back in a worse form. The menu is where a batch
+                   is asked for out loud. -->
               <FileRow
                 {entry}
                 action="unstage"
                 disabled={busy}
-                onToggle={() => unstagePath(entry.path)}
-                onOpen={() => openDiff('staged', entry)}
-                selected={isOpen('staged', entry)}
+                onToggle={() => unstage([entry.path])}
+                onOpen={(event) => rowClick('staged', entry, event)}
+                onContextMenu={(event) => openMenu('staged', entry, event)}
+                selected={isSelected(selection, 'staged', entry.path)}
+                showingDiff={isOpen('staged', entry)}
               />
             </li>
           {/each}
@@ -330,9 +454,11 @@
                 {entry}
                 action="stage"
                 disabled={busy}
-                onToggle={() => stagePath(entry.path)}
-                onOpen={() => openDiff('unstaged', entry)}
-                selected={isOpen('unstaged', entry)}
+                onToggle={() => stage([entry.path])}
+                onOpen={(event) => rowClick('unstaged', entry, event)}
+                onContextMenu={(event) => openMenu('unstaged', entry, event)}
+                selected={isSelected(selection, 'unstaged', entry.path)}
+                showingDiff={isOpen('unstaged', entry)}
                 onDiscard={entry.status === '?' ? undefined : () => (confirming = [entry])}
               />
             </li>
@@ -342,6 +468,15 @@
     {/if}
   {/if}
 </Pane>
+
+{#if menu}
+  <ContextMenu
+    x={menu.x}
+    y={menu.y}
+    items={menuItems(menu.section, menu.entries)}
+    onClose={() => (menu = null)}
+  />
+{/if}
 
 {#if confirming}
   <DiscardDialog

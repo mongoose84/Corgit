@@ -426,6 +426,21 @@ class RepoStore {
     }
   }
 
+  /** A file row's right-click ▸ Reveal in File Explorer (§5.2). Always the
+   *  selected repo — the file lists only ever show that one — and
+   *  fire-and-forget like `openInTerminal`: nothing in Corgit's own state
+   *  changes because a shell window opened, and a failure here has no place in
+   *  `writeError`, which is about git writes. */
+  async revealInExplorer(path: string): Promise<void> {
+    const id = this.selectedId;
+    if (!id) return;
+    try {
+      await invoke('reveal_in_explorer', { repoId: id, path });
+    } catch (err) {
+      console.warn('corgit: could not reveal the file', err);
+    }
+  }
+
   /** Right-click → Fetch on a row that may not be the selected repo (§5.1).
    *  Goes through the same write queue as every other write; failures land in
    *  `rowErrors` rather than the compose pane's `writeError`, since the row

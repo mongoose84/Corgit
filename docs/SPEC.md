@@ -295,9 +295,13 @@ Staged Changes (2)          [− unstage all]
   M  src/main.rs
 Changes (14)                [+ stage all]
   M  README.md                        [↺] [+]
-  M  lib.rs      src                  [↺] [+]
-  D  old.txt     docs/archive         [↺] [+]
+  M  lib.rs      src                  [↺] [+]   ← selected ┐ ctrl-clicked,
+  D  old.txt     docs/archive         [↺] [+]   ← selected ┘ then right-clicked
   ?  notes.txt   docs                      [+]
+                             ┌──────────────────────────────┐
+                             │ Stage 2 files                │
+                             │ Discard changes to 2 files…  │
+                             └──────────────────────────────┘
 ```
 
 - **Commit commits staged files only.** Disabled when nothing is staged or the message is
@@ -317,16 +321,47 @@ Changes (14)                [+ stage all]
 - **Click a file → its diff opens in the right pane** (§5.4). The section the row is in
   decides which two sides get compared, because that is the only thing that knows: a
   partly-staged file appears in both lists at once with a different diff on each.
+- **Ctrl-click and shift-click build a selection; right-click acts on it.** Staging six of
+  fourteen files is the pane's most ordinary job, and one `+` per file is six round trips
+  through the write queue for what is one act. A modified click therefore selects instead
+  of opening a diff — a diff per ctrl-click would spawn `git diff` for every row picked on
+  the way to staging them, and leave the right pane on whichever was last. Shift extends
+  from the last row clicked deliberately, so the same anchor holds while the range is
+  dragged up and down. Four rules, none of them negotiable:
+  - **A selection belongs to one section.** *Staged* and *Changes* have opposite verbs, so
+    a set spanning both leaves the menu with nothing honest to offer. Ctrl-clicking across
+    the divide starts a new selection rather than growing the old one.
+  - **Right-clicking a row outside the selection replaces it**, the way every file list
+    does. The menu must never act on rows the user cannot see are picked.
+  - **The row's own `+`/`−`/`↺` still act on that row alone**, selected or not. A button
+    attached to one row that quietly acted on five would be the tick column back in a
+    worse form.
+  - **The selection is transient.** It survives no repo switch, and staging clears it by
+    construction: the rows leave the section and the selection empties with them, rather
+    than lingering over whatever slid up into their place. Nothing about it is persisted
+    (§9.5) — it is not state the backend owns.
+- **The menu**, per section: *Stage N files* / *Unstage N files*; *Discard changes to N
+  files…* in *Changes* only, dropping untracked rows and saying so when it does (git
+  rejects a pathspec list wholesale, so one `?` row would take the whole discard down with
+  it); *Reveal in File Explorer* on a single row only, because `explorer /select,` takes
+  one path and N files would mean N windows rather than one window with them all picked
+  out. A file that no longer exists — a `D` row — reveals the nearest folder that does,
+  never a silent jump to Documents.
+- **The selected rows and the open diff are marked differently**: selection fills the row,
+  the diff on screen gets an accent bar down its left edge. With six rows filled, a second
+  fill that only differed in shade would lose the one row the right pane is actually
+  showing.
 - **File list is capped at 100 entries per section.** The header must then read
   `Changes (100 of 3,412)`. "Stage all" still stages everything and its tooltip says so
   explicitly — the user must never commit files the UI silently hid.
 - **Discard** (`↺`, hover-revealed beside `+`) throws away a file's **unstaged** changes —
-  `git restore --worktree` (§8.6), so a partly-staged file keeps its staged half. **One row
-  at a time**: rows carry no tick column and there is no selection bar. A checkbox per row
+  `git restore --worktree` (§8.6), so a partly-staged file keeps its staged half. The `↺`
+  is one row; the context menu above discards a whole selection through the same dialog.
+  **Rows still carry no tick column and there is no selection bar**: a checkbox per row
   made *Changes* read as a form to be filled in rather than a list of what changed, which
-  is the one thing this pane has to be scannable as. The confirmation dialog still takes a
-  list of paths, so a batch discard can return later without the list itself having to
-  carry a selection. Three limits, all deliberate:
+  is the one thing this pane has to be scannable as, and it charged every user for a batch
+  most of them were not making. A ctrl-click costs the list nothing when nobody uses it.
+  Three limits, all deliberate:
   - **Only in *Changes*.** A staged row keeps `−` alone. Discard there could only mean
     "throw away the staged work too", which is not what a button sitting beside `−` reads
     as; unstaging first moves the row here, where discard means one plain thing.
