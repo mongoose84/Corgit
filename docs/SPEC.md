@@ -44,7 +44,8 @@ First paint renders from cache. It never waits on git.
 - Commit (staged files only)
 - Push, including "Publish branch" for a branch with no upstream
 - Pull (merge only) and fetch
-- Merge (via pull); conflict *detection* only
+- Merge (via pull, or a branch picked from the graph's context menu — §8.3); conflict
+  *detection* only
 - Branch switching (local and remote-tracking)
 - Commit graph for the selected repo, with commit details on click
 - Read-only side-by-side diff for one file at a time, working tree or commit (§5.4)
@@ -682,6 +683,7 @@ git switch <branch>                              # local
 git switch -c <branch> --track origin/<branch>   # remote-tracking
 git branch <new> <start-point>                   # create, stay put
 git switch -c <new> <start-point>                # create and check out
+git merge --no-edit <source>                     # into the checked-out branch
 ```
 
 The switcher lists **local branches, plus remote branches with no local counterpart**,
@@ -704,6 +706,28 @@ that was right-clicked, never HEAD. The name is checked against `check-ref-forma
 and against the local branches already in the graph as it is typed, so the obvious mistakes
 never reach git; everything else surfaces as git's own stderr, like any other write. A new
 branch never gets an upstream — that is `switch -c --track`'s job, and a different intent.
+
+**Merging a branch** (same menu): right-click a ref badge in the graph → *Merge `<ref>` into
+`<current>`*. One click, no modal — the label names both ends, which is the whole decision.
+Only the source is chosen; the destination is always the checked-out branch, and the command
+names no destination at all, so it is HEAD as git sees it rather than anything Corgit
+cached (§5.1). Remote-tracking badges are offered too: merging `origin/main` into the branch
+you are on is the same gesture, and it is the case Pull does not cover, since Pull only ever
+merges *your* upstream. The badge for the current branch itself offers nothing — merging a
+branch into itself is git's own no-op. On a detached HEAD the entry is absent entirely.
+
+`--no-edit` for the same reason Pull passes `--no-rebase`: user config (`merge.edit`,
+`GIT_MERGE_AUTOEDIT`) can otherwise summon an editor, and an editor spawned by a process
+with no console is a hang with nothing on screen to explain it. Never `--no-ff`: a
+fast-forward where one is possible is what was asked for, not a merge commit recording that
+Corgit was involved.
+
+A conflict is a normal outcome, not a special path — the merge fails like any other write,
+the status refresh that follows every write raises §13's conflict banner, and *Abort merge*
+is already the way out. The one thing merging needs that no other write does is to read
+**stdout as well as stderr** for its error text: a conflicting `git merge` exits non-zero
+with stderr empty and puts `CONFLICT (content): …` on stdout, so a stderr-only message
+would be blank in exactly the case that most needs a sentence.
 
 ### 8.4 Graph
 

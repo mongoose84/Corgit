@@ -384,6 +384,15 @@ class RepoStore {
     return this.write('create_branch', { name, startPoint, checkout });
   }
 
+  /** Merging a branch into the checked-out one (§8.3) — `name` is the ref
+   *  badge that was right-clicked; the destination is always HEAD, so there is
+   *  nothing else to pass. A conflict comes back as a failed write whose
+   *  status refresh raises §13's conflict banner, which is where the way out
+   *  of it lives. */
+  async mergeBranch(name: string): Promise<boolean> {
+    return this.write('merge_branch', { name });
+  }
+
   /** The dirty-tree checkout failure's other half (§8.3) — not routed through
    *  `write()`, since it never mutates repo state and has nothing to refresh.
    *  Defaults to the selected repo; the row context menu (§5.1) passes an

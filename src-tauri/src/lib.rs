@@ -534,6 +534,20 @@ async fn create_branch(
     .await
 }
 
+/// Merging a branch into the checked-out one (§8.3) — right-click a ref badge
+/// in the graph. Only the source is named: the destination is HEAD, decided by
+/// git at the moment it runs rather than by anything Corgit has cached, for the
+/// same reason `remote::publish` pushes `HEAD` (§5.1 — the cache is never truth).
+///
+/// A conflict fails here like any other error, and that is the whole recovery
+/// story: `write_and_refresh` republishes the status regardless of outcome, so
+/// §13's conflict banner — *Abort merge* and *Open in VS Code* — is already on
+/// screen by the time the frontend shows the message.
+#[tauri::command]
+async fn merge_branch(repo_id: String, name: String, app: AppHandle) -> Result<(), String> {
+    write_and_refresh(&app, repo_id, |path| async move { branch::merge(&path, &name).await }).await
+}
+
 /// The dirty-tree checkout failure's other half (§8.3): launches VS Code on
 /// the repo so the user can resolve things by hand. Fire-and-forget — nothing
 /// in Corgit's own state changes because of it.
@@ -1657,6 +1671,7 @@ pub fn run() {
             commit_and_push,
             switch_branch,
             create_branch,
+            merge_branch,
             open_in_vscode,
             open_in_terminal,
             toggle_pin,

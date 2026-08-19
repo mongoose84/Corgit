@@ -18,6 +18,10 @@
   const hasRepo = $derived(repos.selectedId !== undefined);
   const status = $derived(repos.selectedId ? repos.status(repos.selectedId) : undefined);
   const dirty = $derived(status !== undefined && isDirty(status));
+  // Merging needs a destination, and Corgit's is always what is checked out.
+  // On a detached HEAD there is no branch to merge into and no name to put in
+  // the menu label, so the entry is simply not offered there.
+  const currentBranch = $derived(status?.branch ?? null);
 
   // Guards the diff against this effect's own re-runs. The effect re-fires
   // whenever anything `graph.loadFor` touches changes, not only on a repo
@@ -84,9 +88,14 @@
 
   // Branch switching (§8.3, §8.4, build step 8) — double-click a ref badge
   // or pick one from a row's right-click menu; both funnel through here.
-  let switching = $state(false);
-  // Shared by switching and branch creation: both are `write()` calls whose
-  // failure is a line of git stderr, and only one of them can be in flight.
+  //
+  // One in-flight write at a time from this pane. The per-repo write queue
+  // (§7) already serialises them on the Rust side; this exists so a second
+  // click cannot queue a switch behind a merge whose result is not on screen
+  // yet, which would leave the two errors fighting over `actionError`.
+  let busy = $state(false);
+  // Shared by switching, branch creation and merging: all three are `write()`
+  // calls whose failure is a line of git stderr, and only one can be in flight.
   let actionError = $state<string | null>(null);
   // Only true alongside `actionError` when the tree was dirty at the moment
   // of failure — the one case §8.3 says to offer *Open in VS Code* for.
@@ -119,8 +128,8 @@
   );
 
   async function switchTo(ref: RefBadge) {
-    if (switching) return;
-    switching = true;
+    if (busy) return;
+    busy = true;
     actionError = null;
     actionErrorDirty = false;
     const ok = await repos.switchBranch(ref.name, ref.kind);
@@ -128,7 +137,27 @@
       actionError = repos.writeError;
       actionErrorDirty = dirty;
     }
-    switching = false;
+    busy = false;
+  }
+
+  // Merging from the graph (§8.3) — the badge names the source, the
+  // destination is always the checked-out branch.
+  //
+  // `actionErrorDirty` stays false here, unlike `switchTo`: a merge tells you
+  // why it failed in its own words every time — either git's "your local
+  // changes would be overwritten", which `translateGitError` already answers
+  // with *Open in VS Code*, or a conflict, whose way out is §13's banner in
+  // the middle pane. Forcing the dirty-tree action would override the
+  // conflict case, and a conflict leaves the tree dirty by definition, so it
+  // would override it exactly when it is wrong.
+  async function mergeInto(ref: RefBadge) {
+    if (busy) return;
+    busy = true;
+    actionError = null;
+    actionErrorDirty = false;
+    const ok = await repos.mergeBranch(ref.name);
+    if (!ok) actionError = repos.writeError;
+    busy = false;
   }
 
   async function createBranch(name: string, checkout: boolean): Promise<boolean> {
@@ -169,6 +198,18 @@
           label: `Create branch from ${ref.name}…`,
           onSelect: () => (createFrom = ref.name),
         },
+        // Merging a branch into itself is git's own no-op, so the badge for
+        // the branch you are on does not offer it. Remote-tracking badges do:
+        // merging `origin/main` into your branch is the same gesture, and the
+        // one Pull does not cover when the branch you want is not upstream.
+        ...(currentBranch !== null && !(ref.kind === 'local' && ref.name === currentBranch)
+          ? [
+              {
+                label: `Merge ${ref.name} into ${currentBranch}`,
+                onSelect: () => mergeInto(ref),
+              },
+            ]
+          : []),
       ]),
     ];
   }
@@ -305,7 +346,7 @@
                     laneCount={lanes}
                     refs={graph.refsByHash.get(row.commit.hash) ?? []}
                     selected={graph.selection === row.commit.hash}
-                    currentBranch={status?.branch ?? null}
+                    {currentBranch}
                     headHash={status?.head ?? null}
                     onSelect={() => graph.select(row.commit.hash)}
                     onSwitchBranch={switchTo}
