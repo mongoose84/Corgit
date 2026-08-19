@@ -384,6 +384,15 @@ class RepoStore {
     return this.write('create_branch', { name, startPoint, checkout });
   }
 
+  /** Merging a branch into the checked-out one (§8.3) — `name` is the ref
+   *  badge that was right-clicked; the destination is always HEAD, so there is
+   *  nothing else to pass. A conflict comes back as a failed write whose
+   *  status refresh raises §13's conflict banner, which is where the way out
+   *  of it lives. */
+  async mergeBranch(name: string): Promise<boolean> {
+    return this.write('merge_branch', { name });
+  }
+
   /** The dirty-tree checkout failure's other half (§8.3) — not routed through
    *  `write()`, since it never mutates repo state and has nothing to refresh.
    *  Defaults to the selected repo; the row context menu (§5.1) passes an
@@ -414,6 +423,21 @@ class RepoStore {
       await invoke('open_in_terminal', { repoId: id });
     } catch (err) {
       console.warn('corgit: could not open a terminal', err);
+    }
+  }
+
+  /** A file row's right-click ▸ Reveal in File Explorer (§5.2). Always the
+   *  selected repo — the file lists only ever show that one — and
+   *  fire-and-forget like `openInTerminal`: nothing in Corgit's own state
+   *  changes because a shell window opened, and a failure here has no place in
+   *  `writeError`, which is about git writes. */
+  async revealInExplorer(path: string): Promise<void> {
+    const id = this.selectedId;
+    if (!id) return;
+    try {
+      await invoke('reveal_in_explorer', { repoId: id, path });
+    } catch (err) {
+      console.warn('corgit: could not reveal the file', err);
     }
   }
 

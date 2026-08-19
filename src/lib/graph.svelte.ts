@@ -73,11 +73,24 @@ class GraphStore {
   error = $state<string | null>(null);
   selection = $state<GraphSelection>('working-tree');
 
-  /** The selected commit's details (§5.2 Mode B) — `null` in working-tree
-   *  mode or before the fetch for the current selection lands. */
+  /** Whether the info column is on screen (§5.2). Deliberately *not* derived
+   *  from `selection`: selecting a row is how you read the graph, and a
+   *  320 px column that appears and reflows the pane every time you click a
+   *  commit is not something the user asked for each time. It opens only from
+   *  a row's right-click ▸ Info, and once open it follows the selection like
+   *  any other detail view. Nothing is fetched while it is shut. */
+  infoOpen = $state(false);
+
+  /** The selected commit's details (§5.2 Mode B) — `null` while the info
+   *  column is shut, in working-tree mode, or before the fetch lands. */
   details = $state<CommitDetails | null>(null);
   loadingDetails = $state(false);
   detailsError = $state<string | null>(null);
+
+  /** The hash `details` is showing *or fetching*. Not `details.hash`, which
+   *  is null for the whole of a fetch — this is what makes a second ask for
+   *  the same commit inert rather than a re-spawn. */
+  private detailsFor: string | null = null;
 
   private laneState: LaneState = emptyLaneState();
 
@@ -118,6 +131,7 @@ class GraphStore {
     this.hasMore = false;
     this.error = null;
     this.selection = 'working-tree';
+    this.infoOpen = false;
     this.clearDetails();
     this.laneState = emptyLaneState();
     await this.reload();
@@ -130,33 +144,56 @@ class GraphStore {
     this.hasMore = false;
     this.error = null;
     this.selection = 'working-tree';
+    this.infoOpen = false;
     this.clearDetails();
     this.laneState = emptyLaneState();
   }
 
-  /** Drives the commit info panel (§5.2): `working-tree` closes it, any other
-   *  value is a commit hash whose details get fetched.
+  /** Which row is highlighted (§5.3). On its own this paints a row and
+   *  nothing else — no fetch, no column — which is what makes clicking down
+   *  a graph cost nothing.
    *
-   *  Re-selecting the row that is already selected is inert. Without the guard
-   *  it re-ran `loadDetails`, which nulls `details` *before* it fetches — so a
-   *  second click on the selected row flashed the panel back to "Reading
-   *  commit…", threw away its scroll position, and shelled out to git again
-   *  for a commit whose details cannot have changed. (Immutability is the same
-   *  reason `diff.svelte.ts`'s `isLive` never reloads a commit's diff.)
-   *
-   *  A failed fetch is the one case where the repeat click means something:
-   *  there is nothing to preserve, so it retries. */
+   *  `working-tree` additionally shuts the info column: the *Uncommitted
+   *  Changes* node means "back to the working tree", and there is no commit
+   *  left for the column to be about. */
   select(selection: GraphSelection): void {
-    if (this.selection === selection && this.detailsError === null) return;
     this.selection = selection;
-    if (selection === 'working-tree') {
+    if (selection === 'working-tree') this.infoOpen = false;
+    this.syncDetails();
+  }
+
+  /** Right-click a row ▸ Info (§5.2) — the only way the column opens. */
+  showInfo(hash: string): void {
+    this.selection = hash;
+    this.infoOpen = true;
+    this.syncDetails();
+  }
+
+  closeInfo(): void {
+    this.infoOpen = false;
+    this.syncDetails();
+  }
+
+  /** The single place that decides what the column should be showing, run
+   *  after every change to either input. Asking twice for the same commit is
+   *  inert: `loadDetails` nulls `details` *before* it fetches, so a repeat
+   *  would flash the panel back to "Reading commit…", throw away its scroll
+   *  position and shell out to git again for a commit that cannot have
+   *  changed. (Immutability is the same reason `diff.svelte.ts`'s `isLive`
+   *  never reloads a commit's diff.) A failed fetch is the one case where
+   *  asking again means something, so it retries. */
+  private syncDetails(): void {
+    const hash = this.selection;
+    if (!this.infoOpen || hash === 'working-tree') {
       this.clearDetails();
-    } else {
-      void this.loadDetails(selection);
+      return;
     }
+    if (this.detailsFor === hash && this.detailsError === null) return;
+    void this.loadDetails(hash);
   }
 
   private clearDetails(): void {
+    this.detailsFor = null;
     this.details = null;
     this.loadingDetails = false;
     this.detailsError = null;
@@ -166,19 +203,20 @@ class GraphStore {
     const id = this.repoId;
     if (!id) return;
 
+    this.detailsFor = hash;
     this.loadingDetails = true;
     this.details = null;
     this.detailsError = null;
     try {
       const details = await invoke<CommitDetails>('commit_details', { repoId: id, hash });
-      // The selection moved on while this was in flight.
-      if (this.repoId !== id || this.selection !== hash) return;
+      // The panel moved on — or shut — while this was in flight.
+      if (this.repoId !== id || this.detailsFor !== hash) return;
       this.details = details;
     } catch (err) {
-      if (this.repoId !== id || this.selection !== hash) return;
+      if (this.repoId !== id || this.detailsFor !== hash) return;
       this.detailsError = String(err);
     } finally {
-      if (this.repoId === id && this.selection === hash) this.loadingDetails = false;
+      if (this.repoId === id && this.detailsFor === hash) this.loadingDetails = false;
     }
   }
 

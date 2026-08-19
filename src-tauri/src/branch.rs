@@ -1,4 +1,4 @@
-//! Branch switching and creation (SPEC.md §8.3, build step 8).
+//! Branch switching, creation and merging (SPEC.md §8.3, build step 8).
 //!
 //! Switching has two shapes only, matching the two ref kinds the graph already
 //! badges (`graph::RefKind`): a local branch is a plain `git switch`, a
@@ -10,6 +10,10 @@
 //! Creation (§8.3, right-click a ref badge in the graph) takes an explicit
 //! start point — the badge or commit that was right-clicked — so it never
 //! depends on what happens to be checked out.
+//!
+//! Merging (§8.3, the same menu) is the mirror image: the badge names the
+//! *source*, and the destination is always whatever is checked out — Corgit
+//! never merges two branches neither of which you are on.
 
 use std::path::Path;
 
@@ -103,6 +107,50 @@ fn create_message(stderr: &str) -> String {
     if trimmed.is_empty() { "could not create the branch".to_string() } else { trimmed.to_string() }
 }
 
+/// Merge another branch into the checked-out one (§8.3, right-click a ref
+/// badge in the graph). `source` is whatever that badge names — a local
+/// branch or a remote-tracking one, since merging `origin/main` into the
+/// branch you are on is the same gesture and git treats both as commits.
+///
+/// `--no-edit` for the same reason `pull` passes `--no-rebase`: user config
+/// decides otherwise. Git normally skips the editor when it has no terminal,
+/// but `merge.edit`/`GIT_MERGE_AUTOEDIT` can force one, and an editor spawned
+/// by a process with no console is a hang with nothing on screen to explain
+/// it. Nothing here ever passes `--no-ff` — a fast-forward where one is
+/// possible is what the user asked for, not a merge commit recording that
+/// Corgit was involved.
+///
+/// A conflict comes back as an `Err` like any other failure, which is
+/// deliberate: `write_and_refresh` republishes the repo's status either way,
+/// so §13's conflict banner and its *Abort merge* button appear at the same
+/// moment the error notice does. The error is what says *why* the tree
+/// suddenly has conflicts in it.
+pub async fn merge(repo: &Path, source: &str) -> Result<(), String> {
+    let output = git::write(repo, &merge_args(source)).await?;
+    if !output.ok {
+        return Err(merge_message(&output.stdout, &output.stderr));
+    }
+    Ok(())
+}
+
+fn merge_args(source: &str) -> Vec<&str> {
+    vec!["merge", "--no-edit", source]
+}
+
+/// The one failure in this file that has to read stdout as well as stderr,
+/// and not as a nicety: measured on Git 2.51, a conflicting `git merge` exits
+/// non-zero with **stderr empty** — `CONFLICT (content): …` and `Automatic
+/// merge failed; fix conflicts and then commit the result.` both go to stdout.
+/// A stderr-only message would leave the notice blank in exactly the case the
+/// user most needs a sentence. The refusals do use stderr (`Your local changes
+/// … would be overwritten by merge`), so both streams have to be joined, in
+/// the order git emitted them.
+fn merge_message(stdout: &str, stderr: &str) -> String {
+    let joined =
+        [stdout.trim(), stderr.trim()].iter().filter(|part| !part.is_empty()).copied().collect::<Vec<_>>().join("\n");
+    if joined.is_empty() { "git merge failed".to_string() } else { joined }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -152,5 +200,32 @@ mod tests {
             let args = create_args("feature-x", "origin/feature-x", checkout);
             assert!(args.contains(&"--no-track"), "{args:?} would inherit origin/feature-x as upstream");
         }
+    }
+
+    #[test]
+    fn merging_never_opens_an_editor() {
+        assert_eq!(merge_args("feature-x"), ["merge", "--no-edit", "feature-x"]);
+    }
+
+    /// The case that made `merge_message` read stdout at all: git puts the
+    /// whole conflict report there and leaves stderr empty, so a stderr-only
+    /// message would show the user an empty error notice.
+    #[test]
+    fn a_conflict_report_survives_an_empty_stderr() {
+        let message = merge_message("CONFLICT (content): Merge conflict in f.txt\n", "");
+        assert_eq!(message, "CONFLICT (content): Merge conflict in f.txt");
+    }
+
+    /// The refusals go the other way — stderr only — and both streams have to
+    /// come through when git uses both.
+    #[test]
+    fn both_streams_are_kept_in_the_order_git_wrote_them() {
+        let message = merge_message("Auto-merging f.txt\n", "error: Your local changes would be overwritten\n");
+        assert_eq!(message, "Auto-merging f.txt\nerror: Your local changes would be overwritten");
+    }
+
+    #[test]
+    fn a_silent_merge_failure_still_says_something() {
+        assert_eq!(merge_message("", "  \n"), "git merge failed");
     }
 }

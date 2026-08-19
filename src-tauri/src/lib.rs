@@ -534,6 +534,20 @@ async fn create_branch(
     .await
 }
 
+/// Merging a branch into the checked-out one (§8.3) — right-click a ref badge
+/// in the graph. Only the source is named: the destination is HEAD, decided by
+/// git at the moment it runs rather than by anything Corgit has cached, for the
+/// same reason `remote::publish` pushes `HEAD` (§5.1 — the cache is never truth).
+///
+/// A conflict fails here like any other error, and that is the whole recovery
+/// story: `write_and_refresh` republishes the status regardless of outcome, so
+/// §13's conflict banner — *Abort merge* and *Open in VS Code* — is already on
+/// screen by the time the frontend shows the message.
+#[tauri::command]
+async fn merge_branch(repo_id: String, name: String, app: AppHandle) -> Result<(), String> {
+    write_and_refresh(&app, repo_id, |path| async move { branch::merge(&path, &name).await }).await
+}
+
 /// The dirty-tree checkout failure's other half (§8.3): launches VS Code on
 /// the repo so the user can resolve things by hand. Fire-and-forget — nothing
 /// in Corgit's own state changes because of it.
@@ -621,6 +635,72 @@ async fn open_in_terminal(repo_id: String, app: AppHandle) -> Result<(), String>
         .spawn()
         .map_err(|err| format!("could not open a terminal: {err}"))?;
     Ok(())
+}
+
+/// Right-click ▸ Reveal in File Explorer on a file row (§5.2). Fire-and-forget
+/// like `open_in_terminal`, and `cfg`-gated for the same reason as `menu.rs`'s
+/// log folder — there is no portable "reveal this file".
+///
+/// `path` is repo-relative, straight off `git status`, so the repo root is what
+/// turns it into something the shell can open — the same join `open_in_vscode`
+/// does, and for the same reason.
+///
+/// A deleted file has nothing to select, and `explorer` given a path that does
+/// not exist silently opens Documents instead, which reads as the app having
+/// gone wrong rather than as "that file is gone". So the target falls back to
+/// the nearest ancestor that does exist — worst case the repo root, which is
+/// always there.
+#[tauri::command]
+async fn reveal_in_explorer(repo_id: String, path: String, app: AppHandle) -> Result<(), String> {
+    let root = repo_path(&app, &repo_id)?;
+    let target = root.join(&path);
+
+    if target.exists() {
+        return reveal_existing(&target);
+    }
+
+    let fallback = target
+        .ancestors()
+        .skip(1)
+        .find(|dir| dir.exists())
+        .unwrap_or(root.as_path())
+        .to_path_buf();
+    open_folder(&fallback)
+}
+
+/// `explorer /select,<file>` opens the containing folder with the file
+/// highlighted. The argument is written raw because explorer parses its own
+/// command line rather than reading argv: Rust's quoting would hand it
+/// `"/select,C:\a b\f.txt"` as a single quoted token, which it takes for a
+/// folder name and gives up on. Quoting the path alone is the form it does
+/// understand.
+#[cfg(windows)]
+fn reveal_existing(target: &Path) -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+
+    // `explorer` exits non-zero even when it succeeds (menu.rs's log folder
+    // says the same), so spawning is the only thing worth checking here.
+    std::process::Command::new("explorer")
+        .raw_arg(format!("/select,\"{}\"", target.display()))
+        .spawn()
+        .map(|_| ())
+        .map_err(|err| format!("could not open File Explorer: {err}"))
+}
+
+/// No portable "select this file" (§10) — the containing folder is as close as
+/// this gets off Windows, and v1 ships Windows.
+#[cfg(not(windows))]
+fn reveal_existing(target: &Path) -> Result<(), String> {
+    open_folder(target.parent().unwrap_or(target))
+}
+
+fn open_folder(dir: &Path) -> Result<(), String> {
+    let opener = if cfg!(windows) { "explorer" } else { "xdg-open" };
+    std::process::Command::new(opener)
+        .arg(dir)
+        .spawn()
+        .map(|_| ())
+        .map_err(|err| format!("could not open the folder: {err}"))
 }
 
 #[cfg(windows)]
@@ -1657,8 +1737,10 @@ pub fn run() {
             commit_and_push,
             switch_branch,
             create_branch,
+            merge_branch,
             open_in_vscode,
             open_in_terminal,
+            reveal_in_explorer,
             toggle_pin,
             clear_pins,
             set_selected_repo,

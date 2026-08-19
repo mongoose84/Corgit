@@ -18,6 +18,10 @@
   const hasRepo = $derived(repos.selectedId !== undefined);
   const status = $derived(repos.selectedId ? repos.status(repos.selectedId) : undefined);
   const dirty = $derived(status !== undefined && isDirty(status));
+  // Merging needs a destination, and Corgit's is always what is checked out.
+  // On a detached HEAD there is no branch to merge into and no name to put in
+  // the menu label, so the entry is simply not offered there.
+  const currentBranch = $derived(status?.branch ?? null);
 
   // Guards the diff against this effect's own re-runs. The effect re-fires
   // whenever anything `graph.loadFor` touches changes, not only on a repo
@@ -64,17 +68,11 @@
     if (scrollEl) scrollTop = scrollEl.scrollTop;
   }
 
-  // Deselecting the commit — which is what closes the info panel (§5.2). Two
-  // ways in, because until now there was effectively only one and it was a
-  // trap: the *Uncommitted Changes* node is the semantic "back to the working
-  // tree", but it only exists `{#if dirty}`, so on a clean repo the panel's
-  // own 22 px × was the sole way out of it.
-  //
-  // Deliberately *not* a toggle on the row itself. Selection is sticky
-  // everywhere else (`repos.select` re-selects rather than clears), and the
-  // panel is a 320 px column the graph's `1fr` track gives up — so a
-  // double-click near a row would open it, reflow, close it and reflow again
-  // with the row moving under the cursor.
+  // Back to the working tree, which also shuts the info column (§5.2) — there
+  // is no commit left for it to be about. Two ways in, because the
+  // *Uncommitted Changes* node is the semantic one but only exists
+  // `{#if dirty}`, so on a clean repo clicking past the last row is the only
+  // one there is.
   function deselect() {
     graph.select('working-tree');
   }
@@ -90,30 +88,37 @@
 
   // Branch switching (§8.3, §8.4, build step 8) — double-click a ref badge
   // or pick one from a row's right-click menu; both funnel through here.
-  let switching = $state(false);
-  // Shared by switching and branch creation: both are `write()` calls whose
-  // failure is a line of git stderr, and only one of them can be in flight.
+  //
+  // One in-flight write at a time from this pane. The per-repo write queue
+  // (§7) already serialises them on the Rust side; this exists so a second
+  // click cannot queue a switch behind a merge whose result is not on screen
+  // yet, which would leave the two errors fighting over `actionError`.
+  let busy = $state(false);
+  // Shared by switching, branch creation and merging: all three are `write()`
+  // calls whose failure is a line of git stderr, and only one can be in flight.
   let actionError = $state<string | null>(null);
   // Only true alongside `actionError` when the tree was dirty at the moment
   // of failure — the one case §8.3 says to offer *Open in VS Code* for.
   // Never force-checkout, ever, so there is no other action to offer here.
   let actionErrorDirty = $state(false);
 
-  let menu = $state<{ x: number; y: number; refs: RefBadge[] } | null>(null);
+  let menu = $state<{ x: number; y: number; refs: RefBadge[]; hash: string } | null>(null);
   // Non-null while the Create Branch dialog is up; the value is the start
   // point the new branch will be cut from (§8.3).
   let createFrom = $state<string | null>(null);
 
-  // Esc closes the info panel (§5.2). Guarded three ways: the panel has to be
-  // open; the graph has to be the view on screen, since DiffView owns Esc
-  // while the diff tab is showing and one press must not close two things;
-  // and the context menu gets it first. The menu is the only overlay needing
-  // that check — both dialogs handle Esc on the dialog element and stop it
-  // propagating, so it never reaches this window listener while one is up.
+  // Esc shuts the info panel (§5.2) and leaves the row selected — it undoes
+  // the *Info* that opened the column, not the click that picked the row.
+  // Guarded three ways: the panel has to be open; the graph has to be the view
+  // on screen, since DiffView owns Esc while the diff tab is showing and one
+  // press must not close two things; and the context menu gets it first. The
+  // menu is the only overlay needing that check — both dialogs handle Esc on
+  // the dialog element and stop it propagating, so it never reaches this
+  // window listener while one is up.
   function onKeydown(event: KeyboardEvent) {
     if (event.key !== 'Escape') return;
     if (diff.view !== 'graph' || menu !== null) return;
-    if (graph.selection !== 'working-tree') deselect();
+    if (graph.infoOpen) graph.closeInfo();
   }
 
   // Only local names: git rejects a new branch that collides with one, and the
@@ -123,8 +128,8 @@
   );
 
   async function switchTo(ref: RefBadge) {
-    if (switching) return;
-    switching = true;
+    if (busy) return;
+    busy = true;
     actionError = null;
     actionErrorDirty = false;
     const ok = await repos.switchBranch(ref.name, ref.kind);
@@ -132,7 +137,27 @@
       actionError = repos.writeError;
       actionErrorDirty = dirty;
     }
-    switching = false;
+    busy = false;
+  }
+
+  // Merging from the graph (§8.3) — the badge names the source, the
+  // destination is always the checked-out branch.
+  //
+  // `actionErrorDirty` stays false here, unlike `switchTo`: a merge tells you
+  // why it failed in its own words every time — either git's "your local
+  // changes would be overwritten", which `translateGitError` already answers
+  // with *Open in VS Code*, or a conflict, whose way out is §13's banner in
+  // the middle pane. Forcing the dirty-tree action would override the
+  // conflict case, and a conflict leaves the tree dirty by definition, so it
+  // would override it exactly when it is wrong.
+  async function mergeInto(ref: RefBadge) {
+    if (busy) return;
+    busy = true;
+    actionError = null;
+    actionErrorDirty = false;
+    const ok = await repos.mergeBranch(ref.name);
+    if (!ok) actionError = repos.writeError;
+    busy = false;
   }
 
   async function createBranch(name: string, checkout: boolean): Promise<boolean> {
@@ -151,23 +176,42 @@
     return ok;
   }
 
-  function openMenu(event: MouseEvent, refs: RefBadge[]) {
-    if (refs.length === 0) return;
+  // Every row has a menu now, badges or not: *Info* is the only way into the
+  // info column (§5.2), so a plain commit with no refs on it must still open
+  // one. That is why the old `refs.length === 0` bail is gone.
+  function openMenu(event: MouseEvent, refs: RefBadge[], hash: string) {
     event.preventDefault();
-    menu = { x: event.clientX, y: event.clientY, refs };
+    menu = { x: event.clientX, y: event.clientY, refs, hash };
   }
 
-  function menuItems(refs: RefBadge[]) {
-    return refs.flatMap((ref) => [
-      {
-        label: ref.kind === 'local' ? `Switch to ${ref.name}` : `Switch to ${ref.name} (new local branch)`,
-        onSelect: () => switchTo(ref),
-      },
-      {
-        label: `Create branch from ${ref.name}…`,
-        onSelect: () => (createFrom = ref.name),
-      },
-    ]);
+  // *Info* leads because it is the one entry every row has; the branch entries
+  // below it exist only on the rows carrying a badge.
+  function menuItems(refs: RefBadge[], hash: string) {
+    return [
+      { label: 'Info', onSelect: () => graph.showInfo(hash) },
+      ...refs.flatMap((ref) => [
+        {
+          label: ref.kind === 'local' ? `Switch to ${ref.name}` : `Switch to ${ref.name} (new local branch)`,
+          onSelect: () => switchTo(ref),
+        },
+        {
+          label: `Create branch from ${ref.name}…`,
+          onSelect: () => (createFrom = ref.name),
+        },
+        // Merging a branch into itself is git's own no-op, so the badge for
+        // the branch you are on does not offer it. Remote-tracking badges do:
+        // merging `origin/main` into your branch is the same gesture, and the
+        // one Pull does not cover when the branch you want is not upstream.
+        ...(currentBranch !== null && !(ref.kind === 'local' && ref.name === currentBranch)
+          ? [
+              {
+                label: `Merge ${ref.name} into ${currentBranch}`,
+                onSelect: () => mergeInto(ref),
+              },
+            ]
+          : []),
+      ]),
+    ];
   }
 </script>
 
@@ -302,7 +346,7 @@
                     laneCount={lanes}
                     refs={graph.refsByHash.get(row.commit.hash) ?? []}
                     selected={graph.selection === row.commit.hash}
-                    currentBranch={status?.branch ?? null}
+                    {currentBranch}
                     headHash={status?.head ?? null}
                     onSelect={() => graph.select(row.commit.hash)}
                     onSwitchBranch={switchTo}
@@ -331,7 +375,7 @@
 </Pane>
 
 {#if menu}
-  <ContextMenu x={menu.x} y={menu.y} items={menuItems(menu.refs)} onClose={() => (menu = null)} />
+  <ContextMenu x={menu.x} y={menu.y} items={menuItems(menu.refs, menu.hash)} onClose={() => (menu = null)} />
 {/if}
 
 {#if createFrom}
