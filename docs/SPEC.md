@@ -131,10 +131,10 @@ unusable. The same is true of the boundary inside the diff view (§5.4), and *Vi
 Pane Sizes* returns every draggable boundary in the window — not only the pane ones — to
 its default.
 
-A fourth column — the **commit info panel** (§5.2) — opens to the right of the graph on a
-commit selection. It is fixed-width and deliberately outside all of the above: no divider,
-no stored fraction, nothing to reset. The graph's track absorbs it, and opening it must
-never resize the two panes to its left.
+A fourth column — the **commit info panel** (§5.2) — opens to the right of the graph when
+a row's right-click menu asks for it. It is fixed-width and deliberately outside all of the
+above: no divider, no stored fraction, nothing to reset. The graph's track absorbs it, and
+opening it must never resize the two panes to its left.
 
 ### 4.1 Title bar and menu
 
@@ -337,8 +337,8 @@ Changes (14)                [+ stage all]
     same act done loudly, and it is the only thing in the app that destroys work git cannot
     give back. `git revert` and `git reset` stay out of v1 (§2) — this is neither.
 
-**Commit info panel** — a fourth column, opening to the right of the graph whenever a
-commit is selected:
+**Commit info panel** — a fourth column to the right of the graph, opened from a row's
+**right-click ▸ Info**:
 
 ```
 COMMIT                                        ✕
@@ -366,19 +366,33 @@ It is **not resizable** and has no stored fraction — the graph's `1fr` track a
 (§4). The only constraint it adds is that the graph must still clear its minimum width
 while the panel is open.
 
-**Closing it is deselecting the commit**, and there are three ways, because for a while
-there was effectively one and it was a trap:
+**Opening it is a deliberate act, and selecting a row is not one.** *Info* on a row's
+context menu is the only way in. Selection used to be: clicking any commit opened the
+column, which meant reading the graph — the ordinary thing to do in that pane — cost a
+320 px reflow every click, and shelled out to `git show` for a commit the user was only
+scrolling past. Right-click ▸ Info separates "I am looking at the graph" from "tell me
+about this one".
+
+Every row's menu carries *Info*, including rows with no ref badges on them, which before
+this had no menu at all. It is the first entry, above the branch entries (§8.3) that only
+appear on rows carrying a badge.
+
+**Once open, it follows the selection** and shows whichever commit is picked, so browsing
+with the column up works the way any detail view does — and the highlighted row and the
+column can never disagree about which commit is on screen. **Nothing is fetched while it is
+shut**: a click on a row with the column closed paints the row and does nothing else.
+
+**Closing it**, three ways, none of which disturb the selection:
 
 - the panel's own ✕;
-- the *Uncommitted Changes* node — the semantic "back to the working tree", but it only
-  exists when the tree is dirty, which is what made the ✕ the sole exit on a clean repo;
-- **Esc**, or a click on empty graph background past the last row.
+- **Esc**;
+- the *Uncommitted Changes* node, or a click on empty graph background past the last row.
+  Both mean "back to the working tree", which leaves no commit for the column to be about.
 
-**Clicking the already-selected row does nothing.** Selection is sticky here exactly as it
-is in the repo list; a toggle would mean an accidental double-click opens the column,
-reflows the graph, closes it and reflows again, with the row moving under the cursor. The
-implementation must also make re-selection *inert* rather than merely idempotent — see
-§8.5 on why re-fetching an immutable commit is a visible regression, not a no-op.
+**Asking for the same commit twice is inert**, not merely idempotent — see §8.5 on why
+re-fetching an immutable commit is a visible regression rather than a no-op. The state that
+makes this work is the hash the panel is *showing or fetching*, which is not the same as
+the hash it has already loaded.
 
 ### 5.3 Graph (right)
 
@@ -389,8 +403,8 @@ the graph keeps its scroll position and loaded pages, so glancing between the tw
 Selected repo only — one repo at a time, so graph cost never multiplies by 77.
 
 - **Synthetic "Uncommitted Changes" node** pinned at the top when the working tree is dirty.
-  Clicking it clears the commit selection, closing the info panel (§5.2). This is what ties
-  the panes into one coherent surface.
+  Clicking it selects the working tree, which also closes the info panel (§5.2). This is
+  what ties the panes into one coherent surface.
 - Rows: graph lanes · hash (short) · message · author · date · ref badges (branches, tags,
   `origin/*`).
 - **The HEAD commit's row is marked.** Its dot is drawn larger with a halo, and the row
@@ -405,10 +419,11 @@ Selected repo only — one repo at a time, so graph cost never multiplies by 77.
   fixed-width and right-aligned; at 19 characters it costs ~140 px, so it is laid out
   before the message column gets its remaining space.
 - Loads **300 commits at a time** with a "Load more" row at the bottom.
-- Click a commit → the commit info panel opens beside the graph (§5.2). Clicking the same
-  row again leaves it open; Esc or a click on empty background past the last row closes it.
-- Right-click a commit → Copy hash, Copy message, Open in VS Code. (Thin by design — the
-  graph is a viewer in v1.)
+- Click a commit → it is selected, and nothing else happens. **The info panel does not
+  open on selection** (§5.2); *Info* on the row's context menu opens it.
+- Right-click a commit → **Info** first, then the branch entries for any ref badges the row
+  carries (§8.3). Copy hash, Copy message and Open in VS Code belong here too. (Thin by
+  design — the graph is a viewer in v1.)
 
 **Rendering: SVG lanes + virtualized DOM rows.** Not canvas. A few hundred SVG paths for
 the lanes, HTML rows for text — this gives text selection, hover and context menus for

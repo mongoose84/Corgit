@@ -20,11 +20,12 @@
     /** Double-clicking a ref badge (§8.3, §8.4) — checks out that exact
      *  branch directly, skipping any dropdown. */
     onSwitchBranch: (ref: RefBadge) => void;
-    /** Right-clicking the row, or a single badge on it (§8.3) — the badge
-     *  passes just itself, so its menu is about that branch alone rather than
-     *  every ref sharing the commit. Only meaningful when the list is
-     *  non-empty, so the parent decides whether to actually open a menu. */
-    onContextMenu: (event: MouseEvent, refs: RefBadge[]) => void;
+    /** Right-clicking the row, or a single badge on it (§8.3, §5.2) — the
+     *  badge passes just itself, so its branch entries are about that branch
+     *  alone rather than every ref sharing the commit. The hash goes with it
+     *  either way: *Info* is about the commit under the pointer, and a row
+     *  with no badges at all still has that one entry. */
+    onContextMenu: (event: MouseEvent, refs: RefBadge[], hash: string) => void;
   }
 
   let { row, laneCount, refs, selected, currentBranch, headHash, onSelect, onSwitchBranch, onContextMenu }: Props =
@@ -64,7 +65,7 @@
     // Without this the row's own handler also runs and offers every ref on the
     // commit; right-clicking a specific badge is a statement about that one.
     event.stopPropagation();
-    onContextMenu(event, [ref]);
+    onContextMenu(event, [ref], row.commit.hash);
   }
 
   function badgeDblclick(event: MouseEvent, ref: RefBadge) {
@@ -84,7 +85,7 @@
   class:head={isHead}
   style={isHead ? headTint : undefined}
   onclick={onSelect}
-  oncontextmenu={(event) => onContextMenu(event, refs)}
+  oncontextmenu={(event) => onContextMenu(event, refs, row.commit.hash)}
   title={row.commit.subject}
 >
   <svg class="lanes" width={laneCount * LANE_WIDTH} height={ROW_HEIGHT} viewBox="0 0 {laneCount * LANE_WIDTH} {ROW_HEIGHT}">
