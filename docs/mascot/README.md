@@ -46,6 +46,19 @@ tile sits too close to the paper colour to knock out.
 `mini-resting.png`, `mini-content.png`, `mini-working.png`, `mini-sorry.png` — 85–119px
 wide, the compact row from the sheet.
 
+## Eyes
+
+`python scripts/extract-mascot.py --eyes` is a second, independent run. It reads
+`src/lib/mascot/resting.png` -- the file the app imports, not the sheet -- and splits it
+into `resting-eyeless.png` (pupils removed, sockets filled with sclera), one sprite per
+pupil (`resting-pupil-near.png`, `resting-pupil-far.png`) and `src/lib/mascot/eyes.ts`,
+which is where each sprite sits and how far it may travel. All four are generated; the
+geometry they come from is the `EYES` table in the script, measured in the pixel
+coordinates of `pose-resting.png`. See [mascot.md](../mascot.md) §6.1.
+
+Nothing here is written by that run -- the eye assets live only in `src/lib/mascot/`,
+because they exist to be layered and are not useful as reference crops.
+
 ## Palette on the sheet
 
 `#D08A3C` fur · `#F4F1ED` markings · `#1F2937` line · `#3BA16E` ok · `#E15D44` error ·

@@ -93,6 +93,14 @@ always safe:
 python scripts/extract-mascot.py          # then: npm run icon
 ```
 
+**It is not currently safe, and this is not why.** On Pillow 12.3 / numpy 2.5 a full run
+regenerates `pose-resting-alpha.png` with the knock-out eaten through the cream markings —
+muzzle, chest and paws come back transparent, alpha coverage drops from 40,697 px to
+35,770, and the pose that ships is the broken one. Only resting fails, which fits: it is
+the marginal case §4's last paragraph warns about, so a shift in `ImageDraw.floodfill`'s
+threshold semantics reaches it first. Diff the app assets after any full run until this is
+fixed. `--eyes` is unaffected — it never re-cuts from the sheet.
+
 The app imports its copies rather than reaching into `docs/`, so shipping code never
 depends on the documentation tree. They stay at the slices' native resolution — the largest
 is 382px wide against a ~130px largest on-screen use, so they are already the 2× asset.
@@ -126,12 +134,13 @@ to put the dog in a repository row.
 
 ### Where they are wired
 
-`Mascot.svelte` takes a pose and a height; everything below goes through it.
+`Mascot.svelte` takes a pose and a height; everything below goes through it. The two
+resting placements also pass `gaze`, which is §6.1.
 
 | Pose | Component | Shown when |
 | --- | --- | --- |
-| Resting, 150px | `Welcome.svelte` | The first screen, above the wordmark. Standing in for the greeting pose until that is drawn — sitting up waiting for something to herd is what this screen means anyway. The one place with nothing to compete with, so he gets the most room |
-| Resting, 132px | `panes/GraphPane.svelte` | No repo selected, and something in the herd still needs attention |
+| Resting + gaze, 150px | `Welcome.svelte` | The first screen, above the wordmark. Standing in for the greeting pose until that is drawn — sitting up waiting for something to herd is what this screen means anyway. The one place with nothing to compete with, so he gets the most room |
+| Resting + gaze, 132px | `panes/GraphPane.svelte` | No repo selected, and something in the herd still needs attention |
 | Content, 112px | `panes/GraphPane.svelte` | No repo selected and `repos.allClean` — every repo swept, clean, and neither ahead nor behind |
 | Mini working, 18px | `panes/RepoList.svelte` | A status sweep is in flight; the pane header's timing readout takes the slot back when it lands |
 | Mini sorry, 20px | `GitErrorNotice.svelte` | Any git failure, wherever the notice is used. Kept small because the narrowest host is the 240px commit pane |
@@ -158,10 +167,12 @@ header; if a full-pane fetch or first-scan state ever appears, that is where he 
 ## 6. Motion
 
 Most poses are static, and the raster format decides how the rest can move. There are no
-named groups to animate against, so a pose is a single image: ears, tail and eyes cannot be
+named groups to animate against, so a pose is a single image: ears and tail cannot be
 driven independently without redrawing that pose as SVG or delivering it as frames. What is
 available is whole-image transform and opacity — a slow bob, a settle on entry, a cross-fade
 between two poses — and that is enough for everything currently planned.
+
+The eyes turned out to be the exception, and §6.1 is why.
 
 The conventions that still hold:
 
@@ -175,6 +186,50 @@ The conventions that still hold:
 Working (pose 3) is the one that wants real animation, since it covers an indefinite wait.
 Sliding the whole image with the drawn motion lines carries it; if that proves too thin,
 that pose is the first candidate for a frame sequence.
+
+### 6.1 The idle gaze
+
+Resting's eyes wander. It is the one piece of motion here that moves a *part* of the dog,
+and the way round the raster problem is that the part was already a separate object in the
+drawing: each pupil is a closed dark oval on a pale socket, so it can be cut out rather
+than redrawn. `extract-mascot.py --eyes` writes an eyeless base with the socket filled in
+sclera plus one small sprite per pupil, and `Mascot.svelte` lays the sprites back over the
+base inside a `clip-path` shaped like the eye opening. Nothing is redrawn, and with
+`prefers-reduced-motion` the pupils sit exactly where they were drawn — the rig at rest is
+the original artwork.
+
+That construction is lifted from Lumo's cat, which does the same thing as a Lottie: every
+feature its own group, pupils clipped to the eye. The difference is that we needed it for
+two objects rather than forty, so it is two `<img>` tags and a keyframe instead of a
+player. **Do not add a Lottie runtime for this.** Its SVG renderer rewrites the whole
+group tree every animation frame, and the state this decorates is the one a dashboard can
+sit in for hours — it would spend CPU continuously, in the empty pane, on a dog. A
+compositor-only `transform` costs nothing between keyframes.
+
+**What it cannot do, measured.** The pupil nearly fills the opening in this drawing:
+14×18 source px inside roughly 20×18. That leaves ±3 source px of horizontal travel and
+none worth having vertically, which at the 150px welcome render is **±1.4 CSS px** on a
+9px-wide eye. The tell is not the pupil, it is the cream crescent flipping from one side
+to the other. Lumo's cat gets a visibly wider look-around because its eye is ~18px on
+screen against our 9, so it has both the size and the room. Getting that here is not a
+tuning problem — it needs the eyes drawn larger, which is a change to the character.
+
+Consequences worth keeping in mind:
+
+- **It is deliberately far slower than an eye.** 37s cycle, ~1.3s per move, long unequal
+  holds. A real saccade is instant, and instant is the loudest thing that can happen in an
+  empty pane. This is meant to be caught out of the corner of yours, or missed entirely.
+- **The geometry is measured against one file.** `EYES` in the script is in the pixel
+  coordinates of `pose-resting.png`; redraw the head and the four ellipses must be measured
+  again. Nothing checks this — a stale opening shows as sclera leaking onto fur.
+- **Only poses in `RIGS` have eyes to move.** Asking for `gaze` anywhere else is silently
+  the still pose, which is the right failure: the mascot never renders wrong, it just
+  renders still.
+- **No blink.** It would read better than the gaze at this size, since a closing lid is a
+  contrast event rather than a 1px slide, and the sleepy sheet
+  (`docs/mascot/sleepy mascot.png`, middle row) already has open, half-lidded and closed
+  versions of the lying dog drawn. It wants a second pose split rather than a lid faked
+  over this one; if it is built, give it a period coprime with 37 so the two never lock.
 
 ## 7. Delivery
 

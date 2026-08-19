@@ -20,7 +20,13 @@ actually imports (`src/lib/mascot/`), and the icon pipeline's square source
 copies rather than imports out of `docs/` so that shipping code never reaches
 into the documentation tree.
 
+`--eyes` is a second, independent run that splits the resting pose into an
+eyeless base and its two pupils, for the idle gaze (see EYES). It reads the
+app asset rather than the sheet, so it can be run without regenerating
+anything else.
+
     python scripts/extract-mascot.py [sheet.png] [out-dir]
+    python scripts/extract-mascot.py --eyes
 
 Requires Pillow and numpy. Nothing in the build runs this; it is an asset step
 kept in the repo so the slicing is reproducible.
@@ -100,6 +106,44 @@ FEATHER_HI = 130
 BBOX_THRESHOLD = 50
 SENTINEL = (255, 0, 255)
 
+# --- Eyes -------------------------------------------------------------------
+#
+# mascot.md §6 says a raster pose has no named parts, so eyes cannot move
+# without redrawing it as vector. That is true of the *drawn* file and not of
+# what we can cut out of it: the pupil is a closed dark oval on a pale socket,
+# so lifting it onto its own layer costs no redrawing at all. The socket is
+# filled with sclera and the pupil rides inside it, clipped to the eye opening
+# -- the same construction a Lottie rig uses, minus the runtime.
+#
+# Geometry is in the *padded crop's* coordinates, i.e. the pixels of
+# `pose-resting.png`, measured off a luminance map of that file rather than
+# eyeballed. It is stable while the artwork's bounding box on the sheet is;
+# redraw the head and these four ellipses have to be measured again. Nothing
+# checks that for you -- a stale opening shows up as sclera leaking onto fur.
+#
+#          name    opening (cx, cy, rx, ry)      pupil (cx, cy, rx, ry)
+EYES = {
+    "pose-resting": [
+        ("near", (155.0, 96.5, 8.8, 7.9), (157.3, 96.5, 6.9, 8.6)),
+        ("far",  (196.5, 84.8, 6.4, 6.0), (197.6, 84.8, 5.2, 6.4)),
+    ],
+}
+# Sampled out of the crescent the artwork already draws beside each pupil, top
+# and bottom of it, so the fill carries the same slight shading. Flat cream
+# reads as a doll's eye at 150px.
+SCLERA_TOP = (250, 238, 221)
+SCLERA_BOTTOM = (234, 224, 210)
+# Softness of each ellipse's rim, as a fraction of its radius. The socket fill
+# wants a wider fade than the pupil: it meets hand-drawn fur, where a hard edge
+# is obvious, while the pupil meets the sclera it was cut from.
+SOCKET_FEATHER = 0.22
+PUPIL_FEATHER = 0.16
+# How far past the opening the pupil may travel before it stops looking like an
+# eye and starts looking like a fault, in crop pixels. The pupil nearly fills
+# the opening in this drawing, so the honest range is small; see mascot.md §6.1.
+TRAVEL_SLACK = 1.2
+EYES_GEOMETRY = Path("src/lib/mascot/eyes.ts")
+
 
 def tight_bbox(dist, x0, x1, y0, y1, threshold):
     """Bounding box of pixels further than `threshold` from the paper colour."""
@@ -159,6 +203,102 @@ def knock_out(crop, dist):
     return np.dstack([crop, (alpha * 255).round().astype(np.uint8)])
 
 
+def _rim(shape, ellipse, feather):
+    """Coverage of an ellipse over a pixel grid, 1 inside, fading at the rim."""
+    cx, cy, rx, ry = ellipse
+    ys, xs = np.mgrid[0:shape[0], 0:shape[1]]
+    t = np.hypot((xs + 0.5 - cx) / rx, (ys + 0.5 - cy) / ry)
+    return np.clip((1.0 - t) / feather, 0.0, 1.0)
+
+
+def split_eyes(cut, eyes):
+    """Lift each pupil onto its own layer, leaving a filled socket behind.
+
+    Returns the eyeless pose and one sprite per eye, both RGBA, plus the
+    geometry the frontend needs to put them back.
+    """
+    h, w, _ = cut.shape
+    base = cut.astype(np.float32).copy()
+    sprites, geometry = [], []
+
+    for name, opening, pupil in eyes:
+        socket = np.maximum(_rim((h, w), opening, SOCKET_FEATHER),
+                            _rim((h, w), pupil, PUPIL_FEATHER))
+        # The pupil overhangs the opening at the top in this pose. Filling the
+        # union rather than the opening alone is what stops the overhang being
+        # left behind as a black eyelash once the pupil moves off it.
+        _, cy, _, ry = opening
+        ramp = np.clip((np.arange(h) - (cy - ry)) / (2 * ry), 0.0, 1.0)[:, None]
+        fill = np.dstack([np.full((h, w), lo, np.float32) +
+                          (hi - lo) * ramp for lo, hi in zip(SCLERA_TOP, SCLERA_BOTTOM)])
+        m = socket[:, :, None]
+        base[:, :, :3] = base[:, :, :3] * (1 - m) + fill * m
+        base[:, :, 3] = np.maximum(base[:, :, 3], socket * 255)
+
+        pcx, pcy, prx, pry = pupil
+        x0, y0 = int(pcx - prx) - 2, int(pcy - pry) - 2
+        x1, y1 = int(np.ceil(pcx + prx)) + 3, int(np.ceil(pcy + pry)) + 3
+        sprite = cut[y0:y1, x0:x1].astype(np.float32).copy()
+        alpha = _rim(sprite.shape[:2], (pcx - x0, pcy - y0, prx, pry), PUPIL_FEATHER)
+        sprite[:, :, 3] *= alpha
+        sprites.append((name, sprite.round().astype(np.uint8)))
+
+        ocx, ocy, orx, ory = opening
+        sw, sh = x1 - x0, y1 - y0
+        geometry.append({
+            "name": name,
+            # Percentages of the pose's own box, so one set of numbers holds at
+            # every rendered height.
+            "left": 100 * x0 / w, "top": 100 * y0 / h,
+            "width": 100 * sw / w, "height": 100 * sh / h,
+            "clipCx": 100 * ocx / w, "clipCy": 100 * ocy / h,
+            "clipRx": 100 * orx / w, "clipRy": 100 * ory / h,
+            # Travel is a percentage of the *sprite*, which is what a CSS
+            # translate() of a percentage is measured against.
+            "travelX": 100 * max(0.0, orx - prx + TRAVEL_SLACK) / sw,
+            "travelY": 100 * max(0.0, ory - pry + TRAVEL_SLACK * 0.5) / sh,
+        })
+
+    return base.round().astype(np.uint8), sprites, geometry
+
+
+def write_eye_geometry(path, poses):
+    """Emit the eye geometry as a module the frontend imports."""
+    lines = [
+        "// Generated by scripts/extract-mascot.py -- do not hand-edit.",
+        "//",
+        "// Where each pupil sprite sits on its pose and how far it may travel,",
+        "// all as percentages so they survive any rendered height (mascot.md §6.1).",
+        "",
+        "export interface Eye {",
+        "  /** Sprite box, as a percentage of the pose's box. */",
+        "  left: number;",
+        "  top: number;",
+        "  width: number;",
+        "  height: number;",
+        "  /** The eye opening the pupil is clipped to, same units. */",
+        "  clipCx: number;",
+        "  clipCy: number;",
+        "  clipRx: number;",
+        "  clipRy: number;",
+        "  /** Travel before the pupil touches the lid, as a percentage of the sprite. */",
+        "  travelX: number;",
+        "  travelY: number;",
+        "}",
+        "",
+    ]
+    for pose, geometry in poses.items():
+        const = pose.replace("pose-", "").upper() + "_EYES"
+        lines.append(f"export const {const}: Eye[] = [")
+        for eye in geometry:
+            fields = ", ".join(f"{k}: {v:.3f}" for k, v in eye.items() if k != "name")
+            lines.append(f"  /* {eye['name']} */ {{ {fields} }},")
+        lines.append("];")
+        lines.append("")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    print(f"{path}")
+
+
 def write_icon_source(mark, path):
     """The app mark on a square transparent canvas, for `npm run icon`."""
     scale = ICON_SIZE / max(mark.width, mark.height)
@@ -170,6 +310,30 @@ def write_icon_source(mark, path):
     )
     canvas.save(path)
     print(f"{path}  {ICON_SIZE}x{ICON_SIZE}")
+
+
+def cut_eyes(root):
+    """Split the poses in EYES into an eyeless base plus pupil sprites.
+
+    Deliberately reads the pose out of `src/lib/mascot/` rather than re-cutting
+    it from the sheet, and is a separate run (`--eyes`) for the same reason: the
+    sprites have to line up with the exact file they will be layered over, to
+    the pixel. Deriving both from one sheet pass would look equivalent and would
+    quietly stop being true the moment the two runs disagree.
+    """
+    app_dir = root / APP_DIR
+    poses = {}
+    for pose, eyes in EYES.items():
+        stem = APP_ASSETS[pose]
+        cut = np.asarray(Image.open(app_dir / f"{stem}.png").convert("RGBA"))
+        eyeless, sprites, geometry = split_eyes(cut, eyes)
+        Image.fromarray(eyeless, "RGBA").save(app_dir / f"{stem}-eyeless.png")
+        print(f"{stem}-eyeless.png  {eyeless.shape[1]}x{eyeless.shape[0]}")
+        for eye, sprite in sprites:
+            Image.fromarray(sprite, "RGBA").save(app_dir / f"{stem}-pupil-{eye}.png")
+            print(f"{stem}-pupil-{eye}.png  {sprite.shape[1]}x{sprite.shape[0]}")
+        poses[pose] = geometry
+    write_eye_geometry(root / EYES_GEOMETRY, poses)
 
 
 def main():
@@ -207,4 +371,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    if "--eyes" in sys.argv[1:]:
+        cut_eyes(Path(__file__).resolve().parent.parent)
+    else:
+        main()

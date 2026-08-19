@@ -276,7 +276,7 @@
       {:else}
         <EmptyState message="Nothing to herd" hint="Select a repository to see its history">
           {#snippet art()}
-            <Mascot pose="resting" height={132} />
+            <Mascot pose="resting" height={132} gaze />
           {/snippet}
         </EmptyState>
       {/if}
