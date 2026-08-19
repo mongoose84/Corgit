@@ -441,8 +441,17 @@ Selected repo only — one repo at a time, so graph cost never multiplies by 77.
 - **Synthetic "Uncommitted Changes" node** pinned at the top when the working tree is dirty.
   Clicking it selects the working tree, which also closes the info panel (§5.2). This is
   what ties the panes into one coherent surface.
-- Rows: graph lanes · hash (short) · message · author · date · ref badges (branches, tags,
-  `origin/*`).
+- Rows: graph lanes · ref badges (branches, tags, `origin/*`) · message · author · date.
+  **No hash column**: the short oid is a lookup key, not something read while scanning
+  history, and it cost 56 px on every row to say what the info panel (§5.2), one context-menu
+  entry away, already answers on demand. The badges come **before** the message, not after
+  it: trailing a variable-length subject puts each branch name at a different x, so
+  answering "where is `main`" means reading every row. Anchored right after the lanes they
+  line up in a column next to the dots they name, which is also the pairing that makes a
+  badge and its dot read as one thing.
+- **The author column is right-aligned**, the one text column that is. Left-aligned in its
+  fixed 110 px box a short name leaves most of the box empty, and the date reads as adrift
+  from the row rather than as the pair it forms with the name.
 - **The HEAD commit's row is marked.** Its dot is drawn larger with a halo, and the row
   carries a low-alpha tint of its own lane colour. Both are keyed off `branch.oid` from
   §8.2 rather than off the current branch's ref badge, so a detached HEAD — the state where

@@ -4,29 +4,65 @@
 
 # Corgit
 
-A fast dashboard over many local git repositories. Built for the case where you have
-dozens of repos in one folder, roughly five are active at a time, and you want to know at a
-glance which ones need attention.
+**Meet Corgit — your git herding dog.** Point it at the folder where all your repositories
+live and it watches every one of them, so you can see at a glance which ones need you. No
+more `cd`-ing through a dozen directories running `git status` to work out what you forgot
+to push on Friday.
 
-Four verbs — fetch, pull, commit, push — plus staging and branch switching. Not a general
-git client. See **[docs/SPEC.md](docs/SPEC.md)** for the full design.
+If your day looks like *"I have 70 repos checked out, about five are active, and I keep
+losing track"* — that is the dog's entire job.
 
 ![Corgit's three panes: repositories, working tree, commit graph](docs/screenshots/corgit.png)
 
-Left: the hot set pinned above everything else, each row carrying its branch, a badge
-counting its changed files and an ahead/behind badge. Middle: staged and unstaged files for the selected repo.
-Right: the graph, with the *Uncommitted Changes* node on top and the HEAD commit's row
-marked by a larger dot and a tint of its own lane colour — or, behind the other tab in
-that pane's header, a side-by-side diff of whichever file was last clicked.
+## What you get
 
-The screenshot is taken against a throwaway folder of repositories built by
-`bash scripts/make-demo-root.sh` — ahead, behind, dirty, a feature branch and one repo
-with no upstream — so it can be reproduced whenever the UI moves.
+- **Every repo on one screen.** Each row carries its branch, a count of changed files and
+  an ahead/behind badge. Pin the ones you are living in to the top.
+- **Four verbs, no ceremony.** Fetch, pull, commit, push — plus staging and branch
+  switching. That is the set. Corgit is a dashboard over many repositories, not a general
+  git client, and it does not try to be one.
+- **Your working tree, live.** Staged and unstaged files for the selected repo, with a
+  side-by-side diff of whichever file you last clicked behind the other tab.
+- **A graph you can read.** Uncommitted changes on top, the HEAD commit marked with a larger
+  dot and a tint of its own lane colour, ref badges where they belong.
+- **It keeps up with your terminal.** Every repo gets a filesystem watcher, so a commit you
+  make outside Corgit shows up without you asking for a refresh.
+- **Errors in plain language.** A rejected push says it was rejected and offers the one
+  action that resolves it — with the raw git stderr one click away, because you are a
+  developer and you will want it.
+- **Your git, not a reimplementation.** Corgit shells out to the git you already have, so
+  your credential helpers, hooks and LFS keep working exactly as they do in the terminal.
+
+Windows-only for v1. The full design lives in **[docs/SPEC.md](docs/SPEC.md)**.
 
 **Status: build step 9 of 10.** Everything through branch switching and conflict detection
 works; the polish pass is landing (pins, filter, per-repo watchers, context menus, error
-translation, the combined title bar and menu), and the read-only diff viewer (§5.4) is in. Multi-window,
-and shipping with auto-update, are what remain.
+translation, the combined title bar and menu), and the read-only diff viewer (§5.4) is in.
+Multi-window, and shipping with auto-update, are what remain.
+
+## Fast is the feature
+
+The performance budget is the reason this project exists, and the numbers below are
+checked-in tests rather than claims — [Measuring](#measuring) reproduces them on your
+machine.
+
+| | |
+| --- | --- |
+| Discovery, 69 repos | **5.6 ms** |
+| Full status sweep, best observed | **1.2 s** |
+| Full sweeps per minute, steady state | **0** |
+| Budget (SPEC §1) | 300 ms |
+
+The last two rows are the interesting ones. Reading 69 repositories cannot fit in 300 ms on
+this machine, because the cost is not git — it is Windows creating processes. A bare
+`git version`, which opens no repository at all, costs **85.7 ms** here, while a real
+`git status --porcelain=v2` averages **71.8 ms**, putting git's own work at **2–10 ms for 66
+of the 69 repos**. The only way to hit the budget is therefore to *not spawn*, which is why
+every repo gets its own filesystem watcher and the periodic sweep is demoted to a
+reconciliation pass. In steady state Corgit runs no sweeps at all.
+
+The measurements behind that, including the two that rule out the obvious fixes, are in
+[Under the hood](#under-the-hood).
 
 ---
 
@@ -62,6 +98,11 @@ npm run dev            # http://localhost:1420
 Outside Tauri, settings fall back to `localStorage` instead of the Rust backend, so pane
 widths still persist. There is no git there, so the welcome screen says so rather than
 showing an empty repo list.
+
+Want a folder to try Corgit against without pointing it at your real work?
+`bash scripts/make-demo-root.sh` builds a throwaway root — ahead, behind, dirty, a feature
+branch, and one repo with no upstream. The screenshot above is taken against it, so it can
+be reproduced whenever the UI moves.
 
 ## Building
 
@@ -161,7 +202,7 @@ scripts/
   make-demo-root.sh          throwaway repos to screenshot against
 ```
 
-## Notes
+## Under the hood
 
 - **Pane widths are stored as fractions**, not pixels, so they survive window resizing.
   Minimum widths win over the stored fraction when the window is too narrow; the middle
@@ -198,8 +239,13 @@ scripts/
 - The repo-list header shows the **last sweep's wall clock**. The budget is 300 ms for 77
   repos (SPEC §1); a `tauri dev` build is unoptimised and will read slower than a release
   one.
+- **The icon and the mascot come from one contact sheet.**
+  `python scripts/extract-mascot.py` cuts `docs/mascot/corgit.png` into the poses, copies
+  the ones the app imports into `src/lib/mascot/`, and writes the 512×512
+  `src-tauri/icon-source.png`; `npm run icon` expands that into the bundled set. Where each
+  pose is allowed to appear is SPEC §14.1, and why is [docs/mascot.md](docs/mascot.md).
 
-### Measured on this machine, 69 repos (release build)
+### Why the sweep is spawn-bound — measured on this machine, 69 repos (release build)
 
 | | |
 | --- | --- |
@@ -209,8 +255,7 @@ scripts/
 | Full sweeps per minute, steady state | **0** |
 | Budget (SPEC §1) | 300 ms |
 
-**The sweep is spawn-bound, not git-bound, and that is what decided the architecture.** A
-`git version` — which opens no repository at all — costs **85.7 ms** wall here: 19.5 ms
+A `git version` — which opens no repository at all — costs **85.7 ms** wall here: 19.5 ms
 user, 29.7 ms kernel, 36.5 ms waiting. `cmd.exe /c ver` costs about the same, so this is the
 machine and not git. Against that floor a full `git status --porcelain=v2 --branch -z`
 averages **71.8 ms** (min 59.6, max 339.8 on a 32k-file repo), which puts git's own work at
@@ -236,8 +281,3 @@ is not a setting you can change from here.
 
 Reproduce with `cargo test --release --lib -- --ignored --nocapture bench_status_sweep` and
 `bench_spawn_concurrency` (SPEC §1, §16).
-- **The icon and the mascot come from one contact sheet.**
-  `python scripts/extract-mascot.py` cuts `docs/mascot/corgit.png` into the poses, copies
-  the ones the app imports into `src/lib/mascot/`, and writes the 512×512
-  `src-tauri/icon-source.png`; `npm run icon` expands that into the bundled set. Where each
-  pose is allowed to appear is SPEC §14.1, and why is [docs/mascot.md](docs/mascot.md).
