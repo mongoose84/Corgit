@@ -50,6 +50,17 @@ const RULES: Rule[] = [
     message: 'Commit or discard your changes first',
     action: 'open-vscode',
   },
+  {
+    // A merge that stopped in conflict (§13). Below the dirty-tree rule on
+    // purpose: a merge git *refused* never reached the working tree, and
+    // "commit or discard your changes first" is the more actionable of the
+    // two headlines when both could match. The way out is the middle pane's
+    // conflict banner — *Abort merge* — which is already up by the time this
+    // renders, so the action here only offers the banner's other half.
+    match: (lower) => lower.includes('automatic merge failed') || lower.includes('conflict ('),
+    message: 'Merge stopped with conflicts',
+    action: 'open-vscode',
+  },
 ];
 
 export function translateGitError(raw: string): TranslatedGitError {

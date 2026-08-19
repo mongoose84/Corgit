@@ -21,13 +21,13 @@
   const DIVIDER = 5;
 
   // The commit info panel (§5.2 revised): a fourth, fixed-width column that
-  // opens beside the graph on a commit selection — not a resizable pane, no
-  // stored fraction, matching the fixed width of a Google Photos-style info
-  // panel. The graph's `1fr` track absorbs the difference on its own; the
-  // only extra bookkeeping needed is making sure `resolve()` still leaves it
-  // MIN_GRAPH when the panel is open (see `reserved` below).
+  // opens beside the graph on a row's right-click ▸ Info — not a resizable
+  // pane, no stored fraction, matching the fixed width of a Google
+  // Photos-style info panel. The graph's `1fr` track absorbs the difference on
+  // its own; the only extra bookkeeping needed is making sure `resolve()`
+  // still leaves it MIN_GRAPH when the panel is open (see `reserved` below).
   const INFO_WIDTH = 320;
-  const infoOpen = $derived(graph.selection !== 'working-tree');
+  const infoOpen = $derived(graph.infoOpen);
   const infoWidth = $derived(infoOpen ? INFO_WIDTH : 0);
 
   let container: HTMLElement | undefined = $state();

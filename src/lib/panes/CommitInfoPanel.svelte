@@ -9,9 +9,9 @@
   import { formatCommitDate } from '../dateFormat';
   import { laneColorVar } from '../graphLayout';
 
-  // A fourth column, not a mode of CommitPane (SPEC.md §5.2 revised): opens
-  // beside the graph when a commit is selected, closes back to nothing
-  // selected. Read-only.
+  // A fourth column, not a mode of CommitPane (SPEC.md §5.2 revised): opened
+  // from a graph row's right-click ▸ Info, and thereafter showing whichever
+  // commit is selected until it is closed again. Read-only.
   const details = $derived(graph.details);
   // `%B`'s first line, the same "subject" a graph row shows — split by hand
   // rather than trusting the first `\n` never to be missing on an empty message.
@@ -44,8 +44,10 @@
     return `color: ${color}; border-color: ${color}; background: color-mix(in srgb, ${color} 22%, var(--bg-raised));`;
   }
 
+  // Shuts the column and leaves the row selected (§5.2) — the graph is still
+  // where the user was, and re-opening is one right-click away.
   function close() {
-    graph.select('working-tree');
+    graph.closeInfo();
   }
 
   /** A commit's file rows open the same diff view the working-tree rows do

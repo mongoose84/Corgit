@@ -20,11 +20,12 @@
     /** Double-clicking a ref badge (§8.3, §8.4) — checks out that exact
      *  branch directly, skipping any dropdown. */
     onSwitchBranch: (ref: RefBadge) => void;
-    /** Right-clicking the row, or a single badge on it (§8.3) — the badge
-     *  passes just itself, so its menu is about that branch alone rather than
-     *  every ref sharing the commit. Only meaningful when the list is
-     *  non-empty, so the parent decides whether to actually open a menu. */
-    onContextMenu: (event: MouseEvent, refs: RefBadge[]) => void;
+    /** Right-clicking the row, or a single badge on it (§8.3, §5.2) — the
+     *  badge passes just itself, so its branch entries are about that branch
+     *  alone rather than every ref sharing the commit. The hash goes with it
+     *  either way: *Info* is about the commit under the pointer, and a row
+     *  with no badges at all still has that one entry. */
+    onContextMenu: (event: MouseEvent, refs: RefBadge[], hash: string) => void;
   }
 
   let { row, laneCount, refs, selected, currentBranch, headHash, onSelect, onSwitchBranch, onContextMenu }: Props =
@@ -33,7 +34,6 @@
   const cx = (lane: number) => lane * LANE_WIDTH + LANE_WIDTH / 2;
   const cy = ROW_HEIGHT / 2;
 
-  const shortHash = $derived(row.commit.hash.slice(0, 7));
   const date = $derived(formatCommitDate(row.commit.timestamp));
 
   const isCurrent = (ref: RefBadge) => ref.kind === 'local' && ref.name === currentBranch;
@@ -64,7 +64,7 @@
     // Without this the row's own handler also runs and offers every ref on the
     // commit; right-clicking a specific badge is a statement about that one.
     event.stopPropagation();
-    onContextMenu(event, [ref]);
+    onContextMenu(event, [ref], row.commit.hash);
   }
 
   function badgeDblclick(event: MouseEvent, ref: RefBadge) {
@@ -84,7 +84,7 @@
   class:head={isHead}
   style={isHead ? headTint : undefined}
   onclick={onSelect}
-  oncontextmenu={(event) => onContextMenu(event, refs)}
+  oncontextmenu={(event) => onContextMenu(event, refs, row.commit.hash)}
   title={row.commit.subject}
 >
   <svg class="lanes" width={laneCount * LANE_WIDTH} height={ROW_HEIGHT} viewBox="0 0 {laneCount * LANE_WIDTH} {ROW_HEIGHT}">
@@ -114,8 +114,11 @@
     <circle cx={cx(row.lane)} cy={cy} r={isHead ? 5.5 : 4} fill={laneColorVar(row.lane)} />
   </svg>
 
-  <span class="hash">{shortHash}</span>
-  <span class="subject">{row.commit.subject}</span>
+  <!-- Badges sit before the message, not after it: a name that trails a
+       variable-length subject lands in a different place on every row, so
+       finding "where is `main`" means reading the whole column. Here they
+       start at a fixed x, right beside the dot they belong to, and scanning
+       branches down the graph is one straight eye path. -->
   {#each refs as ref (ref.kind + ref.name)}
     <span
       class="ref ref-{ref.kind}"
@@ -130,6 +133,7 @@
         : `${ref.name} — double-click to switch, right-click for actions`}
     >{ref.name}</span>
   {/each}
+  <span class="subject">{row.commit.subject}</span>
   <span class="author">{row.commit.author}</span>
   <span class="date">{date}</span>
 </button>
@@ -171,16 +175,16 @@
     stroke-linecap: round;
   }
 
-  .hash {
-    flex: 0 0 auto;
-    width: 56px;
-    font-family: var(--font-mono);
-    font-size: var(--text-xs);
-    color: var(--text-muted);
-  }
-
+  /* Basis 8rem, not `auto`: with `auto` the subject's basis is the *untruncated*
+     message, commonly 400-800 px, which makes almost every row overflow on
+     paper. Flex then hands out the shortfall in proportion to basis, so the ref
+     badges gave up width alongside it even on rows with half the pane empty —
+     which is why branch names were arriving pre-truncated. At a fixed basis the
+     badges are laid out at their natural width first and the message grows into
+     whatever is left, and the two only negotiate on rows that are genuinely
+     crowded. */
   .subject {
-    flex: 1 1 auto;
+    flex: 1 1 8rem;
     min-width: 0;
     overflow: hidden;
     white-space: nowrap;
@@ -189,9 +193,22 @@
     color: var(--text-primary);
   }
 
+  /* Still shrinkable, unlike the other fixed columns: on a commit carrying five
+     remote badges the message would otherwise be squeezed to nothing, and the
+     row would push the date column off the edge of a narrow pane.
+
+     Both bounds are sized against the house naming convention — `item/12345`,
+     `Releses/R2026-08` — at --text-xs, where Segoe UI averages ~5.9 px a
+     character and the badge adds 10 px of padding and border. 72 px holds a
+     ten-character name whole, so the *floor* alone is enough for the common
+     branch and the crowded-row case never truncates one. 180 px holds the
+     longest shape the pair produces, `origin/Releses/R2026-08` at 23 characters
+     (~146 px), with room to spare; past that a badge would start eating the
+     message column to show a name nobody here writes. */
   .ref {
-    flex: 0 0 auto;
-    max-width: 140px;
+    flex: 0 1 auto;
+    min-width: 72px;
+    max-width: 180px;
     overflow: hidden;
     white-space: nowrap;
     text-overflow: ellipsis;
@@ -217,15 +234,21 @@
      "which branch am I on" reads without hunting through the row, but still
      not the accent (SPEC.md §11 rule 3: reserved for selection). */
   .ref.current {
-    max-width: 180px;
+    min-width: 88px;
+    max-width: 200px;
     padding: 2px var(--space-2);
     font-size: var(--text-sm);
     font-weight: 700;
   }
 
+  /* Right-aligned, unlike every other text column: left-aligned in a fixed
+     110 px box, a short name leaves most of that box empty and the date reads
+     as floating far off on its own. Ragged on the left is the cheaper edge to
+     lose — the eye pairs each name with the date it sits against. */
   .author {
     flex: 0 0 auto;
     width: 110px;
+    text-align: right;
     overflow: hidden;
     white-space: nowrap;
     text-overflow: ellipsis;

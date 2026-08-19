@@ -11,24 +11,27 @@
     disabled?: boolean;
     /** Opens this file's diff in the right pane (§5.4). Required, not optional:
      *  every file row in the app is a way into the diff view, and a row that
-     *  silently was not would be indistinguishable from one that failed. */
-    onOpen: () => void;
-    /** This row's diff is the one currently open — marked so the file lists and
-     *  the right pane's tab cannot disagree about what is being shown. */
+     *  silently was not would be indistinguishable from one that failed.
+     *
+     *  Handed the click rather than called bare, because in the working-tree
+     *  lists the modifier keys decide whether this is an open at all: ctrl and
+     *  shift build a selection instead (§5.2). */
+    onOpen: (event: MouseEvent) => void;
+    /** Part of the pane's current selection — the highlight a batch action
+     *  will act on. In the read-only commit info panel there is no selection
+     *  to build, so it marks the open row instead. */
     selected?: boolean;
-    /** The list this row sits in offers multi-select (§5.2) — only *Changes*
-     *  does. Set on **every** row of such a list, including ones that cannot
-     *  be picked, so the column is reserved and the paths below it stay in a
-     *  straight line instead of stepping sideways at each untracked file. */
-    selectable?: boolean;
-    checked?: boolean;
-    /** Absent on a row that reserves the column but cannot be picked: an
-     *  untracked file has nothing to restore from, so discard does not apply
-     *  to it (§5.2). Its checkbox is then simply not drawn. */
-    onCheck?: (checked: boolean) => void;
-    /** Absent for the same reason as `onCheck`, and on every staged row —
-     *  discarding there would have to mean throwing away the staged work too,
-     *  which is not what the button says. */
+    /** This row's diff is the one the right pane is showing — a separate fact
+     *  from `selected` now that a selection can be several rows and can leave
+     *  the open one out, and marked separately so the two cannot be confused
+     *  for each other. */
+    showingDiff?: boolean;
+    /** Right-click. Absent on a read-only row, which has no menu. */
+    onContextMenu?: (event: MouseEvent) => void;
+    /** Absent on an untracked row — git has nothing to restore it from, so
+     *  discard does not apply to it (§5.2) — and on every staged row, where
+     *  discarding would have to mean throwing away the staged work too, which
+     *  is not what the button says. */
     onDiscard?: () => void;
   }
 
@@ -39,9 +42,8 @@
     disabled = false,
     onOpen,
     selected = false,
-    selectable = false,
-    checked = false,
-    onCheck,
+    showingDiff = false,
+    onContextMenu,
     onDiscard,
   }: Props = $props();
 
@@ -73,40 +75,25 @@
 
   const badgeTone = $derived(tone(entry.status));
 
-  /** Ellipsized head-first so the filename stays visible (§5.2) — CSS
-   *  `text-overflow: ellipsis` only ever trims the tail, so the head has to
-   *  be trimmed by hand. */
-  function headEllipsis(path: string, max: number): string {
-    if (path.length <= max) return path;
-    return `…${path.slice(path.length - (max - 1))}`;
-  }
-
-  const shown = $derived(headEllipsis(entry.path, 44));
+  /** Filename and the directory it sits in, split so they can be styled and
+   *  trimmed apart (§5.2). Git reports POSIX separators even on Windows, so
+   *  one split character is enough. A file at the repo root has no directory
+   *  half, and nothing is drawn for it. */
+  const name = $derived(entry.path.slice(entry.path.lastIndexOf('/') + 1));
+  const dir = $derived(entry.path.slice(0, Math.max(entry.path.lastIndexOf('/'), 0)));
 </script>
 
-<div class="file-row" class:selected>
-  {#if selectable}
-    <!-- Kept outside the `.open` button rather than inside it: a checkbox
-         nested in a button is neither valid nor clickable on its own. -->
-    <span class="check-slot">
-      {#if onCheck}
-        <input
-          type="checkbox"
-          class="check"
-          {checked}
-          {disabled}
-          onchange={(event) => onCheck(event.currentTarget.checked)}
-          aria-label="Select {entry.path}"
-        />
-      {/if}
-    </span>
-  {/if}
+<!-- svelte-ignore a11y_no_static_element_interactions -->
+<div class="file-row" class:selected class:showing={showingDiff} oncontextmenu={onContextMenu}>
   <!-- The path is deliberately not `.selectable` here, unlike everywhere else
        readable in the app: `cursor: text` on something that opens a diff when
        clicked is a lie, and the full path is on the title attribute anyway. -->
   <button type="button" class="open" onclick={onOpen} title="Show the diff for {entry.path}">
     <span class="status status-{badgeTone}" title={entry.status}>{entry.status}</span>
-    <span class="path">{shown}</span>
+    <span class="name">{name}</span>
+    {#if dir}
+      <span class="dir">{dir}</span>
+    {/if}
     {#if stats}
       <span class="stats">
         {#if stats.insertions === null && stats.deletions === null}
@@ -159,11 +146,22 @@
     background: var(--bg-hover);
   }
 
-  /* Declared after the hover rule so the open file stays marked while the
-     pointer is elsewhere in the list — which file is showing is a standing
-     fact, not a transient one (§5.3's HEAD-row reasoning). */
+  /* Declared after the hover rule so a selected file stays marked while the
+     pointer is elsewhere in the list — what is selected is a standing fact,
+     not a transient one (§5.3's HEAD-row reasoning). */
   .file-row.selected {
     background: var(--accent-muted);
+  }
+
+  /* The row whose diff is up. A bar rather than a second background, because
+     it has to be readable *on top of* the selection fill: with a multi-row
+     selection every row is already accent-muted, and a fill that only differed
+     in shade would make the open row indistinguishable from the rest. Drawn
+     with a border so it costs no layout — the padding compensates so text does
+     not shift by 2px as the diff moves down the list. */
+  .file-row.showing {
+    border-left: 2px solid var(--accent);
+    padding-left: calc(var(--space-3) - 2px);
   }
 
   /* The row itself (§5.4). A button rather than a click handler on the div, so
@@ -180,34 +178,6 @@
     border: 0;
     background: none;
     text-align: left;
-  }
-
-  /* Reserved by every row of a selectable list, filled by only some — see the
-     `selectable` prop. */
-  .check-slot {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    flex: 0 0 auto;
-    width: 12px;
-  }
-
-  /* Hidden at rest like the stage toggle, for the same reason: a checkbox per
-     row would make the list read as a form rather than a list of changes.
-     `:checked` keeps a picked row's box visible once the pointer has moved on
-     — a selection is a standing fact, not a hover state. */
-  .check {
-    width: 12px;
-    height: 12px;
-    margin: 0;
-    accent-color: var(--accent);
-    opacity: 0;
-  }
-
-  .file-row:hover .check,
-  .check:checked,
-  .check:focus-visible {
-    opacity: 1;
   }
 
   .status {
@@ -232,13 +202,29 @@
     color: var(--status-dirty);
   }
 
-  .path {
-    flex: 1 1 auto;
+  /* The filename is what the row is *for*, so it gets full contrast and only
+     shrinks once the directory beside it has nothing left to give — hence the
+     lopsided shrink factors below rather than a plain `1`. Both halves are
+     tail-trimmed by CSS: a path that runs out of room should lose its deepest
+     folder, not the segment that says which project it is in. */
+  .name {
+    flex: 0 1 auto;
     min-width: 0;
     overflow: hidden;
+    text-overflow: ellipsis;
     white-space: nowrap;
     font-size: var(--text-sm);
     color: var(--text-primary);
+  }
+
+  .dir {
+    flex: 0 100 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: var(--text-xs);
+    color: var(--text-muted);
   }
 
   .toggle {
@@ -285,8 +271,12 @@
     color: var(--danger-hover);
   }
 
+  /* Pushed to the right edge by its own margin rather than by a growing path:
+     neither the name nor the directory grows any more, and a row whose file
+     sits at the repo root has no directory element at all to do it. */
   .stats {
     flex: 0 0 auto;
+    margin-left: auto;
     display: flex;
     gap: var(--space-1);
     font-size: var(--text-xs);

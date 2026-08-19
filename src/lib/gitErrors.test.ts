@@ -52,6 +52,32 @@ describe('cases §13 lists', () => {
     expect(result.message).toBe('Commit or discard your changes first');
     expect(result.action).toBe('open-vscode');
   });
+
+  test('a merge that stopped in conflict gets a headline of its own', () => {
+    // Exactly what a conflicting `git merge` writes — and it writes all of it
+    // to *stdout*, which is why `branch::merge` joins both streams: the text
+    // arriving here has no stderr in it at all.
+    const result = translateGitError(
+      'Auto-merging src/main.rs\n' +
+        'CONFLICT (content): Merge conflict in src/main.rs\n' +
+        'Automatic merge failed; fix conflicts and then commit the result.',
+    );
+
+    expect(result.message).toBe('Merge stopped with conflicts');
+    expect(result.action).toBe('open-vscode');
+  });
+
+  test('a merge git refused outright is the dirty-tree case, not the conflict one', () => {
+    // Both rules can match text with "merge" in it, and this one has to win:
+    // nothing was merged, so there is no conflict to abort — the user has to
+    // deal with their working tree first.
+    const result = translateGitError(
+      'error: Your local changes to the following files would be overwritten by merge:\n' +
+        '\tsrc/main.rs\nPlease commit your changes or stash them before you merge.\nAborting',
+    );
+
+    expect(result.message).toBe('Commit or discard your changes first');
+  });
 });
 
 describe('timeouts', () => {

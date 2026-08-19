@@ -44,7 +44,8 @@ First paint renders from cache. It never waits on git.
 - Commit (staged files only)
 - Push, including "Publish branch" for a branch with no upstream
 - Pull (merge only) and fetch
-- Merge (via pull); conflict *detection* only
+- Merge (via pull, or a branch picked from the graph's context menu — §8.3); conflict
+  *detection* only
 - Branch switching (local and remote-tracking)
 - Commit graph for the selected repo, with commit details on click
 - Read-only side-by-side diff for one file at a time, working tree or commit (§5.4)
@@ -131,10 +132,10 @@ unusable. The same is true of the boundary inside the diff view (§5.4), and *Vi
 Pane Sizes* returns every draggable boundary in the window — not only the pane ones — to
 its default.
 
-A fourth column — the **commit info panel** (§5.2) — opens to the right of the graph on a
-commit selection. It is fixed-width and deliberately outside all of the above: no divider,
-no stored fraction, nothing to reset. The graph's track absorbs it, and opening it must
-never resize the two panes to its left.
+A fourth column — the **commit info panel** (§5.2) — opens to the right of the graph when
+a row's right-click menu asks for it. It is fixed-width and deliberately outside all of the
+above: no divider, no stored fraction, nothing to reset. The graph's track absorbs it, and
+opening it must never resize the two panes to its left.
 
 ### 4.1 Title bar and menu
 
@@ -293,42 +294,87 @@ original modal design.
 Staged Changes (2)          [− unstage all]
   M  src/main.rs
 Changes (14)                [+ stage all]
-  2 selected   [↺ discard] [clear]
-  ☑ M  README.md                  [↺] [+]
-  ☑ M  src/lib.rs                 [↺] [+]
-  ☐ D  old.txt                    [↺] [+]
-    ?  notes.txt                       [+]
+  M  README.md                        [↺] [+]
+  M  lib.rs      src                  [↺] [+]   ← selected ┐ ctrl-clicked,
+  D  old.txt     docs/archive         [↺] [+]   ← selected ┘ then right-clicked
+  ?  notes.txt   docs                      [+]
+                             ┌──────────────────────────────┐
+                             │ Stage 2 files                │
+                             │ Discard changes to 2 files…  │
+                             └──────────────────────────────┘
 ```
 
 - **Commit commits staged files only.** Disabled when nothing is staged or the message is
   empty.
-- File rows: status letter, path (ellipsized head-first so the filename stays visible),
-  hover reveals `+`/`−` stage/unstage buttons. **Click a file → its diff opens in the right
-  pane** (§5.4). The section the row is in decides which two sides get compared, because
-  that is the only thing that knows: a partly-staged file appears in both lists at once
-  with a different diff on each.
+- File rows: status letter, **filename**, then the directory trailing behind it in muted
+  smaller type; hover reveals `+`/`−` stage/unstage buttons. The filename leads because it
+  is what the row is for and what the eye scans a list of changes by — a left-aligned full
+  path buries it behind however deep the file happens to sit. When the row runs out of
+  room the directory is trimmed first, and both halves are trimmed at the tail: what a
+  path can afford to lose is its deepest folder, not the segment naming the project. The
+  full path stays on the row's tooltip.
+- **Never a folder row.** Status is read with `-uall` (§8.2) so a wholly-untracked
+  directory is listed as its files rather than collapsed to `? dir/`. Collapsed, staging
+  the row replaced it with N file rows — the thing you looked at was not the thing you
+  acted on — and the repo row's untracked count meant folders while every count beside it
+  meant files.
+- **Click a file → its diff opens in the right pane** (§5.4). The section the row is in
+  decides which two sides get compared, because that is the only thing that knows: a
+  partly-staged file appears in both lists at once with a different diff on each.
+- **Ctrl-click and shift-click build a selection; right-click acts on it.** Staging six of
+  fourteen files is the pane's most ordinary job, and one `+` per file is six round trips
+  through the write queue for what is one act. A modified click therefore selects instead
+  of opening a diff — a diff per ctrl-click would spawn `git diff` for every row picked on
+  the way to staging them, and leave the right pane on whichever was last. Shift extends
+  from the last row clicked deliberately, so the same anchor holds while the range is
+  dragged up and down. Four rules, none of them negotiable:
+  - **A selection belongs to one section.** *Staged* and *Changes* have opposite verbs, so
+    a set spanning both leaves the menu with nothing honest to offer. Ctrl-clicking across
+    the divide starts a new selection rather than growing the old one.
+  - **Right-clicking a row outside the selection replaces it**, the way every file list
+    does. The menu must never act on rows the user cannot see are picked.
+  - **The row's own `+`/`−`/`↺` still act on that row alone**, selected or not. A button
+    attached to one row that quietly acted on five would be the tick column back in a
+    worse form.
+  - **The selection is transient.** It survives no repo switch, and staging clears it by
+    construction: the rows leave the section and the selection empties with them, rather
+    than lingering over whatever slid up into their place. Nothing about it is persisted
+    (§9.5) — it is not state the backend owns.
+- **The menu**, per section: *Stage N files* / *Unstage N files*; *Discard changes to N
+  files…* in *Changes* only, dropping untracked rows and saying so when it does (git
+  rejects a pathspec list wholesale, so one `?` row would take the whole discard down with
+  it); *Reveal in File Explorer* on a single row only, because `explorer /select,` takes
+  one path and N files would mean N windows rather than one window with them all picked
+  out. A file that no longer exists — a `D` row — reveals the nearest folder that does,
+  never a silent jump to Documents.
+- **The selected rows and the open diff are marked differently**: selection fills the row,
+  the diff on screen gets an accent bar down its left edge. With six rows filled, a second
+  fill that only differed in shade would lose the one row the right pane is actually
+  showing.
 - **File list is capped at 100 entries per section.** The header must then read
   `Changes (100 of 3,412)`. "Stage all" still stages everything and its tooltip says so
   explicitly — the user must never commit files the UI silently hid.
 - **Discard** (`↺`, hover-revealed beside `+`) throws away a file's **unstaged** changes —
-  `git restore --worktree` (§8.6), so a partly-staged file keeps its staged half. Each
-  *Changes* row also carries a hover-revealed checkbox; with any ticked, a bar under the
-  section header offers `↺ discard` for the lot. Three limits, all deliberate:
+  `git restore --worktree` (§8.6), so a partly-staged file keeps its staged half. The `↺`
+  is one row; the context menu above discards a whole selection through the same dialog.
+  **Rows still carry no tick column and there is no selection bar**: a checkbox per row
+  made *Changes* read as a form to be filled in rather than a list of what changed, which
+  is the one thing this pane has to be scannable as, and it charged every user for a batch
+  most of them were not making. A ctrl-click costs the list nothing when nobody uses it.
+  Three limits, all deliberate:
   - **Only in *Changes*.** A staged row keeps `−` alone. Discard there could only mean
     "throw away the staged work too", which is not what a button sitting beside `−` reads
     as; unstaging first moves the row here, where discard means one plain thing.
-  - **Never on an untracked (`?`) row** — no checkbox, no `↺`, though the column stays
-    reserved so the paths below it stay aligned. Git has nothing to restore an untracked
+  - **Never on an untracked (`?`) row** — no `↺`. Git has nothing to restore an untracked
     file from, so discarding one could only be `git clean` deleting it. **Corgit does not
     delete files.**
-  - **Always confirmed**, single file or many, by a modal listing every path and saying
-    what goes and what stays. §8.3 refuses force-checkout because it "silently discards
-    work"; this is the same act done loudly, and it is the only thing in the app that
-    destroys work git cannot give back. `git revert` and `git reset` stay out of v1 (§2) —
-    this is neither.
+  - **Always confirmed**, by a modal listing every path and saying what goes and what
+    stays. §8.3 refuses force-checkout because it "silently discards work"; this is the
+    same act done loudly, and it is the only thing in the app that destroys work git cannot
+    give back. `git revert` and `git reset` stay out of v1 (§2) — this is neither.
 
-**Commit info panel** — a fourth column, opening to the right of the graph whenever a
-commit is selected:
+**Commit info panel** — a fourth column to the right of the graph, opened from a row's
+**right-click ▸ Info**:
 
 ```
 COMMIT                                        ✕
@@ -356,19 +402,33 @@ It is **not resizable** and has no stored fraction — the graph's `1fr` track a
 (§4). The only constraint it adds is that the graph must still clear its minimum width
 while the panel is open.
 
-**Closing it is deselecting the commit**, and there are three ways, because for a while
-there was effectively one and it was a trap:
+**Opening it is a deliberate act, and selecting a row is not one.** *Info* on a row's
+context menu is the only way in. Selection used to be: clicking any commit opened the
+column, which meant reading the graph — the ordinary thing to do in that pane — cost a
+320 px reflow every click, and shelled out to `git show` for a commit the user was only
+scrolling past. Right-click ▸ Info separates "I am looking at the graph" from "tell me
+about this one".
+
+Every row's menu carries *Info*, including rows with no ref badges on them, which before
+this had no menu at all. It is the first entry, above the branch entries (§8.3) that only
+appear on rows carrying a badge.
+
+**Once open, it follows the selection** and shows whichever commit is picked, so browsing
+with the column up works the way any detail view does — and the highlighted row and the
+column can never disagree about which commit is on screen. **Nothing is fetched while it is
+shut**: a click on a row with the column closed paints the row and does nothing else.
+
+**Closing it**, three ways, none of which disturb the selection:
 
 - the panel's own ✕;
-- the *Uncommitted Changes* node — the semantic "back to the working tree", but it only
-  exists when the tree is dirty, which is what made the ✕ the sole exit on a clean repo;
-- **Esc**, or a click on empty graph background past the last row.
+- **Esc**;
+- the *Uncommitted Changes* node, or a click on empty graph background past the last row.
+  Both mean "back to the working tree", which leaves no commit for the column to be about.
 
-**Clicking the already-selected row does nothing.** Selection is sticky here exactly as it
-is in the repo list; a toggle would mean an accidental double-click opens the column,
-reflows the graph, closes it and reflows again, with the row moving under the cursor. The
-implementation must also make re-selection *inert* rather than merely idempotent — see
-§8.5 on why re-fetching an immutable commit is a visible regression, not a no-op.
+**Asking for the same commit twice is inert**, not merely idempotent — see §8.5 on why
+re-fetching an immutable commit is a visible regression rather than a no-op. The state that
+makes this work is the hash the panel is *showing or fetching*, which is not the same as
+the hash it has already loaded.
 
 ### 5.3 Graph (right)
 
@@ -379,10 +439,19 @@ the graph keeps its scroll position and loaded pages, so glancing between the tw
 Selected repo only — one repo at a time, so graph cost never multiplies by 77.
 
 - **Synthetic "Uncommitted Changes" node** pinned at the top when the working tree is dirty.
-  Clicking it clears the commit selection, closing the info panel (§5.2). This is what ties
-  the panes into one coherent surface.
-- Rows: graph lanes · hash (short) · message · author · date · ref badges (branches, tags,
-  `origin/*`).
+  Clicking it selects the working tree, which also closes the info panel (§5.2). This is
+  what ties the panes into one coherent surface.
+- Rows: graph lanes · ref badges (branches, tags, `origin/*`) · message · author · date.
+  **No hash column**: the short oid is a lookup key, not something read while scanning
+  history, and it cost 56 px on every row to say what the info panel (§5.2), one context-menu
+  entry away, already answers on demand. The badges come **before** the message, not after
+  it: trailing a variable-length subject puts each branch name at a different x, so
+  answering "where is `main`" means reading every row. Anchored right after the lanes they
+  line up in a column next to the dots they name, which is also the pairing that makes a
+  badge and its dot read as one thing.
+- **The author column is right-aligned**, the one text column that is. Left-aligned in its
+  fixed 110 px box a short name leaves most of the box empty, and the date reads as adrift
+  from the row rather than as the pair it forms with the name.
 - **The HEAD commit's row is marked.** Its dot is drawn larger with a halo, and the row
   carries a low-alpha tint of its own lane colour. Both are keyed off `branch.oid` from
   §8.2 rather than off the current branch's ref badge, so a detached HEAD — the state where
@@ -395,10 +464,11 @@ Selected repo only — one repo at a time, so graph cost never multiplies by 77.
   fixed-width and right-aligned; at 19 characters it costs ~140 px, so it is laid out
   before the message column gets its remaining space.
 - Loads **300 commits at a time** with a "Load more" row at the bottom.
-- Click a commit → the commit info panel opens beside the graph (§5.2). Clicking the same
-  row again leaves it open; Esc or a click on empty background past the last row closes it.
-- Right-click a commit → Copy hash, Copy message, Open in VS Code. (Thin by design — the
-  graph is a viewer in v1.)
+- Click a commit → it is selected, and nothing else happens. **The info panel does not
+  open on selection** (§5.2); *Info* on the row's context menu opens it.
+- Right-click a commit → **Info** first, then the branch entries for any ref badges the row
+  carries (§8.3). Copy hash, Copy message and Open in VS Code belong here too. (Thin by
+  design — the graph is a viewer in v1.)
 
 **Rendering: SVG lanes + virtualized DOM rows.** Not canvas. A few hundred SVG paths for
 the lanes, HTML rows for text — this gives text selection, hover and context menus for
@@ -638,12 +708,16 @@ Repos nested deeper are out of scope by design: open that folder as its own root
 ### 8.2 Status — one command gives everything
 
 ```
-git --no-optional-locks status --porcelain=v2 --branch -z
+git --no-optional-locks status --porcelain=v2 --branch -uall -z
 ```
 
 Yields `# branch.head`, `# branch.upstream`, `# branch.ab +N -M`, plus `1`/`2` (changed /
 renamed), `u` (unmerged → conflict state), `?` (untracked) records. Parse NUL-delimited.
 This single call populates the repo row *and* the middle pane.
+
+`-uall` is for §5.2's "never a folder row", not for speed, and it costs nothing: the
+measurement below found `-uall` no different from the default, because untracked scanning
+is a rounding error next to what it costs to start the process.
 
 ### 8.3 Branches
 
@@ -653,6 +727,7 @@ git switch <branch>                              # local
 git switch -c <branch> --track origin/<branch>   # remote-tracking
 git branch <new> <start-point>                   # create, stay put
 git switch -c <new> <start-point>                # create and check out
+git merge --no-edit <source>                     # into the checked-out branch
 ```
 
 The switcher lists **local branches, plus remote branches with no local counterpart**,
@@ -675,6 +750,28 @@ that was right-clicked, never HEAD. The name is checked against `check-ref-forma
 and against the local branches already in the graph as it is typed, so the obvious mistakes
 never reach git; everything else surfaces as git's own stderr, like any other write. A new
 branch never gets an upstream — that is `switch -c --track`'s job, and a different intent.
+
+**Merging a branch** (same menu): right-click a ref badge in the graph → *Merge `<ref>` into
+`<current>`*. One click, no modal — the label names both ends, which is the whole decision.
+Only the source is chosen; the destination is always the checked-out branch, and the command
+names no destination at all, so it is HEAD as git sees it rather than anything Corgit
+cached (§5.1). Remote-tracking badges are offered too: merging `origin/main` into the branch
+you are on is the same gesture, and it is the case Pull does not cover, since Pull only ever
+merges *your* upstream. The badge for the current branch itself offers nothing — merging a
+branch into itself is git's own no-op. On a detached HEAD the entry is absent entirely.
+
+`--no-edit` for the same reason Pull passes `--no-rebase`: user config (`merge.edit`,
+`GIT_MERGE_AUTOEDIT`) can otherwise summon an editor, and an editor spawned by a process
+with no console is a hang with nothing on screen to explain it. Never `--no-ff`: a
+fast-forward where one is possible is what was asked for, not a merge commit recording that
+Corgit was involved.
+
+A conflict is a normal outcome, not a special path — the merge fails like any other write,
+the status refresh that follows every write raises §13's conflict banner, and *Abort merge*
+is already the way out. The one thing merging needs that no other write does is to read
+**stdout as well as stderr** for its error text: a conflicting `git merge` exits non-zero
+with stderr empty and puts `CONFLICT (content): …` on stdout, so a stderr-only message
+would be blank in exactly the case that most needs a sentence.
 
 ### 8.4 Graph
 
