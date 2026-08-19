@@ -89,9 +89,20 @@ Code that *decides* something from cached status must be safe when the answer is
 see `remote::publish`, which pushes `HEAD` rather than a cached branch name for exactly
 this reason.
 
-**Hot vs cold (§6).** Pinned repos plus the selected one get FS watchers on `.git/HEAD`,
-`.git/refs` and `.git/index`; everything else waits for the 60 s sweep. Pinning is a
-latency decision as much as a layout one.
+**Watchers, not sweeps (§6).** Every repo gets one recursive FS watcher covering its
+working tree *and* `.git` — on Windows a subtree watch is one handle whatever its depth
+(measured: 69 repos = 17 ms, 73 handles, 4.4 MB), so §6's original "never watch the working
+tree" applies to inotify and not here. The status sweep is now a reconciliation pass: most
+ticks cover only repos no watcher would take, and a full pass runs every fifth tick.
+
+This is the one place where spending is worth it, because **the sweep is spawn-bound, not
+git-bound**: a bare `git version` costs 85 ms on the bench machine against 2–10 ms of
+actual work per repo, so §1's 300 ms budget is unreachable for as long as a tick spawns one
+process per repo. Tuning the status flags, the concurrency cap, or `core.fsmonitor` all aim
+at the 5–15 % that isn't spawn — measure before reaching for any of them.
+
+Hot vs cold survives only as layout: pinning decides where a repo sits in the list, not how
+fast it updates.
 
 **The graph lays itself out.** `graphLayout.ts` assigns lanes in-house; never shell out to
 `git log --graph`. Ref badges come from `for-each-ref`, not `%d` (§8.4).

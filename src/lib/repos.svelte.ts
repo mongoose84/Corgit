@@ -99,6 +99,10 @@ interface RepoStatusEvent {
   repoId: string;
   status: RepoStatus | null;
   error: string | null;
+  /** The pane's rows, sent only when this repo is the selected one — the
+   *  backend already had them, having read the same `git status` this event's
+   *  counts came from (§8.2). `null` for every other repo. */
+  files: FileChanges | null;
 }
 
 /** Whether the working tree has anything in it at all — the row answers "does
@@ -447,9 +451,16 @@ class RepoStore {
   }
 
   /** Every mutating command shares this shape: resolve the selected repo,
-   *  invoke, refresh the file list, surface a failure in `writeError`. The
-   *  row/status side updates itself via the `status:repo` event (§7). Returns
-   *  whether it succeeded, so e.g. the commit box only clears on success. */
+   *  invoke, surface a failure in `writeError`. Both the row *and* the file
+   *  list update themselves from the `status:repo` event (§7), which the
+   *  backend emits before the command returns — including after a failure,
+   *  since a failed stage can still have moved the index.
+   *
+   *  That event is why there is no `loadFiles()` here any more. There used to
+   *  be, and it made every stage, unstage, discard and commit read the same
+   *  repo's status twice: once in `write_and_refresh`, once again for the
+   *  paths. Returns whether it succeeded, so e.g. the commit box only clears
+   *  on success. */
   private async write(command: string, args: Record<string, unknown>): Promise<boolean> {
     const id = this.selectedId;
     if (!id) return false;
@@ -461,8 +472,6 @@ class RepoStore {
     } catch (err) {
       this.writeError = String(err);
       return false;
-    } finally {
-      await this.loadFiles();
     }
   }
 
@@ -583,6 +592,19 @@ class RepoStore {
 
   private applyRepoStatus(event: RepoStatusEvent): void {
     if (event.root !== this.root) return;
+
+    // Carried on the event rather than fetched: `repo_files` would re-run the
+    // very `git status` this event was built from, and on the bench machine
+    // that second spawn costs 60–340 ms of which almost all is process
+    // creation. Guarded on the selection anyway — the backend decides using
+    // the selection it knows about, and this one is the truth the pane is
+    // painted from, so a selection that moved while the event was in flight
+    // drops it here rather than showing another repo's files.
+    if (event.files && event.repoId === this.selectedId) {
+      this.files = event.files;
+      this.filesError = null;
+      this.loadingFiles = false;
+    }
 
     if (event.status) {
       this.statuses = { ...this.statuses, [event.repoId]: event.status };

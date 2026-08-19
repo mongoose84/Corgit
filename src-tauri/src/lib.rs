@@ -69,8 +69,10 @@ struct AppState {
     /// `Arc`-wrapped so the sweep can clone a handle into its per-repo tasks
     /// without needing an `AppHandle` there too (§6, §7 rule 2).
     write_queues: Arc<WriteQueues>,
-    /// FS watchers on the hot set — pinned ∪ selected (§6, build step 9).
-    hot_watchers: watch::HotWatchers,
+    /// FS watchers, one per repo (§6). No longer the hot set: on Windows a
+    /// subtree watch is one handle whatever its depth, so every repo gets one
+    /// and the sweep stops being the refresh mechanism.
+    watchers: watch::RepoWatchers,
     /// The View menu's two checkboxes' actual state — the checkboxes
     /// themselves only mirror this (§9.3: Rust owns state). The only piece of
     /// the menu bar still held here now that it is drawn in the webview
@@ -105,6 +107,12 @@ struct RootState {
     /// (§9.5), not the status cache: pins are truth, not something a sweep
     /// can regenerate.
     pins: HashSet<String>,
+    /// Repos no FS watcher could be established for (§6) — a network share,
+    /// a permissions failure, a `.git` file rather than a directory. These are
+    /// the only ones the frequent sweep still has to cover, because everything
+    /// else reports its own changes. Not persisted: whether a watch succeeds
+    /// is a fact about right now, and a relaunch is entitled to try again.
+    unwatched: HashSet<String>,
     /// Mirrors `pins` and the frontend's current selection so a relaunch can
     /// restore it (§9.5). Kept here rather than only in `roots.rs`'s on-disk
     /// copy so `set_selected_repo` has somewhere in memory to read it back
@@ -137,6 +145,7 @@ impl RootState {
         self.errors.retain(|id, _| known(id));
         self.last_fetch_at.retain(|id, _| known(id));
         self.auth_needed.retain(known);
+        self.unwatched.retain(known);
         // Unlike a pin, the selection is not the user's authored state — it is
         // where they happen to be — and a selection naming a repo the list no
         // longer shows would leave the middle pane describing nothing.
@@ -185,6 +194,18 @@ struct RepoStatusEvent {
     repo_id: String,
     status: Option<RepoStatus>,
     error: Option<String>,
+    /// The pane's rows, carried only when this repo is the selected one —
+    /// `None` for every other repo, which is what keeps the §1 memory budget
+    /// to counts alone for the other 76.
+    ///
+    /// This is what lets the frontend stop calling `repo_files` after every
+    /// write: that call re-ran the same `git status` this event was already
+    /// built from (§8.2). It also closes a staleness gap that had nothing to
+    /// do with speed — a stage done in the user's terminal reaches here
+    /// through `watch.rs`, and used to refresh the row's badge while leaving
+    /// the pane underneath it showing the pre-stage list until the repo was
+    /// reselected.
+    files: Option<FileChanges>,
 }
 
 #[tauri::command]
@@ -278,6 +299,11 @@ fn open_root(path: PathBuf, app: AppHandle) -> Result<RootView, String> {
         let mut current = state.root.lock().expect("root mutex poisoned");
         let generation = current.as_ref().map_or(0, |root| root.generation) + 1;
         *current = Some(RootState {
+            // Filled in by `sync_watchers` below, once we know which repos
+            // would actually take a watch. Empty means "everything is
+            // watched", so the first frequent tick before that call is a
+            // no-op rather than a full sweep.
+            unwatched: HashSet::new(),
             generation,
             path: root.clone(),
             repos: repos.clone(),
@@ -293,7 +319,7 @@ fn open_root(path: PathBuf, app: AppHandle) -> Result<RootView, String> {
 
     remember_root(&app, &root);
     start_sweep(&app, generation, repos.clone());
-    sync_hot_watchers(&app);
+    sync_watchers(&app);
 
     Ok(RootView {
         path: root,
@@ -360,7 +386,7 @@ fn refresh_root(app: AppHandle) -> Result<RootView, String> {
     };
 
     start_sweep(&app, generation, view.repos.clone());
-    sync_hot_watchers(&app);
+    sync_watchers(&app);
     Ok(view)
 }
 
@@ -631,15 +657,13 @@ fn toggle_pin(repo_id: String, app: AppHandle) -> Result<HashSet<String>, String
     };
 
     persist_root_settings(&app, &root_path, pins.clone(), selected);
-    sync_hot_watchers(&app);
     Ok(pins)
 }
 
 /// Unpin everything in one go (§5.1). A loop of `toggle_pin` from the
 /// frontend would do the same thing, but it would write `roots/<hash>.json`
-/// and resync the watchers once per pin — this is one write and one resync,
-/// and it cannot leave a half-cleared set behind if a call in the middle
-/// fails.
+/// once per pin — this is one write, and it cannot leave a half-cleared set
+/// behind if a call in the middle fails.
 #[tauri::command]
 fn clear_pins(app: AppHandle) -> Result<HashSet<String>, String> {
     let state = app.state::<AppState>();
@@ -651,7 +675,6 @@ fn clear_pins(app: AppHandle) -> Result<HashSet<String>, String> {
     };
 
     persist_root_settings(&app, &root_path, HashSet::new(), selected);
-    sync_hot_watchers(&app);
     Ok(HashSet::new())
 }
 
@@ -669,7 +692,12 @@ fn set_selected_repo(repo_id: Option<String>, app: AppHandle) -> Result<(), Stri
     };
 
     persist_root_settings(&app, &root_path, pins, selected.clone());
-    sync_hot_watchers(&app);
+    // Selection used to resync the watchers from here, because it was half of
+    // the hot set that defined them (§6). Every repo is watched now, so there
+    // is nothing to resync — and `emit_repo_status` reads this field to decide
+    // whether to carry the file list, which is the only thing selection still
+    // changes on this side.
+    //
     // Repository ▸ Fetch/Pull/Push used to be enabled and disabled from here,
     // because a native menu item's enabled state is a thing you set. The
     // frontend menu derives it from `repos.selectedId` instead (§4.1's table),
@@ -842,8 +870,44 @@ where
 /// debounced FS-watcher callbacks (§6) can call it directly, the same way
 /// `write_and_refresh` does after every mutating command.
 pub(crate) async fn emit_repo_status(app: &AppHandle, repo_id: &str, path: &Path) {
-    let status = status::query(path).await;
     let state = app.state::<AppState>();
+
+    // Whether the middle pane is looking at this repo decides how much of the
+    // read to keep: paths for the selected repo, counts for everyone else.
+    // Asked *before* the git call rather than after, because the answer picks
+    // the command — deciding afterwards would mean a second `git status` for
+    // the paths, which is precisely the spawn this exists to remove.
+    //
+    // Racing the user's selection here is harmless in the direction that
+    // matters: a selection that moves on mid-read publishes file lists the
+    // frontend drops, whereas one that arrives late leaves the pane to
+    // `repo_files`, which selection calls anyway.
+    let selected = {
+        let current = state.root.lock().expect("root mutex poisoned");
+        current
+            .as_ref()
+            .is_some_and(|root| root.selected.as_deref() == Some(repo_id))
+    };
+
+    // §7 rule 2, and it matters far more now than when this was reached only
+    // by the hot set: every repo is watched, and a commit writes `.git` a
+    // dozen times, so an unguarded read here would parse repos mid-mutation
+    // routinely rather than rarely. Blocking rather than `try_read` because
+    // unlike the sweep this refresh has no next tick to fall back on — it is
+    // the only thing that will publish this change.
+    //
+    // No deadlock with `write_and_refresh`: that releases its write guard
+    // before calling here, precisely so this can be taken.
+    let _read_guard = state.write_queues.read(repo_id).await;
+
+    let (status, files) = if selected {
+        match status::query_with_files(path).await {
+            Ok((status, files)) => (Ok(status), Some(files)),
+            Err(err) => (Err(err), None),
+        }
+    } else {
+        (status::query(path).await, None)
+    };
 
     let published = {
         let mut current = state.root.lock().expect("root mutex poisoned");
@@ -874,6 +938,7 @@ pub(crate) async fn emit_repo_status(app: &AppHandle, repo_id: &str, path: &Path
         repo_id: repo_id.to_string(),
         status: status.as_ref().ok().cloned(),
         error: status.as_ref().err().cloned(),
+        files,
     };
     if let Err(err) = app.emit(REPO_STATUS_EVENT, event) {
         log::warn!("could not publish repo status ({err})");
@@ -994,39 +1059,85 @@ async fn sweep(app: AppHandle, generation: u64, repos: Vec<Repo>) {
     }
 }
 
-/// Recomputes the hot set — pinned ∪ selected (§6) — from whatever root is
-/// currently open, and syncs the FS watchers to match. Called after anything
-/// that can change either half: `open_root`, `toggle_pin`,
-/// `set_selected_repo`, `refresh_root`.
-fn sync_hot_watchers(app: &AppHandle) {
+/// Points a watcher at every repo in the open root (§6) and records the ones
+/// that would not take a watch, which are the only repos the frequent sweep
+/// still has to visit.
+///
+/// Called from `open_root`, `refresh_root` and focus-gain — the three things
+/// that change *which repos exist* or whether we are watching at all. Pinning
+/// and selection no longer call it: they used to define the watched set, and
+/// now every repo is in it regardless (§6), so a pin toggle costs nothing here
+/// where it used to cost a watcher teardown and rebuild.
+fn sync_watchers(app: &AppHandle) {
     let state = app.state::<AppState>();
-    let current = state.root.lock().expect("root mutex poisoned");
-    let Some(root) = current.as_ref() else {
-        drop(current);
-        state.hot_watchers.clear();
-        return;
+
+    let repos: Vec<(String, PathBuf)> = {
+        let current = state.root.lock().expect("root mutex poisoned");
+        let Some(root) = current.as_ref() else {
+            drop(current);
+            state.watchers.clear();
+            return;
+        };
+        root.repos
+            .iter()
+            .map(|repo| (repo.id.clone(), repo.path.clone()))
+            .collect()
     };
 
-    let hot: Vec<(String, PathBuf)> = root
-        .repos
-        .iter()
-        .filter(|repo| root.pins.contains(&repo.id) || root.selected.as_deref() == Some(repo.id.as_str()))
-        .map(|repo| (repo.id.clone(), repo.path.clone()))
-        .collect();
-    drop(current);
+    let unwatched: HashSet<String> = state.watchers.sync(app, &repos).into_iter().collect();
+    if !unwatched.is_empty() {
+        // Worth a line in the log: a repo here refreshes on the sweep interval
+        // instead of instantly, and "why is this one row slow" has no other
+        // visible explanation.
+        log::info!("{} repo(s) could not be watched; they stay on the sweep", unwatched.len());
+    }
 
-    state.hot_watchers.sync(app, &hot);
+    let mut current = state.root.lock().expect("root mutex poisoned");
+    if let Some(root) = current.as_mut() {
+        root.unwatched = unwatched;
+    }
+}
+
+/// Which repos a sweep covers (§6). Two answers, because the watchers made
+/// the question worth asking: most ticks only owe something to the repos
+/// nothing is watching.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Scope {
+    /// Every repo — the reconciliation pass. Repairs whatever the watchers
+    /// could have missed: a dropped-event overflow, a change made while the
+    /// window was blurred and the watchers were down.
+    All,
+    /// Only repos with no working watcher, which is usually none of them and
+    /// therefore usually free.
+    Unwatched,
 }
 
 /// Sweep the currently open root, if any — a no-op with no root open. Shared
 /// by the focus-gained handler and the periodic ticker, both of which sweep
 /// whatever is open rather than a fixed repo list captured at start time.
-fn trigger_sweep(app: &AppHandle) {
+fn trigger_sweep(app: &AppHandle, scope: Scope) {
     let state = app.state::<AppState>();
     let current = state.root.lock().expect("root mutex poisoned");
     let Some(root) = current.as_ref() else { return };
-    let (generation, repos) = (root.generation, root.repos.clone());
+    let generation = root.generation;
+    let repos: Vec<Repo> = match scope {
+        Scope::All => root.repos.clone(),
+        Scope::Unwatched => root
+            .repos
+            .iter()
+            .filter(|repo| root.unwatched.contains(&repo.id))
+            .cloned()
+            .collect(),
+    };
     drop(current);
+
+    // Not merely wasteful — `sweep` publishes an event and rewrites the cache
+    // on every run, so an empty sweep would repaint the list every 60 s to say
+    // nothing. The common case with everything watched is exactly this.
+    if repos.is_empty() {
+        return;
+    }
+
     start_sweep(app, generation, repos);
 }
 
@@ -1038,7 +1149,11 @@ fn trigger_sweep(app: &AppHandle) {
 /// for the shared 8-process cap (§7.3) right when the UI most wants that
 /// budget for itself.
 fn on_focus(app: &AppHandle) {
-    trigger_sweep(app);
+    // Watchers first, then the sweep: the sweep is what covers the gap the
+    // dropped watchers left, and re-establishing them before it runs means
+    // nothing that changes *during* the sweep falls between the two.
+    sync_watchers(app);
+    trigger_sweep(app, Scope::All);
     start_ticker(app);
     start_fetch_ticker(app);
 }
@@ -1048,6 +1163,13 @@ fn on_focus(app: &AppHandle) {
 /// makes background CPU zero rather than merely low.
 fn on_blur(app: &AppHandle) {
     let state = app.state::<AppState>();
+
+    // Dropped, not merely ignored — §6's promise is that an unfocused window
+    // costs *no* background CPU, and watchers left running would wake us on
+    // every file a background build writes. That is low, not none. Rebuilding
+    // all of them on focus costs 17 ms, and the focus-gain sweep covers
+    // whatever happened while they were gone.
+    state.watchers.clear();
 
     let ticker = state.ticker.lock().expect("ticker mutex poisoned").take();
     if let Some(handle) = ticker {
@@ -1074,9 +1196,12 @@ fn start_ticker(app: &AppHandle) {
 
     let app = app.clone();
     *ticker = Some(tauri::async_runtime::spawn(async move {
+        let mut tick: u32 = 0;
         loop {
             tokio::time::sleep(interval).await;
-            trigger_sweep(&app);
+            tick = tick.wrapping_add(1);
+            let scope = if tick % RECONCILE_EVERY == 0 { Scope::All } else { Scope::Unwatched };
+            trigger_sweep(&app, scope);
         }
     }));
 }
@@ -1185,6 +1310,19 @@ async fn collect(
 
     (statuses, errors)
 }
+
+/// How many status ticks pass between full reconciliation sweeps (§6).
+///
+/// Every tick sweeps the repos nothing is watching, which is normally none of
+/// them and therefore free; every fifth also sweeps the rest, to repair what a
+/// watcher can miss — a dropped-event overflow, a change that landed while the
+/// window was blurred. At the default 60 s interval that is a full pass every
+/// five minutes.
+///
+/// The full pass is the expensive one — one process per repo, 1.2 s at best
+/// for 69 of them — which is precisely why it is no longer what keeps the rows
+/// current. Lowering this number gives back the cost the watchers removed.
+const RECONCILE_EVERY: u32 = 5;
 
 /// How many `git fetch` processes the fetch sweep runs at once (§6) — on top
 /// of, not instead of, the global 8-process cap in `git.rs` (§7.3). Lower
@@ -1296,8 +1434,15 @@ async fn fetch_sweep(app: AppHandle, generation: u64, repos: Vec<Repo>) {
 
         // A fetch just moved refs/remotes/*, which is what the status
         // sweep's ahead/behind reads (§8.2) — trigger one now rather than
-        // leaving badges stale for up to 60 s (§6).
-        trigger_sweep(&app);
+        // leaving badges stale until the next reconciliation pass (§6).
+        //
+        // `Scope::All` and not `Unwatched`: the watchers do cover this, since
+        // a fetch writes `.git/refs/remotes` inside every tree we watch, but
+        // it writes them for as many repos as the sweep just fetched at once,
+        // and each of those refreshes is subject to the per-repo throttle in
+        // `watch.rs`. One pass over the repos we know just changed is both
+        // cheaper and less racy than waiting for up to that many debounces.
+        trigger_sweep(&app, Scope::All);
     }
 
     state.fetch_sweeping.store(false, Ordering::SeqCst);
@@ -1460,7 +1605,7 @@ pub fn run() {
                 fetch_sweeping: AtomicBool::new(false),
                 fetch_ticker: Mutex::new(None),
                 write_queues: Arc::new(WriteQueues::default()),
-                hot_watchers: watch::HotWatchers::default(),
+                watchers: watch::RepoWatchers::default(),
                 // No repo is open yet, so the panes default to visible.
                 pane_visibility: Mutex::new(menu::PaneVisibility::default()),
             });
@@ -1544,6 +1689,7 @@ mod tests {
             errors: HashMap::new(),
             last_fetch_at: repos.iter().map(|id| (id.to_string(), 1_700_000_000)).collect(),
             auth_needed: HashSet::new(),
+            unwatched: HashSet::new(),
             pins: pins.iter().map(|id| id.to_string()).collect(),
             selected: selected.map(str::to_string),
         }
