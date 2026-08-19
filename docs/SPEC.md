@@ -293,11 +293,10 @@ original modal design.
 Staged Changes (2)          [− unstage all]
   M  src/main.rs
 Changes (14)                [+ stage all]
-  2 selected   [↺ discard] [clear]
-  ☑ M  README.md                  [↺] [+]
-  ☑ M  src/lib.rs                 [↺] [+]
-  ☐ D  old.txt                    [↺] [+]
-    ?  notes.txt                       [+]
+  M  README.md                  [↺] [+]
+  M  src/lib.rs                 [↺] [+]
+  D  old.txt                    [↺] [+]
+  ?  notes.txt                       [+]
 ```
 
 - **Commit commits staged files only.** Disabled when nothing is staged or the message is
@@ -311,21 +310,22 @@ Changes (14)                [+ stage all]
   `Changes (100 of 3,412)`. "Stage all" still stages everything and its tooltip says so
   explicitly — the user must never commit files the UI silently hid.
 - **Discard** (`↺`, hover-revealed beside `+`) throws away a file's **unstaged** changes —
-  `git restore --worktree` (§8.6), so a partly-staged file keeps its staged half. Each
-  *Changes* row also carries a hover-revealed checkbox; with any ticked, a bar under the
-  section header offers `↺ discard` for the lot. Three limits, all deliberate:
+  `git restore --worktree` (§8.6), so a partly-staged file keeps its staged half. **One row
+  at a time**: rows carry no tick column and there is no selection bar. A checkbox per row
+  made *Changes* read as a form to be filled in rather than a list of what changed, which
+  is the one thing this pane has to be scannable as. The confirmation dialog still takes a
+  list of paths, so a batch discard can return later without the list itself having to
+  carry a selection. Three limits, all deliberate:
   - **Only in *Changes*.** A staged row keeps `−` alone. Discard there could only mean
     "throw away the staged work too", which is not what a button sitting beside `−` reads
     as; unstaging first moves the row here, where discard means one plain thing.
-  - **Never on an untracked (`?`) row** — no checkbox, no `↺`, though the column stays
-    reserved so the paths below it stay aligned. Git has nothing to restore an untracked
+  - **Never on an untracked (`?`) row** — no `↺`. Git has nothing to restore an untracked
     file from, so discarding one could only be `git clean` deleting it. **Corgit does not
     delete files.**
-  - **Always confirmed**, single file or many, by a modal listing every path and saying
-    what goes and what stays. §8.3 refuses force-checkout because it "silently discards
-    work"; this is the same act done loudly, and it is the only thing in the app that
-    destroys work git cannot give back. `git revert` and `git reset` stay out of v1 (§2) —
-    this is neither.
+  - **Always confirmed**, by a modal listing every path and saying what goes and what
+    stays. §8.3 refuses force-checkout because it "silently discards work"; this is the
+    same act done loudly, and it is the only thing in the app that destroys work git cannot
+    give back. `git revert` and `git reset` stay out of v1 (§2) — this is neither.
 
 **Commit info panel** — a fourth column, opening to the right of the graph whenever a
 commit is selected:

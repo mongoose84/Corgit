@@ -16,19 +16,10 @@
     /** This row's diff is the one currently open — marked so the file lists and
      *  the right pane's tab cannot disagree about what is being shown. */
     selected?: boolean;
-    /** The list this row sits in offers multi-select (§5.2) — only *Changes*
-     *  does. Set on **every** row of such a list, including ones that cannot
-     *  be picked, so the column is reserved and the paths below it stay in a
-     *  straight line instead of stepping sideways at each untracked file. */
-    selectable?: boolean;
-    checked?: boolean;
-    /** Absent on a row that reserves the column but cannot be picked: an
-     *  untracked file has nothing to restore from, so discard does not apply
-     *  to it (§5.2). Its checkbox is then simply not drawn. */
-    onCheck?: (checked: boolean) => void;
-    /** Absent for the same reason as `onCheck`, and on every staged row —
-     *  discarding there would have to mean throwing away the staged work too,
-     *  which is not what the button says. */
+    /** Absent on an untracked row — git has nothing to restore it from, so
+     *  discard does not apply to it (§5.2) — and on every staged row, where
+     *  discarding would have to mean throwing away the staged work too, which
+     *  is not what the button says. */
     onDiscard?: () => void;
   }
 
@@ -39,9 +30,6 @@
     disabled = false,
     onOpen,
     selected = false,
-    selectable = false,
-    checked = false,
-    onCheck,
     onDiscard,
   }: Props = $props();
 
@@ -85,22 +73,6 @@
 </script>
 
 <div class="file-row" class:selected>
-  {#if selectable}
-    <!-- Kept outside the `.open` button rather than inside it: a checkbox
-         nested in a button is neither valid nor clickable on its own. -->
-    <span class="check-slot">
-      {#if onCheck}
-        <input
-          type="checkbox"
-          class="check"
-          {checked}
-          {disabled}
-          onchange={(event) => onCheck(event.currentTarget.checked)}
-          aria-label="Select {entry.path}"
-        />
-      {/if}
-    </span>
-  {/if}
   <!-- The path is deliberately not `.selectable` here, unlike everywhere else
        readable in the app: `cursor: text` on something that opens a diff when
        clicked is a lie, and the full path is on the title attribute anyway. -->
@@ -180,34 +152,6 @@
     border: 0;
     background: none;
     text-align: left;
-  }
-
-  /* Reserved by every row of a selectable list, filled by only some — see the
-     `selectable` prop. */
-  .check-slot {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    flex: 0 0 auto;
-    width: 12px;
-  }
-
-  /* Hidden at rest like the stage toggle, for the same reason: a checkbox per
-     row would make the list read as a form rather than a list of changes.
-     `:checked` keeps a picked row's box visible once the pointer has moved on
-     — a selection is a standing fact, not a hover state. */
-  .check {
-    width: 12px;
-    height: 12px;
-    margin: 0;
-    accent-color: var(--accent);
-    opacity: 0;
-  }
-
-  .file-row:hover .check,
-  .check:checked,
-  .check:focus-visible {
-    opacity: 1;
   }
 
   .status {
