@@ -1056,12 +1056,26 @@ fn start_sweep(app: &AppHandle, generation: u64, repos: Vec<Repo>) {
 }
 
 async fn sweep(app: AppHandle, generation: u64, repos: Vec<Repo>) {
-    let write_queues = {
+    let (write_queues, reconcile) = {
         let state = app.state::<AppState>();
         if state.sweeping.swap(true, Ordering::SeqCst) {
             return;
         }
-        state.write_queues.clone()
+
+        // Which repo this sweep owes a *full* republish to when it lands, if
+        // it is covering that repo at all. Taken here because `collect` below
+        // consumes the list, and because the answer is only interesting for
+        // the one repo whose paths anybody is looking at.
+        let reconcile = {
+            let current = state.root.lock().expect("root mutex poisoned");
+            current.as_ref().and_then(|root| {
+                let id = root.selected.as_ref()?;
+                let repo = repos.iter().find(|repo| &repo.id == id)?;
+                Some((repo.id.clone(), repo.path.clone()))
+            })
+        };
+
+        (state.write_queues.clone(), reconcile)
     };
 
     let started = Instant::now();
@@ -1125,6 +1139,31 @@ async fn sweep(app: AppHandle, generation: u64, repos: Vec<Repo>) {
             // this one for the same root file (§6 — "a sweep never starts
             // while one is in flight").
             state.sweeping.store(false, Ordering::SeqCst);
+
+            // A sweep publishes counts, and counts are all the *rows* need.
+            // The middle pane's file list and the open diff are fed by
+            // `status:repo` instead (§5.2, §5.4), so reconciling the rows
+            // without reconciling the selected repo in full leaves those two
+            // describing the working tree as it was when a watcher last
+            // fired. The case that makes it visible is the one where the
+            // sweep itself has nothing to show: editing a file that was
+            // already modified moves no count, so the row is right, the list
+            // is right, and the diff under them is stale.
+            //
+            // This is what covers the window with no watchers at all — §6
+            // drops them on blur, so *every* change made in an editor while
+            // Corgit is in the background arrives through the focus-gain
+            // sweep and nothing else. It also covers repos that could never
+            // be watched (a linked worktree, a network share), which have no
+            // other path to a fresh diff than this one.
+            //
+            // One extra `git status` for one repo, on sweeps that covered it.
+            if let Some((repo_id, path)) = reconcile {
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    emit_repo_status(&app, &repo_id, &path).await;
+                });
+            }
         }
         Outcome::Restart(generation, repos) => {
             // Cleared before restarting, not after: `start_sweep` spawns a

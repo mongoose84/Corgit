@@ -533,8 +533,14 @@ One file at a time, read-only, opened by clicking a file row in either §5.2 mod
   artefact. An untracked file below that limit renders as an all-additions diff, since that
   is what it is.
 - Switching repos closes the diff — the path it names may not exist in the new one. Esc
-  closes it. A write to the repo (stage, unstage, commit) re-reads an open working-tree
-  diff; a commit's diff is immutable and is never re-read.
+  closes it. A commit's diff is immutable and is never re-read.
+- **An open working-tree diff is live.** Anything that moves the file re-reads it — our own
+  writes (stage, unstage, commit), an editor saving over it, a terminal `git checkout`.
+  This costs nothing extra to arrange: the diff re-reads on the per-repo status event, so
+  every path that publishes one (§6) already feeds it. What it *does* require is that those
+  paths never lose a change, which is the reason for both the trailing-edge coalesce and
+  the selected-repo republish below — a diff is the one view where a missed refresh is not
+  merely late, because nothing else on screen will contradict it.
 
 ---
 
@@ -585,7 +591,12 @@ fires thousands of events for paths git will never report. Two defences, both of
 only ever make a refresh *late*, never wrong:
 
 1. **Coalesce per repo** — at most one status read per repo per ~2 s, however many events
-   arrive. A minute-long build costs that repo ≤30 reads, not thousands.
+   arrive. A minute-long build costs that repo ≤30 reads, not thousands. **Deferred, not
+   dropped:** an event turned away inside the window schedules the read for the end of it
+   instead. Leading-edge-only coalescing is what turns "late" into "wrong" — the last write
+   of a burst is the one describing the file as it now stands, and it is the write most
+   likely to arrive inside its predecessor's window, so dropping it leaves an open diff
+   (§5.4) showing the previous save indefinitely.
 2. **Skip the usual build outputs before debouncing** — `node_modules`, `target`, `dist`,
    `bin`, `obj`, `.next`, `.venv`. This is a guess and it is allowed to be wrong: a repo
    that really does track `dist/` gets its refresh from the reconciliation sweep instead.
@@ -624,6 +635,14 @@ still costs 69 processes and is why it happens every five minutes rather than ev
 minute. An unwatchable repo is not made to wait for that: it is on the 60 s cadence it
 always had.
 
+**A sweep that covered the selected repo republishes it in full.** The sweep's own event
+carries counts, which is all the rows need; the middle pane's file list and the open diff
+are fed by the per-repo status event instead, and a change that moves no count — editing a
+file already counted as modified — is invisible to everything except them. So the pass ends
+with one more read of that one repo. This is what makes a change reach the diff at all when
+there were no watchers to notice it: they are dropped on blur, so every edit made in an
+editor while Corgit is in the background arrives on the focus-gain sweep and nowhere else.
+
 **Re-entrancy guard:** a sweep never starts while one is in flight — the tick is skipped,
 not queued. At 77 repos the status sweep should finish in ~150 ms and never collide, so
 this is cheap insurance rather than an expected path. Individual repos are also skipped
@@ -637,7 +656,9 @@ restart and the root gets an immediate status sweep. With no tray and close-mean
 **The watchers are dropped on blur too, for that same promise.** Left running they would
 wake the app on every background build — *low* CPU rather than *no* CPU, a weaker guarantee
 than the one above, and the one above is worth keeping. Re-establishing all of them costs
-17 ms, and the focus-gain sweep already covers whatever changed while they were gone.
+17 ms, and the focus-gain sweep already covers whatever changed while they were gone —
+rows from the sweep itself, the selected repo's files and open diff from the republish
+above.
 
 Fetch additionally: skips repos with no remote, skips repos fetched within the last
 interval, and records `last_fetch_at` per repo.
