@@ -7,6 +7,7 @@ mod discovery;
 mod git;
 mod graph;
 mod menu;
+mod problems;
 mod remote;
 mod roots;
 mod settings;
@@ -37,6 +38,10 @@ const MAX_RECENT_ROOTS: usize = 10;
 
 const SWEEP_EVENT: &str = "status:sweep";
 const REPO_STATUS_EVENT: &str = "status:repo";
+/// A failure was added to the Recent Problems ring (§13). Emitted so the
+/// *other* windows learn about it — the one that triggered the operation
+/// already has the error in hand.
+const PROBLEM_EVENT: &str = "problem:recorded";
 
 /// Rust owns the state; the frontend is a view over it (SPEC.md §9.3).
 ///
@@ -417,13 +422,13 @@ async fn repo_files(repo_id: String, app: AppHandle) -> Result<FileChanges, Stri
 
 #[tauri::command]
 async fn stage_paths(repo_id: String, paths: Vec<String>, app: AppHandle) -> Result<(), String> {
-    write_and_refresh(&app, repo_id, |path| async move { commit::stage(&path, &paths).await })
+    write_and_refresh(&app, repo_id, "Stage", |path| async move { commit::stage(&path, &paths).await })
         .await
 }
 
 #[tauri::command]
 async fn unstage_paths(repo_id: String, paths: Vec<String>, app: AppHandle) -> Result<(), String> {
-    write_and_refresh(&app, repo_id, |path| async move { commit::unstage(&path, &paths).await })
+    write_and_refresh(&app, repo_id, "Unstage", |path| async move { commit::unstage(&path, &paths).await })
         .await
 }
 
@@ -432,23 +437,23 @@ async fn unstage_paths(repo_id: String, paths: Vec<String>, app: AppHandle) -> R
 /// `commit::discard`'s flags, and the confirmation entirely in the frontend.
 #[tauri::command]
 async fn discard_paths(repo_id: String, paths: Vec<String>, app: AppHandle) -> Result<(), String> {
-    write_and_refresh(&app, repo_id, |path| async move { commit::discard(&path, &paths).await })
+    write_and_refresh(&app, repo_id, "Discard", |path| async move { commit::discard(&path, &paths).await })
         .await
 }
 
 #[tauri::command]
 async fn stage_all(repo_id: String, app: AppHandle) -> Result<(), String> {
-    write_and_refresh(&app, repo_id, |path| async move { commit::stage_all(&path).await }).await
+    write_and_refresh(&app, repo_id, "Stage all", |path| async move { commit::stage_all(&path).await }).await
 }
 
 #[tauri::command]
 async fn unstage_all(repo_id: String, app: AppHandle) -> Result<(), String> {
-    write_and_refresh(&app, repo_id, |path| async move { commit::unstage_all(&path).await }).await
+    write_and_refresh(&app, repo_id, "Unstage all", |path| async move { commit::unstage_all(&path).await }).await
 }
 
 #[tauri::command]
 async fn commit_repo(repo_id: String, message: String, app: AppHandle) -> Result<(), String> {
-    write_and_refresh(&app, repo_id, |path| async move { commit::commit(&path, &message).await })
+    write_and_refresh(&app, repo_id, "Commit", |path| async move { commit::commit(&path, &message).await })
         .await
 }
 
@@ -506,7 +511,7 @@ async fn file_diff(
 /// trying to classify git's stderr (§8.3: never force-checkout).
 #[tauri::command]
 async fn switch_branch(repo_id: String, name: String, kind: graph::RefKind, app: AppHandle) -> Result<(), String> {
-    write_and_refresh(&app, repo_id, |path| async move {
+    write_and_refresh(&app, repo_id, "Switch branch", |path| async move {
         match kind {
             graph::RefKind::Local => branch::switch_local(&path, &name).await,
             graph::RefKind::Remote => branch::switch_remote_tracking(&path, &name).await,
@@ -528,7 +533,7 @@ async fn create_branch(
     checkout: bool,
     app: AppHandle,
 ) -> Result<(), String> {
-    write_and_refresh(&app, repo_id, |path| async move {
+    write_and_refresh(&app, repo_id, "Create branch", |path| async move {
         branch::create(&path, &name, &start_point, checkout).await
     })
     .await
@@ -546,7 +551,7 @@ async fn create_branch(
 /// is the outcome anyway.
 #[tauri::command]
 async fn delete_branch(repo_id: String, name: String, force: bool, app: AppHandle) -> Result<(), String> {
-    write_and_refresh(&app, repo_id, |path| async move { branch::delete(&path, &name, force).await }).await
+    write_and_refresh(&app, repo_id, "Delete branch", |path| async move { branch::delete(&path, &name, force).await }).await
 }
 
 /// Merging a branch into the checked-out one (§8.3) — right-click a ref badge
@@ -560,7 +565,7 @@ async fn delete_branch(repo_id: String, name: String, force: bool, app: AppHandl
 /// screen by the time the frontend shows the message.
 #[tauri::command]
 async fn merge_branch(repo_id: String, name: String, app: AppHandle) -> Result<(), String> {
-    write_and_refresh(&app, repo_id, |path| async move { branch::merge(&path, &name).await }).await
+    write_and_refresh(&app, repo_id, "Merge", |path| async move { branch::merge(&path, &name).await }).await
 }
 
 /// The dirty-tree checkout failure's other half (§8.3): launches VS Code on
@@ -793,6 +798,27 @@ fn clear_pins(app: AppHandle) -> Result<HashSet<String>, String> {
     Ok(HashSet::new())
 }
 
+/// *Help ▸ Recent Problems…* (§13, §4.1). Reads the process-wide ring, so
+/// every window sees the same history of the same herd (§9.2).
+#[tauri::command]
+fn recent_problems() -> Vec<problems::Problem> {
+    problems::recent()
+}
+
+/// *Clear* in the Problems window. Empties the ring only — `corgit.log` keeps
+/// everything, because clearing a view of the record must not destroy the
+/// record. Same rule as §13's suppression, which silences a notification and
+/// never a condition.
+#[tauri::command]
+fn clear_problems(app: AppHandle) {
+    problems::clear();
+    // The list is process-wide, so a second window showing the old entries
+    // after this would be showing something that no longer exists.
+    if let Err(err) = app.emit(PROBLEM_EVENT, ()) {
+        log::warn!("could not publish the problems clear ({err})");
+    }
+}
+
 /// The frontend's current selection, mirrored server-side (§9.5's persisted
 /// `last_selected`, and the input to the hot set in §6/build step 9's
 /// watchers). `None` when nothing is selected.
@@ -842,26 +868,26 @@ fn persist_root_settings(app: &AppHandle, root_path: &Path, pins: HashSet<String
 /// the freshest signal about whether the repo still needs attention.
 #[tauri::command]
 async fn fetch_repo(repo_id: String, app: AppHandle) -> Result<(), String> {
-    let result = write_and_refresh(&app, repo_id.clone(), |path| async move { remote::fetch(&path).await }).await;
+    let result = write_and_refresh(&app, repo_id.clone(), "Fetch", |path| async move { remote::fetch(&path).await }).await;
     record_fetch_attempt(&app, &repo_id);
     result
 }
 
 #[tauri::command]
 async fn pull_repo(repo_id: String, app: AppHandle) -> Result<(), String> {
-    write_and_refresh(&app, repo_id, |path| async move { remote::pull(&path).await }).await
+    write_and_refresh(&app, repo_id, "Pull", |path| async move { remote::pull(&path).await }).await
 }
 
 #[tauri::command]
 async fn push_repo(repo_id: String, app: AppHandle) -> Result<(), String> {
-    write_and_refresh(&app, repo_id, |path| async move { remote::push(&path).await }).await
+    write_and_refresh(&app, repo_id, "Push", |path| async move { remote::push(&path).await }).await
 }
 
 /// §13's merge-conflict banner: "Abort merge", one of its exactly two ways
 /// out (the other is *Open in VS Code*).
 #[tauri::command]
 async fn merge_abort(repo_id: String, app: AppHandle) -> Result<(), String> {
-    write_and_refresh(&app, repo_id, |path| async move { remote::merge_abort(&path).await }).await
+    write_and_refresh(&app, repo_id, "Abort merge", |path| async move { remote::merge_abort(&path).await }).await
 }
 
 /// A branch with no upstream configured (§8.7). `remote::publish` pushes
@@ -870,7 +896,7 @@ async fn merge_abort(repo_id: String, app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 async fn publish_branch(repo_id: String, app: AppHandle) -> Result<(), String> {
     current_branch(&app, &repo_id)?;
-    write_and_refresh(&app, repo_id, |path| async move { remote::publish(&path).await }).await
+    write_and_refresh(&app, repo_id, "Publish branch", |path| async move { remote::publish(&path).await }).await
 }
 
 /// Commit, then push in one step. Whether that push needs `-u origin` is
@@ -898,7 +924,7 @@ async fn commit_and_push(repo_id: String, message: String, app: AppHandle) -> Re
     // it down the plain-push path to fail in git's words instead of ours.
     let needs_publish = publish_needed(&app, &repo_id)?;
 
-    write_and_refresh(&app, repo_id, |path| async move {
+    write_and_refresh(&app, repo_id, "Commit + Push", |path| async move {
         commit::commit(&path, &message).await?;
         if needs_publish { remote::publish(&path).await } else { remote::push(&path).await }
     })
@@ -962,7 +988,12 @@ fn record_fetch_attempt(app: &AppHandle, repo_id: &str) {
 /// publish its status regardless of whether `op` succeeded — a failed stage
 /// or commit can still have changed something (e.g. a partial index update),
 /// and the row must never show data staler than the attempt just made.
-async fn write_and_refresh<F, Fut>(app: &AppHandle, repo_id: String, op: F) -> Result<(), String>
+async fn write_and_refresh<F, Fut>(
+    app: &AppHandle,
+    repo_id: String,
+    operation: &str,
+    op: F,
+) -> Result<(), String>
 where
     F: FnOnce(PathBuf) -> Fut,
     Fut: std::future::Future<Output = Result<(), String>>,
@@ -973,6 +1004,21 @@ where
         let _write_guard = app.state::<AppState>().write_queues.write(&repo_id).await;
         op(path.clone()).await
     };
+
+    // Recorded here rather than at each call site for the same reason the
+    // status refresh below is: this is the one shape every mutating command
+    // has, so a new write command cannot forget to be in the record (§13).
+    //
+    // `operation` is the user's word for what they asked — "Push", "Merge" —
+    // not the git argv, which `git.rs` already logged next to this stderr.
+    // The Problems list answers "what of mine failed"; the log answers "with
+    // what command", and they are different questions.
+    if let Err(err) = &result {
+        let problem = problems::record(Some(repo_id.clone()), operation, err);
+        if let Err(err) = app.emit(PROBLEM_EVENT, problem) {
+            log::warn!("could not publish a recorded problem ({err})");
+        }
+    }
 
     emit_repo_status(app, &repo_id, &path).await;
     result
@@ -1819,6 +1865,8 @@ pub fn run() {
             toggle_pin,
             clear_pins,
             set_selected_repo,
+            recent_problems,
+            clear_problems,
             menu::menu_command,
             menu::publish_pane_visibility,
         ])

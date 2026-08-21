@@ -1,8 +1,7 @@
 <script lang="ts">
   import { isDirty, publishReason, repos, type Repo, type RepoStatus } from '../repos.svelte';
   import ContextMenu from '../ContextMenu.svelte';
-  import Popover from '../Popover.svelte';
-  import GitErrorNotice from '../GitErrorNotice.svelte';
+  import { notices } from '../notices.svelte';
 
   interface Props {
     repo: Repo;
@@ -49,10 +48,14 @@
   // freshest, most actionable signal — it wins over a stale status-read
   // failure when both happen to be present (§5.1, §13).
   const rowError = $derived(repos.rowErrors[repo.id] ?? error);
+  // Only the write failure may be dismissed (§13's event-versus-state rule).
+  // `error` is the sweep's status-read failure, republished on every tick, so
+  // a Dismiss on it would be undone within one interval — the button would be
+  // broken by construction rather than merely unhelpful.
+  const canDismissError = $derived(repos.rowErrors[repo.id] !== undefined);
   const canPullRow = $derived(status !== undefined && status.behind > 0 && status.conflicted === 0);
 
   let menuPos = $state<{ x: number; y: number } | null>(null);
-  let errorPopoverPos = $state<{ x: number; y: number } | null>(null);
   let pulling = $state(false);
 
   function openMenu(event: MouseEvent) {
@@ -60,10 +63,29 @@
     menuPos = { x: event.clientX, y: event.clientY };
   }
 
-  function openErrorPopover(event: MouseEvent) {
+  /** The badge points at the error; it does not render a second copy of it
+   *  (§5.1, §13). Selecting the repo is what raises its banner, which is the
+   *  one surface wide enough for a headline, an action and *Details*.
+   *
+   *  Cheap and non-destructive: selection drives the middle pane and graph,
+   *  and the compose pane's message is component-local, so nothing typed is
+   *  lost by arriving here. */
+  function showError(event: MouseEvent) {
     event.preventDefault();
     event.stopPropagation();
-    errorPopoverPos = { x: event.clientX, y: event.clientY };
+    if (rowError !== undefined) {
+      // "Status" when the badge is a failed sweep read rather than a write the
+      // user asked for — there is no operation to name in that case, and
+      // Retry would re-run nothing.
+      const operation = repos.rowOperation(repo.id);
+      notices.raise(
+        repo.id,
+        operation ?? 'Status',
+        rowError,
+        operation === undefined ? undefined : () => void repos.retryRow(repo.id),
+      );
+    }
+    if (!selected) repos.select(repo.id);
   }
 
   function togglePin(event: MouseEvent) {
@@ -89,10 +111,19 @@
 
   const menuItems = $derived([
     { label: pinned ? 'Unpin' : 'Pin', onSelect: () => void repos.togglePin(repo.id) },
-    { label: 'Fetch', onSelect: () => void repos.fetchRepo(repo.id) },
+    // "Fetch now" rather than "Dismiss" on an auth-badged row, and the label
+    // is the honest one (§13): `authNeeded` is a *scheduling* flag — the fetch
+    // sweep skips these repos until a manual fetch clears it — so making the
+    // badge go away and retrying the fetch are the same act. Calling it
+    // Dismiss would promise silence and deliver a retry that re-badges within
+    // one sweep.
+    { label: authNeeded ? 'Fetch now' : 'Fetch', onSelect: () => void repos.fetchRepo(repo.id) },
     { label: 'Open in VS Code', onSelect: () => void repos.openInVSCode(repo.id) },
     { label: 'Open in Terminal', onSelect: () => void repos.openInTerminal(repo.id) },
     { label: 'Copy path', onSelect: () => void navigator.clipboard.writeText(repo.path) },
+    ...(canDismissError
+      ? [{ label: 'Dismiss error', onSelect: () => repos.dismissRowError(repo.id) }]
+      : []),
   ]);
 </script>
 
@@ -146,15 +177,16 @@
     {#if rowError}
       <!-- A repo whose status could not be read — or whose row-triggered
            write just failed — is unknown/needs-attention, not clean, and
-           must never render as a clean row (§5.1). Click opens the raw
-           detail (§13). -->
+           must never render as a clean row (§5.1). Click selects the repo and
+           raises its banner (§13) rather than opening a popover with a second
+           copy of the notice in it. -->
       <!-- svelte-ignore a11y_click_events_have_key_events -->
       <span
         role="button"
         tabindex="-1"
         class="badge error"
         title={rowError}
-        onclick={openErrorPopover}
+        onclick={showError}
       >!</span>
     {/if}
     {#if status}
@@ -190,16 +222,6 @@
 
 {#if menuPos}
   <ContextMenu x={menuPos.x} y={menuPos.y} items={menuItems} onClose={() => (menuPos = null)} />
-{/if}
-
-{#if errorPopoverPos && rowError}
-  <Popover x={errorPopoverPos.x} y={errorPopoverPos.y} onClose={() => (errorPopoverPos = null)}>
-    <GitErrorNotice
-      error={rowError}
-      onOpenVSCode={() => repos.openInVSCode(repo.id)}
-      onRetry={() => void repos.retryRow(repo.id)}
-    />
-  </Popover>
 {/if}
 
 <style>

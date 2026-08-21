@@ -3,6 +3,7 @@ import { listen } from '@tauri-apps/api/event';
 
 import { buildMenus, type Menu } from './menuModel';
 import { needsPublish, repos } from './repos.svelte';
+import { problems } from './problems.svelte';
 import { settings } from './settings.svelte';
 import { inTauri } from './tauri';
 
@@ -87,6 +88,16 @@ export function chooseMenuItem(id: string): void {
       break;
     case 'reset-pane-sizes':
       settings.resetLayout();
+      break;
+    // Both are frontend state, so both are dispatched here rather than out to
+    // `menu_command` — the split §4.1 describes, unchanged: Rust handles only
+    // what Rust owns, and it owns neither the Problems window nor the
+    // suppression set (which lives in settings and is mirrored, §9.3).
+    case 'recent-problems':
+      void problems.show();
+      break;
+    case 'reset-suppressed':
+      settings.resetSuppressed();
       break;
     // Rust used to do this by evaluating `location.reload()` in this very
     // webview. With the caller already in the webview, the round trip was the

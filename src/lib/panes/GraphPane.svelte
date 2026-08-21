@@ -8,10 +8,10 @@
   import ContextMenu from '../ContextMenu.svelte';
   import CreateBranchDialog from '../CreateBranchDialog.svelte';
   import DeleteBranchDialog from '../DeleteBranchDialog.svelte';
-  import GitErrorNotice from '../GitErrorNotice.svelte';
   import { repos, isDirty } from '../repos.svelte';
   import { graph, type RefBadge } from '../graph.svelte';
   import { isUnmergedBranchRefusal } from '../gitErrors';
+  import { notices } from '../notices.svelte';
   import { diff } from '../diff.svelte';
   import { laneCount as computeLaneCount, laneColorVar, ROW_HEIGHT, LANE_WIDTH } from '../graphLayout';
 
@@ -94,15 +94,8 @@
   // One in-flight write at a time from this pane. The per-repo write queue
   // (§7) already serialises them on the Rust side; this exists so a second
   // click cannot queue a switch behind a merge whose result is not on screen
-  // yet, which would leave the two errors fighting over `actionError`.
+  // yet, which would leave the two failures fighting over one banner.
   let busy = $state(false);
-  // Shared by switching, branch creation and merging: all three are `write()`
-  // calls whose failure is a line of git stderr, and only one can be in flight.
-  let actionError = $state<string | null>(null);
-  // Only true alongside `actionError` when the tree was dirty at the moment
-  // of failure — the one case §8.3 says to offer *Open in VS Code* for.
-  // Never force-checkout, ever, so there is no other action to offer here.
-  let actionErrorDirty = $state(false);
 
   let menu = $state<{ x: number; y: number; refs: RefBadge[]; hash: string } | null>(null);
   // Non-null while the Create Branch dialog is up; the value is the start
@@ -138,33 +131,28 @@
   async function switchTo(ref: RefBadge) {
     if (busy) return;
     busy = true;
-    actionError = null;
-    actionErrorDirty = false;
     const ok = await repos.switchBranch(ref.name, ref.kind);
-    if (!ok) {
-      actionError = repos.writeError;
-      actionErrorDirty = dirty;
-    }
+    // The banner is already up (§13); this only tells it something git's
+    // stderr does not carry — that the tree was dirty when the checkout was
+    // refused, which is what makes *Open in VS Code* the right way out.
+    if (!ok && dirty) notices.overrideAction('open-vscode');
     busy = false;
   }
 
   // Merging from the graph (§8.3) — the badge names the source, the
   // destination is always the checked-out branch.
   //
-  // `actionErrorDirty` stays false here, unlike `switchTo`: a merge tells you
-  // why it failed in its own words every time — either git's "your local
-  // changes would be overwritten", which `translateGitError` already answers
-  // with *Open in VS Code*, or a conflict, whose way out is §13's banner in
-  // the middle pane. Forcing the dirty-tree action would override the
-  // conflict case, and a conflict leaves the tree dirty by definition, so it
-  // would override it exactly when it is wrong.
+  // No action override here, unlike `switchTo`: a merge tells you why it
+  // failed in its own words every time — either git's "your local changes
+  // would be overwritten", which `translateGitError` already answers with
+  // *Open in VS Code*, or a conflict, which raises the blocking banner from
+  // the status refresh instead. Forcing the dirty-tree action would override
+  // the conflict case, and a conflict leaves the tree dirty by definition, so
+  // it would override it exactly when it is wrong.
   async function mergeInto(ref: RefBadge) {
     if (busy) return;
     busy = true;
-    actionError = null;
-    actionErrorDirty = false;
-    const ok = await repos.mergeBranch(ref.name);
-    if (!ok) actionError = repos.writeError;
+    await repos.mergeBranch(ref.name);
     busy = false;
   }
 
@@ -172,15 +160,10 @@
     const startPoint = createFrom;
     if (!startPoint) return false;
 
-    actionError = null;
-    actionErrorDirty = false;
     const ok = await repos.createBranch(name, startPoint, checkout);
-    if (!ok) {
-      actionError = repos.writeError;
-      // Only a checkout can fail on a dirty tree; a plain `git branch` never
-      // touches the working tree, so offering VS Code there would be noise.
-      actionErrorDirty = checkout && dirty;
-    }
+    // Only a checkout can fail on a dirty tree; a plain `git branch` never
+    // touches the working tree, so offering VS Code there would be noise.
+    if (!ok && checkout && dirty) notices.overrideAction('open-vscode');
     return ok;
   }
 
@@ -188,25 +171,26 @@
   // passes `force: false`, and the only way to reach `true` is through the
   // *Delete anyway* that appears once git has refused an unmerged branch.
   //
-  // That refusal is the one write failure this pane does not report as
-  // `actionError`: the dialog is still up, showing it, and a notice behind the
-  // scrim saying the same thing would be the same error twice. Every other
-  // failure closes the dialog and goes through the usual notice.
+  // That refusal is the one write failure this pane takes off the banner: the
+  // dialog is still up and already showing it, and a banner above the scrim
+  // saying the same thing would be the same error twice. Every other failure
+  // closes the dialog and leaves the banner to do its job.
   async function deleteBranch(force: boolean) {
     const target = deleting;
     if (!target || busy) return;
     busy = true;
-    actionError = null;
-    actionErrorDirty = false;
 
     const ok = await repos.deleteBranch(target.name, force);
-    const raw = repos.writeError;
+    // Classified, not displayed — hence `lastWriteError` rather than anything
+    // the banner owns (§8.3: this is the one git failure Corgit answers with a
+    // different button instead of a headline).
+    const raw = repos.lastWriteError;
     if (ok) {
       deleting = null;
     } else if (!force && raw !== null && isUnmergedBranchRefusal(raw)) {
+      notices.dismiss();
       deleting = { name: target.name, refusal: raw };
     } else {
-      actionError = raw;
       deleting = null;
     }
     busy = false;
@@ -339,17 +323,6 @@
            gets a definite height to virtualize against regardless of whether
            the Uncommitted Changes node is showing above it. -->
       <div class="graph-body">
-        {#if actionError}
-          <div class="action-error">
-            <GitErrorNotice
-              error={actionError}
-              forceAction={actionErrorDirty ? 'open-vscode' : null}
-              onOpenVSCode={() => repos.openInVSCode()}
-              onDismiss={() => (actionError = null)}
-            />
-          </div>
-        {/if}
-
         {#if dirty}
           <button
             type="button"
@@ -545,13 +518,6 @@
     display: flex;
     flex-direction: column;
     height: 100%;
-  }
-
-  .action-error {
-    flex: 0 0 auto;
-    padding: var(--space-2) var(--space-3);
-    border-bottom: 1px solid var(--border);
-    background: var(--bg-raised);
   }
 
   .uncommitted {

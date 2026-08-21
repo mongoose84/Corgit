@@ -120,7 +120,7 @@ Priority 1 is what v1 needs to ship, and it is drawn. Priority 2 can follow.
 | # | Name | File | Appears | Conveys |
 | --- | --- | --- | --- | --- |
 | 1 | **Resting** | `pose-resting` | Graph pane, no repo selected ("Nothing to herd") | Awake, waiting, mildly attentive. The default pose; everything else is a variation on it |
-| 2 | **Content** | `pose-content` | Every repo clean and in sync | Satisfied, lying down, work finished. The app's reward state. Drawn with a green check badge overlapping it — trim that if the state already shows one |
+| 2 | **Content** | `pose-content` | Every repo clean and in sync | Satisfied, lying down, work finished. The app's reward state. Was drawn with a green check badge overlapping it; trimmed, because all three placements sit beside copy or counts already saying the same thing |
 | 3 | **Working** | `pose-working` | During a fetch or pull sweep | Trotting, stick in mouth, motion lines behind. Held for an indefinite duration |
 | 4 | **Sorry** | `pose-sorry` | `GitErrorNotice`: conflict, auth failure, no upstream | Apologetic and sympathetic, scribble of confusion overhead. Does **not** read as alarmed — its whole job is softening git's worst moments |
 | 5 | **App mark** | `app-mark` | Icon, taskbar, tray, installer, favicon | Head-only crop on a dark disc. Also drawn as rounded tiles (dark and light), a small-size treatment, and two single-colour monochromes |

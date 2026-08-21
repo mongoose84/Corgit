@@ -6,7 +6,12 @@
   import CommitPane from './lib/panes/CommitPane.svelte';
   import GraphPane from './lib/panes/GraphPane.svelte';
   import CommitInfoPanel from './lib/panes/CommitInfoPanel.svelte';
-  import { repos } from './lib/repos.svelte';
+  import NoticeBanner from './lib/NoticeBanner.svelte';
+  import AbortMergeDialog from './lib/AbortMergeDialog.svelte';
+  import RecentProblems from './lib/RecentProblems.svelte';
+  import { hasConflict, repos } from './lib/repos.svelte';
+  import { notices } from './lib/notices.svelte';
+  import { problems } from './lib/problems.svelte';
   import { graph } from './lib/graph.svelte';
   import { diff } from './lib/diff.svelte';
   import { settings } from './lib/settings.svelte';
@@ -112,6 +117,67 @@
   void diff.start();
   void startMenuListener();
   void startWindowFrame();
+  void problems.start();
+
+  // §13's banner, and the one place the three tiers are resolved into what is
+  // actually on screen.
+  //
+  // Blocking outranks a raised error rather than the two stacking: the banner
+  // is a single strip above a layout whose whole promise is density (§1), and
+  // a repo that cannot commit or push is the more urgent of the two by
+  // definition. Nothing is lost by hiding the error — it is in Recent Problems
+  // either way, which is what lets this be a choice rather than a compromise.
+  //
+  // Derived from status, never from "a merge failed here earlier": a conflict
+  // made in a terminal or one that outlived a restart has to raise this too.
+  const conflictedRepo = $derived.by(() => {
+    const id = repos.selectedId;
+    if (id === undefined) return null;
+    const status = repos.status(id);
+    return status !== undefined && hasConflict(status) ? id : null;
+  });
+
+  const raised = $derived(notices.raised);
+  /** The repo the banner is talking about, whichever tier is showing. */
+  const noticeRepoId = $derived(conflictedRepo ?? raised?.repoId ?? null);
+  const noticeRepoName = $derived(
+    noticeRepoId === null
+      ? undefined
+      : (repos.repos.find((repo) => repo.id === noticeRepoId)?.name ?? undefined),
+  );
+
+  let abortingMerge = $state(false);
+
+  // The conflict can clear without the dialog being the thing that cleared it
+  // — resolved in a terminal, aborted from another window (§9.2), or simply a
+  // different repo selected. Left latched, this would spring a stale "Abort
+  // the merge?" open over the *next* conflict the user hits.
+  $effect(() => {
+    if (conflictedRepo === null) abortingMerge = false;
+  });
+
+  function selectNoticeRepo() {
+    if (noticeRepoId !== null && noticeRepoId !== repos.selectedId) repos.select(noticeRepoId);
+  }
+
+  /**
+   * *Pull* on a rejected push, aimed at the repo the banner names rather than
+   * at the selected one.
+   *
+   * They are not always the same repo, which is the whole reason the banner
+   * carries a name: row-level Pull and row-level Fetch (§5.1) fail in repos
+   * that were never selected, and a recovery button that silently acted on
+   * whatever happened to be highlighted would be the worst possible way to
+   * honour §13's "every failure path ends in a recovery action".
+   */
+  async function pullNoticeRepo(): Promise<void> {
+    const id = notices.raised?.repoId;
+    if (id == null || id === repos.selectedId) {
+      await repos.pull();
+    } else {
+      await repos.pullRow(id);
+    }
+  }
 </script>
 
 <!-- The title bar is outside the three states below, not repeated inside each
@@ -121,6 +187,42 @@
      above. -->
 <div class="shell">
   <TitleBar />
+
+  <!-- Always rendered, empty or not, so the grid keeps three items for its
+       three tracks — an `auto` row with nothing in it is 0px, whereas dropping
+       the element would let the panes auto-place into the banner's row. -->
+  <div class="notice-slot">
+    {#if conflictedRepo !== null}
+      <NoticeBanner
+        tier="blocking"
+        message="Merge conflict — commit and push are blocked until it's resolved or aborted"
+        repoName={noticeRepoName}
+        onAbortMerge={() => (abortingMerge = true)}
+        onOpenVSCode={() => void repos.openInVSCode(conflictedRepo)}
+      />
+    {:else if raised}
+      <!-- `forceAction` wins over the rule's own suggestion: §8.3's dirty-tree
+           checkout failure stays untranslated by §13's instruction, so only
+           the pane that ran the command knows the tree was dirty at the moment
+           git refused — and only it can turn that into a way out. -->
+      <NoticeBanner
+        tier={raised.translated.tier}
+        message={raised.translated.message}
+        repoName={noticeRepoName}
+        details={raised.translated.raw === raised.translated.message
+          ? undefined
+          : raised.translated.raw}
+        action={raised.forceAction ?? raised.translated.action}
+        canSuppress={raised.translated.id !== null}
+        onPull={() => void pullNoticeRepo()}
+        onOpenVSCode={() => void repos.openInVSCode(raised.repoId ?? undefined)}
+        onRetry={raised.retry}
+        onSelectRepo={noticeRepoId !== null ? selectNoticeRepo : undefined}
+        onDismiss={() => notices.dismiss()}
+        onSuppress={() => notices.suppress()}
+      />
+    {/if}
+  </div>
 
   {#if !repos.ready}
     <!-- Deliberately blank rather than a spinner. Startup is a few milliseconds
@@ -162,6 +264,20 @@
   {/if}
 </div>
 
+{#if abortingMerge && conflictedRepo !== null}
+  <AbortMergeDialog
+    repoName={noticeRepoName ?? conflictedRepo}
+    onAbort={async () => {
+      await repos.mergeAbort();
+    }}
+    onClose={() => (abortingMerge = false)}
+  />
+{/if}
+
+{#if problems.open}
+  <RecentProblems onClose={() => (problems.open = false)} />
+{/if}
+
 <style>
   /* Title bar over content. The second track is `minmax(0, 1fr)` for the same
      reason `main`'s row is, one level down: `1fr` alone has an auto minimum,
@@ -169,7 +285,7 @@
      inside it — and here that would push the title bar off the top. */
   .shell {
     display: grid;
-    grid-template-rows: var(--titlebar-height) minmax(0, 1fr);
+    grid-template-rows: var(--titlebar-height) auto minmax(0, 1fr);
     height: 100%;
   }
 

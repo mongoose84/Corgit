@@ -147,7 +147,7 @@ close. The window is `decorations: false`.
 | **File** | Open Folder… `Ctrl+O` · Open Recent ▸ · Close Window `Ctrl+W` · Exit |
 | **View** | Toggle Repo List · Toggle Commit Pane · Reset Pane Sizes · Reload |
 | **Repository** | Fetch · Pull · Push — acting on the selected repo, mirroring the buttons for discoverability. Disabled when no repo is selected. Push reads *Publish Branch* on a branch with no upstream, matching §8.7's button. |
-| **Help** | About · Check for Updates · Open Log Folder |
+| **Help** | About · Check for Updates · Recent Problems… · Open Log Folder · Reset Dismissed Warnings |
 
 #### This reverses an earlier decision, and the earlier reasoning was not wrong
 
@@ -261,9 +261,9 @@ for a one-click operation undercuts it. Constraints that follow:
 - It is a **write on a possibly-cold repo**, so it goes through that repo's write queue
   (§7) like any other write.
 - Failures have nowhere to render, because the repo may not be selected. Therefore the
-  row must be able to carry an **error badge** (click → detail popover with raw stderr and
-  *Open in VS Code*), and the merge-conflict state (§13) must be renderable **on a row**,
-  not only in the middle pane.
+  row must be able to carry an **error badge** (click → selects the repo and raises its
+  banner — §13; the badge points at the error rather than rendering a second copy of it),
+  and the merge-conflict state must be renderable **on a row**, not only in the middle pane.
 
 No row-level fetch — fetch is automatic (§6). No row-level commit or push in v1; those need
 a message or a diff review, which means the middle pane.
@@ -1148,31 +1148,143 @@ step in then, not now.
 The rule: **never strand the user in a state Corgit can't get them out of.** Every failure
 path ends in either a recovery action or *Open in VS Code*.
 
+The corollary, which the first implementation got wrong: **how loudly a failure is shown is
+decided by what the user must do about it, not by which pane happened to run the command.**
+That version grew four presentations of the same git error — a popover behind the row's `!`
+badge, an inline notice in the compose pane, another above the graph, and a bespoke conflict
+banner — and which one you got depended on whether you pushed from the row or from the
+button. Worse, two of them lived in panes whose minimums are 240px and 190px (§4), so a
+headline, an action and *Details* never fit on one line; the notice ended up shaped around
+the shortage rather than around the message.
+
+### Three tiers, three surfaces
+
+| Tier | Means | Surface |
+| --- | --- | --- |
+| **Warning** | Nothing is broken; something didn't happen | Row badge only |
+| **Error** | An operation you asked for failed; the repo is unchanged | Banner, dismissible |
+| **Blocking** | The repo is in a state git will not leave on its own | Banner, not dismissible |
+
+**The banner is app chrome: full window width, directly under the title bar (§4.1), and it
+always names the repo it is about.** Full width is not a style preference — it is the only
+place in the layout wide enough to hold a headline, an action and *Details* on one line,
+which is precisely what the pane-local notices could not do. Naming the repo is load-bearing
+for a different reason: row-level Pull (§5.1) can fail in a repo that is not selected, so a
+banner reading only "Remote has commits you don't have" is ambiguous across a 77-row list.
+
+**An error report is never modal.** The failure has already happened; freezing a dashboard
+over *many* repositories to announce that one of them failed to push is punishment, not
+help. Modals stay reserved for what they already do — `DiscardDialog`, `DeleteBranchDialog` —
+**confirming an irreversible act before it happens.** So a merge conflict is a
+non-dismissible banner offering **Abort merge…**, and that ellipsis leads to a modal which
+confirms the discard. The report is a banner; the *recovery* may be a modal.
+
 ### Merge conflict
 
 `pull` is `fetch` + `merge`, and merge is precisely what produces conflicts. Detect via
 `u` records in `status --porcelain=v2`, or the presence of `.git/MERGE_HEAD`.
 
-On detection:
-- Banner in the middle pane *and* a conflict marker on the repo row — row-level Pull
-  (§5.1) means a conflict can be created in a repo that isn't selected, so the row must be
-  able to show it
+It is the archetypal **blocking** failure, and it is handled by the ordinary banner rather
+than by a component of its own:
+- A blocking banner *and* a conflict marker on the repo row — row-level Pull (§5.1) means a
+  conflict can be created in a repo that isn't selected, so the row must be able to show it
 - Exactly two buttons: **Abort merge** (`git merge --abort`) and **Open in VS Code**
 - **Block commit and push** for that repo until resolved or aborted
+
+Blocking is the one tier with no *Dismiss*. The banner is a rendering of the condition, so it
+goes when the condition does and not before — a dismiss button here could only produce a UI
+that disagrees with the repository until the next sweep repaints it.
+
+### Dismissal: events can be dismissed, states cannot
+
+An indicator that renders **current repo state** must not be dismissible; one that records **a
+past event** may be. Dismissing a state is a button that makes the UI lie for up to one sweep
+interval (§5.1) and then loses the argument anyway. Sorting what exists:
+
+| Indicator | Backed by | Dismissible |
+| --- | --- | --- |
+| `!` row error | `rowErrors[id]` — a row Fetch/Pull that failed | **Yes** — frontend-owned; nothing regenerates it |
+| `⚿` auth needed | the `auth_needed` set | No — it is a *Fetch now* (below) |
+| `!` status error | `errors[id]` from the sweep | No — republished every sweep |
+| `⚠` conflict | `status.conflicted > 0` | No — derived state |
+| counts, ↑/↓ | derived | No — not notifications |
+
+`⚿` looks like the second dismissible case and is not. `auth_needed` is a **scheduling** flag,
+not a display flag: the fetch sweep filters those repos out (§6, §8.7) until a manual fetch
+clears it. "Dismissing" it therefore re-arms background fetching, which walks into the same
+auth wall and re-badges within one fetch sweep. That is a retry wearing the wrong label, so
+the row's menu item says **Fetch now** and does what it says.
+
+The implementation constraint behind the table: `errors` and `auth_needed` are replaced
+wholesale from sweep events, so dismissing either would have to be a backend command or the
+badge flickers back on the next tick. `rowErrors` is the only one the frontend owns outright
+— which is exactly the one the rule permits dismissing.
+
+### Suppression: "don't show this again"
+
+Some failures are routine rather than interesting. Living in a terminal beside Corgit makes
+`index.lock` collisions a daily event, and a banner for each is friction carrying no
+information. So an error banner may offer a **Don't show this again** checkbox — under one
+rule:
+
+> **A notification may be suppressed. A condition may never be.**
+
+- **Warnings** and **errors** are suppressible. The row badge survives regardless, so the
+  state stays discoverable; only the banner is silenced.
+- **Blocking** is never suppressible, and renders no checkbox at all.
+
+Keyed by **rule id, not by stderr text** — the translation table below gains an id per row.
+That makes unmatched stderr unsuppressible for free: a failure Corgit has no rule for has no
+id, so it cannot be silenced and the checkbox is simply not drawn. Falling out of the design
+beats being enforced by a rule.
+
+Suppressions live in settings (§9.5) as a set of rule ids, and **must be escapable**: *Help ▸
+Reset Dismissed Warnings*. A suppression with no way back is a trap, and the user who set it
+is by definition no longer seeing the thing that would remind them.
 
 ### Other failures
 
 Translate the common cases into plain language, with raw stderr always available in a
 collapsible "Details":
 
-| Case | Message | Action |
-| --- | --- | --- |
-| Push rejected (non-fast-forward) | "Remote has commits you don't have" | Pull |
-| Pull with dirty tree | "Commit or discard your changes first" | Open in VS Code |
-| Checkout blocked by local changes | git's own stderr | Open in VS Code |
-| Auth failure (background) | Repo badged "auth needed" | Manual fetch (may prompt) |
-| No upstream | Button becomes "Publish branch" | — |
-| `index.lock` present | "Another git process is running" | Retry |
+| id | Case | Message | Tier | Action |
+| --- | --- | --- | --- | --- |
+| `non-fast-forward` | Push rejected | "Remote has commits you don't have" | Error | Pull |
+| `dirty-tree` | Pull with dirty tree | "Commit or discard your changes first" | Error | Open in VS Code |
+| `merge-conflict` | Merge stopped in conflict | "Merge stopped with conflicts" | Blocking | Abort merge… · Open in VS Code |
+| `index-lock` | `index.lock` present | "Another git process is running" | Error | Retry |
+| `timed-out` | Corgit killed a wedged git (§7.3) | "Git stopped responding, so Corgit cancelled it" | Error | Retry |
+| — | Checkout blocked by local changes | git's own stderr | Error | Open in VS Code |
+| — | Auth failure (background) | Repo badged "auth needed" | Warning | Fetch now (may prompt) |
+| — | No upstream | Button becomes "Publish branch" | — | — |
+
+Checkout-blocked keeps git's own stderr rather than a translation, and so has no id and no
+suppression — the paths git names are the useful part of that message.
+
+### The log, and Recent Problems
+
+`corgit.log` and *Help ▸ Open Log Folder* (§4.1) already exist, and recorded the wrong half of
+the story: Corgit's own plumbing — a settings write that failed, repos no watcher would take,
+a git process killed at its budget — but **not one failing git command.** A non-zero exit is a
+successful *call* at the process layer (`git.rs` returns `Output { ok: false, stderr }`), so it
+went to the UI and nowhere else. The one thing you would open a log to investigate was the one
+thing not in it.
+
+Two changes, which are one feature seen from both ends:
+
+1. **Every non-`ok` git invocation is logged** at `warn` — repo, args, stderr — at the single
+   chokepoint that sees them all. This is what makes the existing menu item worth clicking.
+2. **Recent Problems**, a window onto an in-memory ring of the last ~50 such records, so the
+   app can show what the log holds without parsing the file back.
+
+This is also the precondition for everything above. Dismissal and suppression both throw
+information away, and the sweeps fail while nobody is watching; both are only defensible
+because nothing they hide is actually lost. Build the log first.
+
+Stderr is logged **verbatim**, matching the rule that errors keep their raw text. It can carry
+remote URLs and the occasional credential-helper line, so the log folder is diagnostic output
+— worth a glance before pasting into a bug report, and not worth scrubbing at the point of
+capture, where scrubbing would mostly delete the detail that made it useful.
 
 ---
 
@@ -1205,7 +1317,7 @@ Permitted:
 | App identity | icon, taskbar, installer, tray, favicon, About dialog |
 | Empty states | welcome screen, no repo selected, no commits yet, no filter matches |
 | Transitions | reading history, fetch/pull in flight, first scan of a large root |
-| Failures | `GitErrorNotice` — the dog softens git's worst moments (§13) |
+| Failures | the error banner — the dog softens git's worst moments (§13) |
 | Resting | every repo clean and in sync: the payoff state, dog lies down |
 
 Not permitted: inside repository rows, file rows, graph rows, or the commit info panel.

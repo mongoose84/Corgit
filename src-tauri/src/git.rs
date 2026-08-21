@@ -318,11 +318,35 @@ async fn run_in(
     // Git emits paths as bytes and porcelain v2 with -z does not quote them, so
     // a path that is not valid UTF-8 is possible. Lossy conversion keeps the
     // record parseable; the alternative is dropping the whole repo's status.
-    Ok(Output {
+    let output = Output {
         ok: output.status.success(),
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-    })
+    };
+
+    // §13: a failing git command used to be the one thing the log did not
+    // have. A non-zero exit is a *successful* call down here — the child ran
+    // and said no — so the timeout kill above was the only failure anything
+    // ever recorded, and "why was my push rejected" was unanswerable after the
+    // fact. This is the single place that sees every invocation.
+    //
+    // Unconditional rather than only for failures the user is shown:
+    // `switch_remote_tracking` deliberately probes with `switch -c --track`
+    // and falls back when git says "already exists", so a handled, expected
+    // failure lands here too. That is the right trade for a *log* — what
+    // Corgit actually ran is what you came looking for. The user-facing ring
+    // (`problems.rs`) is fed from where an error is returned instead, and so
+    // stays free of failures nobody needed to know about.
+    if !output.ok {
+        log::warn!(
+            "`git {}` in {} exited non-zero: {}",
+            args.join(" "),
+            cwd.display(),
+            output.stderr.trim()
+        );
+    }
+
+    Ok(output)
 }
 
 /// Phrased as something Corgit did rather than something git reported, because

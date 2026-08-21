@@ -3,11 +3,10 @@
   import FileRow from './FileRow.svelte';
   import EmptyState from '../EmptyState.svelte';
   import Mascot from '../Mascot.svelte';
-  import GitErrorNotice from '../GitErrorNotice.svelte';
   import Glyph from '../Glyph.svelte';
   import DiscardDialog from '../DiscardDialog.svelte';
   import ContextMenu from '../ContextMenu.svelte';
-  import { needsPublish, repos, type FileEntry } from '../repos.svelte';
+  import { hasConflict, needsPublish, repos, type FileEntry } from '../repos.svelte';
   import { diff, type DiffSource } from '../diff.svelte';
   import {
     extend,
@@ -35,7 +34,14 @@
   const publishable = $derived(status !== undefined && needsPublish(status));
   // §13: an unresolved merge conflict blocks commit and push for this repo
   // until it's resolved or aborted — exactly two ways out, never a third.
-  const conflicted = $derived(status !== undefined && status.conflicted > 0);
+  //
+  // The pane no longer *draws* the conflict: that is the blocking banner in
+  // the app chrome, which can hold a headline and both buttons on one line at
+  // window width and could not at this pane's 240px minimum (§4). What stays
+  // here is the part that was always this pane's own — the guard on its two
+  // buttons. Via the shared predicate, so the banner and the disabled Commit
+  // cannot disagree about whether this repo is wedged.
+  const conflicted = $derived(status !== undefined && hasConflict(status));
 
   const canCommit = $derived(
     hasRepo && !busy && !conflicted && message.trim().length > 0 && (files?.stagedTotal ?? 0) > 0,
@@ -220,15 +226,6 @@
     }
   }
 
-  async function doMergeAbort() {
-    busy = true;
-    try {
-      await repos.mergeAbort();
-    } finally {
-      busy = false;
-    }
-  }
-
   async function doFetch() {
     busy = true;
     try {
@@ -346,17 +343,6 @@
   {#if !hasRepo}
     <EmptyState message="No repository selected" hint="Select a repository to stage and commit changes" />
   {:else}
-    {#if conflicted}
-      <!-- §13: exactly two buttons, never a third — never force-anything. -->
-      <div class="conflict-banner">
-        <p class="selectable">This repository has a merge conflict. Commit and push are blocked until it's resolved or aborted.</p>
-        <div class="conflict-actions">
-          <button type="button" disabled={busy} onclick={doMergeAbort}>Abort merge</button>
-          <button type="button" disabled={busy} onclick={() => repos.openInVSCode()}>Open in VS Code</button>
-        </div>
-      </div>
-    {/if}
-
     <div class="compose">
       <div class="message-field">
         <textarea
@@ -396,15 +382,6 @@
       >
         Commit + Push
       </button>
-
-      {#if repos.writeError}
-        <GitErrorNotice
-          error={repos.writeError}
-          onPull={doPull}
-          onOpenVSCode={() => repos.openInVSCode()}
-          onDismiss={() => (repos.writeError = null)}
-        />
-      {/if}
     </div>
 
     {#if repos.loadingFiles && !files}
@@ -546,7 +523,6 @@
      `.rest` is deliberately absent: it is the one thing here that *should*
      flex. `EmptyState` is too — it is never a sibling, only ever the sole
      child of its own branch. */
-  .conflict-banner,
   .compose,
   .section,
   .section-empty,
@@ -598,43 +574,6 @@
     margin: 0;
     font-size: var(--text-sm);
     color: var(--text-muted);
-  }
-
-  .conflict-banner {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: var(--space-2);
-    padding: var(--space-2) var(--space-3);
-    border-bottom: 1px solid var(--border);
-    background: var(--bg-raised);
-  }
-
-  .conflict-banner p {
-    margin: 0;
-    min-width: 0;
-    font-size: var(--text-sm);
-    color: var(--status-conflict);
-  }
-
-  .conflict-actions {
-    display: flex;
-    flex: 0 0 auto;
-    gap: var(--space-2);
-  }
-
-  .conflict-actions button {
-    height: 22px;
-    padding: 0 var(--space-2);
-    font-size: var(--text-xs);
-    color: var(--text-primary);
-    background: var(--bg-hover);
-    border: 1px solid var(--border-strong);
-    border-radius: var(--radius-sm);
-  }
-
-  .conflict-actions button:hover:not(:disabled) {
-    background: var(--bg-active);
   }
 
   .compose {

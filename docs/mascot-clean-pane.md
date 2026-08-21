@@ -150,9 +150,11 @@ more than it is worth.
 ## 5. Pose and size
 
 **Pose:** `content`. Already imported by `Mascot.svelte`, and already means exactly this.
-It ships drawn with a green check badge overlapping it (mascot.md §5); since the two `0`
-counts beside "Staged Changes" and "Changes" already say the same thing, check whether the
-badge reads as redundant here.
+It shipped drawn with a green check badge overlapping it (mascot.md §5), and the badge was
+in fact redundant here — the two `0` counts beside "Staged Changes" and "Changes" already
+say it. Trimmed from the asset rather than from this placement, since the same argument
+held everywhere the pose is used: "All in sync" and "Nothing has gone wrong" both state the
+result in words directly under the dog.
 
 **Size: 75px**, against the 112px the same pose gets in the graph pane.
 

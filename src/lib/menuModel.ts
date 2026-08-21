@@ -135,7 +135,23 @@ export function buildMenus(state: MenuState): Menu[] {
       label: 'Help',
       entries: [
         { kind: 'item', id: 'about', label: 'About', enabled: true },
+        { kind: 'separator' },
+        // The two halves of §13's record, in the order you reach for them:
+        // the ring first, because it is the one that answers "what just went
+        // wrong" without leaving the app.
+        { kind: 'item', id: 'recent-problems', label: 'Recent Problems…', enabled: true },
         { kind: 'item', id: 'open-logs', label: 'Open Log Folder', enabled: true },
+        { kind: 'separator' },
+        // §13 requires a way back from *Don't warn me again*. Always enabled:
+        // the menu would otherwise have to know the suppression set to grey
+        // itself out, and an item that is disabled precisely when you have
+        // forgotten what you muted is the wrong half of the trap to keep.
+        {
+          kind: 'item',
+          id: 'reset-suppressed',
+          label: 'Reset Dismissed Warnings',
+          enabled: true,
+        },
       ],
     },
   ];
