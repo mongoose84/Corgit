@@ -26,6 +26,11 @@ export interface Settings {
   statusSweepSecs: number;
   fetchSweepSecs: number;
   recentRoots: string[];
+  /** Rule ids from `gitErrors.ts` the user has ticked *Don't show this again*
+   *  on (§13). Only the banner is silenced by these — the row badge and the
+   *  Recent Problems entry are unaffected, which is what makes suppressing one
+   *  safe to offer at all. */
+  suppressedNotices: string[];
 }
 
 export const DEFAULT_PANE_WIDTHS: PaneWidths = { left: 0.25, middle: 0.2 };
@@ -40,6 +45,7 @@ const DEFAULTS: Settings = {
   statusSweepSecs: 60,
   fetchSweepSecs: 300,
   recentRoots: [],
+  suppressedNotices: [],
 };
 
 const SAVE_DEBOUNCE_MS = 500;
@@ -59,6 +65,29 @@ class SettingsStore {
   set paneWidths(value: PaneWidths) {
     this.data.paneWidths = value;
     this.queueSave();
+  }
+
+  /** Read defensively: a settings.json written before this field existed
+   *  parses without it, and `undefined.includes` would take down every banner
+   *  rather than the one being asked about. */
+  isSuppressed(ruleId: string): boolean {
+    return this.data.suppressedNotices?.includes(ruleId) ?? false;
+  }
+
+  suppress(ruleId: string): void {
+    if (this.isSuppressed(ruleId)) return;
+    this.data.suppressedNotices = [...(this.data.suppressedNotices ?? []), ruleId];
+    // Flushed rather than debounced: this is a decision, not a drag, and the
+    // user's next act after ticking the box may well be closing the window.
+    void this.flush();
+  }
+
+  /** *Help ▸ Reset Dismissed Warnings* (§4.1). §13 requires this to exist: a
+   *  suppression with no way back is a trap, and the user who set it is by
+   *  definition no longer seeing the thing that would remind them. */
+  resetSuppressed(): void {
+    this.data.suppressedNotices = [];
+    void this.flush();
   }
 
   get diffSplit(): number {

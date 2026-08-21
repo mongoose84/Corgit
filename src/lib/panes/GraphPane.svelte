@@ -7,9 +7,11 @@
   import Mascot from '../Mascot.svelte';
   import ContextMenu from '../ContextMenu.svelte';
   import CreateBranchDialog from '../CreateBranchDialog.svelte';
-  import GitErrorNotice from '../GitErrorNotice.svelte';
+  import DeleteBranchDialog from '../DeleteBranchDialog.svelte';
   import { repos, isDirty } from '../repos.svelte';
   import { graph, type RefBadge } from '../graph.svelte';
+  import { isUnmergedBranchRefusal } from '../gitErrors';
+  import { notices } from '../notices.svelte';
   import { diff } from '../diff.svelte';
   import { laneCount as computeLaneCount, laneColorVar, ROW_HEIGHT, LANE_WIDTH } from '../graphLayout';
 
@@ -92,23 +94,22 @@
   // One in-flight write at a time from this pane. The per-repo write queue
   // (§7) already serialises them on the Rust side; this exists so a second
   // click cannot queue a switch behind a merge whose result is not on screen
-  // yet, which would leave the two errors fighting over `actionError`.
+  // yet, which would leave the two failures fighting over one banner.
   let busy = $state(false);
-  // Shared by switching, branch creation and merging: all three are `write()`
-  // calls whose failure is a line of git stderr, and only one can be in flight.
-  let actionError = $state<string | null>(null);
-  // Only true alongside `actionError` when the tree was dirty at the moment
-  // of failure — the one case §8.3 says to offer *Open in VS Code* for.
-  // Never force-checkout, ever, so there is no other action to offer here.
-  let actionErrorDirty = $state(false);
 
   let menu = $state<{ x: number; y: number; refs: RefBadge[]; hash: string } | null>(null);
   // Non-null while the Create Branch dialog is up; the value is the start
   // point the new branch will be cut from (§8.3).
   let createFrom = $state<string | null>(null);
+  // Non-null while the Delete Branch dialog is up (§8.3). `refusal` carries
+  // git's "not fully merged" text once a safe delete has come back with one,
+  // which is what turns the dialog's second step on; it lives here rather than
+  // in the dialog because it *is* the failed write's error, and every other
+  // write's error is the pane's to hold.
+  let deleting = $state<{ name: string; refusal: string | null } | null>(null);
 
   // Esc shuts the info panel (§5.2) and leaves the row selected — it undoes
-  // the *Info* that opened the column, not the click that picked the row.
+  // the *Show info* that opened the column, not the click that picked the row.
   // Guarded three ways: the panel has to be open; the graph has to be the view
   // on screen, since DiffView owns Esc while the diff tab is showing and one
   // press must not close two things; and the context menu gets it first. The
@@ -130,33 +131,28 @@
   async function switchTo(ref: RefBadge) {
     if (busy) return;
     busy = true;
-    actionError = null;
-    actionErrorDirty = false;
     const ok = await repos.switchBranch(ref.name, ref.kind);
-    if (!ok) {
-      actionError = repos.writeError;
-      actionErrorDirty = dirty;
-    }
+    // The banner is already up (§13); this only tells it something git's
+    // stderr does not carry — that the tree was dirty when the checkout was
+    // refused, which is what makes *Open in VS Code* the right way out.
+    if (!ok && dirty) notices.overrideAction('open-vscode');
     busy = false;
   }
 
   // Merging from the graph (§8.3) — the badge names the source, the
   // destination is always the checked-out branch.
   //
-  // `actionErrorDirty` stays false here, unlike `switchTo`: a merge tells you
-  // why it failed in its own words every time — either git's "your local
-  // changes would be overwritten", which `translateGitError` already answers
-  // with *Open in VS Code*, or a conflict, whose way out is §13's banner in
-  // the middle pane. Forcing the dirty-tree action would override the
-  // conflict case, and a conflict leaves the tree dirty by definition, so it
-  // would override it exactly when it is wrong.
+  // No action override here, unlike `switchTo`: a merge tells you why it
+  // failed in its own words every time — either git's "your local changes
+  // would be overwritten", which `translateGitError` already answers with
+  // *Open in VS Code*, or a conflict, which raises the blocking banner from
+  // the status refresh instead. Forcing the dirty-tree action would override
+  // the conflict case, and a conflict leaves the tree dirty by definition, so
+  // it would override it exactly when it is wrong.
   async function mergeInto(ref: RefBadge) {
     if (busy) return;
     busy = true;
-    actionError = null;
-    actionErrorDirty = false;
-    const ok = await repos.mergeBranch(ref.name);
-    if (!ok) actionError = repos.writeError;
+    await repos.mergeBranch(ref.name);
     busy = false;
   }
 
@@ -164,31 +160,55 @@
     const startPoint = createFrom;
     if (!startPoint) return false;
 
-    actionError = null;
-    actionErrorDirty = false;
     const ok = await repos.createBranch(name, startPoint, checkout);
-    if (!ok) {
-      actionError = repos.writeError;
-      // Only a checkout can fail on a dirty tree; a plain `git branch` never
-      // touches the working tree, so offering VS Code there would be noise.
-      actionErrorDirty = checkout && dirty;
-    }
+    // Only a checkout can fail on a dirty tree; a plain `git branch` never
+    // touches the working tree, so offering VS Code there would be noise.
+    if (!ok && checkout && dirty) notices.overrideAction('open-vscode');
     return ok;
   }
 
-  // Every row has a menu now, badges or not: *Info* is the only way into the
-  // info column (§5.2), so a plain commit with no refs on it must still open
-  // one. That is why the old `refs.length === 0` bail is gone.
+  // Deleting a local branch (§8.3). Safe-first: the dialog's first button
+  // passes `force: false`, and the only way to reach `true` is through the
+  // *Delete anyway* that appears once git has refused an unmerged branch.
+  //
+  // That refusal is the one write failure this pane takes off the banner: the
+  // dialog is still up and already showing it, and a banner above the scrim
+  // saying the same thing would be the same error twice. Every other failure
+  // closes the dialog and leaves the banner to do its job.
+  async function deleteBranch(force: boolean) {
+    const target = deleting;
+    if (!target || busy) return;
+    busy = true;
+
+    const ok = await repos.deleteBranch(target.name, force);
+    // Classified, not displayed — hence `lastWriteError` rather than anything
+    // the banner owns (§8.3: this is the one git failure Corgit answers with a
+    // different button instead of a headline).
+    const raw = repos.lastWriteError;
+    if (ok) {
+      deleting = null;
+    } else if (!force && raw !== null && isUnmergedBranchRefusal(raw)) {
+      notices.dismiss();
+      deleting = { name: target.name, refusal: raw };
+    } else {
+      deleting = null;
+    }
+    busy = false;
+  }
+
+  // Every row has a menu now, badges or not: *Show info* is the only way into
+  // the info column (§5.2), so a plain commit with no refs on it must still
+  // open one. That is why the old `refs.length === 0` bail is gone.
   function openMenu(event: MouseEvent, refs: RefBadge[], hash: string) {
     event.preventDefault();
     menu = { x: event.clientX, y: event.clientY, refs, hash };
   }
 
-  // *Info* leads because it is the one entry every row has; the branch entries
-  // below it exist only on the rows carrying a badge.
+  // *Show info* leads because it is the one entry every row has; the branch
+  // entries below it exist only on the rows carrying a badge.
   function menuItems(refs: RefBadge[], hash: string) {
     return [
-      { label: 'Info', onSelect: () => graph.showInfo(hash) },
+      { label: 'Show info', onSelect: () => graph.showInfo(hash) },
       ...refs.flatMap((ref) => [
         {
           label: ref.kind === 'local' ? `Switch to ${ref.name}` : `Switch to ${ref.name} (new local branch)`,
@@ -207,6 +227,18 @@
               {
                 label: `Merge ${ref.name} into ${currentBranch}`,
                 onSelect: () => mergeInto(ref),
+              },
+            ]
+          : []),
+        // Local badges only, and never the one you are standing on: git
+        // refuses to delete the checked-out branch, and deleting a remote
+        // badge would be a `push --delete` — a network write with a different
+        // blast radius, so it is not folded into the same entry (§8.3).
+        ...(ref.kind === 'local' && ref.name !== currentBranch
+          ? [
+              {
+                label: `Delete ${ref.name}`,
+                onSelect: () => (deleting = { name: ref.name, refusal: null }),
               },
             ]
           : []),
@@ -263,7 +295,9 @@
     {#if !hasRepo}
       <!-- The dog lives here (SPEC §14.1). The commit pane sits empty at the
            same moment and is deliberately left bare, because two of him on
-           screen at once stops being charming.
+           screen at once stops being charming. Its own `content` placement is
+           the opposite case — a repo selected and clean — so the two can never
+           both be showing.
 
            Two poses share the slot: he lies down once the whole herd is clean
            and in sync, and sits up waiting otherwise (docs/mascot.md §5). -->
@@ -276,7 +310,7 @@
       {:else}
         <EmptyState message="Nothing to herd" hint="Select a repository to see its history">
           {#snippet art()}
-            <Mascot pose="resting" height={132} />
+            <Mascot pose="resting" height={132} gaze />
           {/snippet}
         </EmptyState>
       {/if}
@@ -289,17 +323,6 @@
            gets a definite height to virtualize against regardless of whether
            the Uncommitted Changes node is showing above it. -->
       <div class="graph-body">
-        {#if actionError}
-          <div class="action-error">
-            <GitErrorNotice
-              error={actionError}
-              forceAction={actionErrorDirty ? 'open-vscode' : null}
-              onOpenVSCode={() => repos.openInVSCode()}
-              onDismiss={() => (actionError = null)}
-            />
-          </div>
-        {/if}
-
         {#if dirty}
           <button
             type="button"
@@ -384,6 +407,16 @@
     existingLocal={localBranchNames}
     onCreate={createBranch}
     onClose={() => (createFrom = null)}
+  />
+{/if}
+
+{#if deleting}
+  <DeleteBranchDialog
+    name={deleting.name}
+    refusal={deleting.refusal}
+    {busy}
+    onDelete={deleteBranch}
+    onClose={() => (deleting = null)}
   />
 {/if}
 
@@ -485,13 +518,6 @@
     display: flex;
     flex-direction: column;
     height: 100%;
-  }
-
-  .action-error {
-    flex: 0 0 auto;
-    padding: var(--space-2) var(--space-3);
-    border-bottom: 1px solid var(--border);
-    background: var(--bg-raised);
   }
 
   .uncommitted {

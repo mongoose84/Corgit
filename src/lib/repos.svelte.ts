@@ -3,6 +3,7 @@ import { listen } from '@tauri-apps/api/event';
 
 import { settings } from './settings.svelte';
 import { inTauri } from './tauri';
+import { notices } from './notices.svelte';
 
 /**
  * Repo state (SPEC.md §9.3).
@@ -114,6 +115,19 @@ interface RepoStatusEvent {
  *  holding work as clean. `parse` in `status.rs` guarantees the two agree, and
  *  a test there pins it; this is the direction to be wrong in if they ever
  *  don't. */
+/** The blocking state of §13: git stopped mid-merge and will not move on
+ *  until someone resolves or aborts. Shared for the same reason `isDirty` is —
+ *  the row's `⚠`, the banner, and the commit/push guards must not be able to
+ *  disagree about whether this repo is wedged.
+ *
+ *  Note what it is *not* derived from: any record that a merge failed. A
+ *  conflict made in a terminal, or one that outlived a restart, raised no
+ *  event inside Corgit and still has to show. Reading the condition itself is
+ *  the only version of this that cannot go stale or be dismissed into a lie. */
+export function hasConflict(status: RepoStatus): boolean {
+  return status.conflicted > 0;
+}
+
 export function isDirty(status: RepoStatus): boolean {
   return status.staged + status.unstaged + status.untracked + status.conflicted > 0;
 }
@@ -184,14 +198,34 @@ class RepoStore {
    *  is selected (§6). Persisted server-side per root. */
   pins = $state<Set<string>>(new Set());
   /** Failures from a row-triggered write (Fetch or Pull from a row's context
-   *  menu / hover affordance) — keyed by repo id rather than the single
-   *  `writeError`, since the row that failed may not be selected (§5.1,
-   *  §13: "the row must be able to carry an error badge"). */
+   *  menu / hover affordance) — keyed by repo id rather than held as one
+   *  value, since the row that failed may not be selected (§5.1, §13: "the row
+   *  must be able to carry an error badge").
+   *
+   *  This is the badge's backing store, not the banner's: the banner is one
+   *  announcement of the newest failure (`notices.svelte.ts`), and this is the
+   *  per-row record that outlives it. */
   rowErrors = $state<Record<string, string>>({});
   /** Whichever of `fetchRepo`/`pullRow` most recently failed for a repo, so
-   *  the row's error popover's "Retry" re-runs the operation that actually
-   *  failed rather than guessing. */
+   *  the row's "Retry" re-runs the operation that actually failed rather than
+   *  guessing. */
   #rowRetry: Record<string, () => Promise<void>> = {};
+  /** Which operation each `rowErrors` entry came from, so re-raising the
+   *  banner from the badge says "Fetch" rather than something vague. Private
+   *  and parallel to `rowErrors` rather than folded into it: that map is read
+   *  as a plain message in three places, and widening it to an object to carry
+   *  one label would be the bigger change. */
+  #rowOperation: Record<string, string> = {};
+  /** The raw stderr from the most recent selected-repo write, kept for the one
+   *  caller that has to *classify* a failure rather than display it: §8.3's
+   *  unmerged-branch refusal, which grows a *Delete anyway* button instead of
+   *  a headline. Not the banner's state — that is `notices.svelte.ts` — and
+   *  not for display, or the two would be free to disagree. */
+  #lastWriteError: string | null = null;
+
+  get lastWriteError(): string | null {
+    return this.#lastWriteError;
+  }
 
   git = $state<GitInfo>({
     available: true,
@@ -219,8 +253,6 @@ class RepoStore {
   files = $state<FileChanges | null>(null);
   loadingFiles = $state(false);
   filesError = $state<string | null>(null);
-  /** Set when a stage/unstage/commit attempt fails; cleared on the next one. */
-  writeError = $state<string | null>(null);
 
   get selectedId(): string | undefined {
     return this.selected.values().next().value;
@@ -307,11 +339,11 @@ class RepoStore {
   }
 
   async stagePaths(paths: string[]): Promise<boolean> {
-    return this.write('stage_paths', { paths });
+    return this.write('stage_paths', { paths }, 'Stage');
   }
 
   async unstagePaths(paths: string[]): Promise<boolean> {
-    return this.write('unstage_paths', { paths });
+    return this.write('unstage_paths', { paths }, 'Unstage');
   }
 
   /** Throw away the *unstaged* changes to these paths (§5.2, §8.6) — the one
@@ -324,64 +356,64 @@ class RepoStore {
    *  would take a whole multi-file discard down with it. `CommitPane` is what
    *  keeps them out. */
   async discardPaths(paths: string[]): Promise<boolean> {
-    return this.write('discard_paths', { paths });
+    return this.write('discard_paths', { paths }, 'Discard');
   }
 
   async stageAll(): Promise<boolean> {
-    return this.write('stage_all', {});
+    return this.write('stage_all', {}, 'Stage all');
   }
 
   async unstageAll(): Promise<boolean> {
-    return this.write('unstage_all', {});
+    return this.write('unstage_all', {}, 'Unstage all');
   }
 
   async commit(message: string): Promise<boolean> {
-    return this.write('commit_repo', { message });
+    return this.write('commit_repo', { message }, 'Commit');
   }
 
   /** Manual, user-triggered fetch — unlike the background sweep, this one is
    *  allowed to prompt for credentials (§8.7). */
   async fetch(): Promise<boolean> {
-    return this.write('fetch_repo', {});
+    return this.write('fetch_repo', {}, 'Fetch');
   }
 
   async pull(): Promise<boolean> {
-    return this.write('pull_repo', {});
+    return this.write('pull_repo', {}, 'Pull');
   }
 
   /** `git push`, or "Publish branch" (`push -u origin <branch>`) when the
    *  selected repo's current status has no upstream (§8.7) — the caller
    *  decides which button to show; both land here as one command each. */
   async push(): Promise<boolean> {
-    return this.write('push_repo', {});
+    return this.write('push_repo', {}, 'Push');
   }
 
   async publish(): Promise<boolean> {
-    return this.write('publish_branch', {});
+    return this.write('publish_branch', {}, 'Publish branch');
   }
 
   /** §13's merge-conflict banner "Abort merge" — the selected repo only,
    *  same as commit/push; the row-level conflict badge is driven purely by
    *  status and needs no store method of its own. */
   async mergeAbort(): Promise<boolean> {
-    return this.write('merge_abort', {});
+    return this.write('merge_abort', {}, 'Abort merge');
   }
 
   async commitAndPush(message: string): Promise<boolean> {
-    return this.write('commit_and_push', { message });
+    return this.write('commit_and_push', { message }, 'Commit + Push');
   }
 
   /** Branch switching from the graph (§8.3, §8.4) — `kind` mirrors the ref
    *  badge that was double-clicked or picked from its context menu. */
   async switchBranch(name: string, kind: 'local' | 'remote'): Promise<boolean> {
-    return this.write('switch_branch', { name, kind });
+    return this.write('switch_branch', { name, kind }, 'Switch branch');
   }
 
   /** Branch creation from the graph (§8.3) — `startPoint` is the ref badge or
    *  commit hash that was right-clicked, so the new branch starts there rather
    *  than at HEAD. */
   async createBranch(name: string, startPoint: string, checkout: boolean): Promise<boolean> {
-    return this.write('create_branch', { name, startPoint, checkout });
+    return this.write('create_branch', { name, startPoint, checkout }, 'Create branch');
   }
 
   /** Merging a branch into the checked-out one (§8.3) — `name` is the ref
@@ -390,7 +422,16 @@ class RepoStore {
    *  status refresh raises §13's conflict banner, which is where the way out
    *  of it lives. */
   async mergeBranch(name: string): Promise<boolean> {
-    return this.write('merge_branch', { name });
+    return this.write('merge_branch', { name }, 'Merge');
+  }
+
+  /** Deleting a local branch from the graph (§8.3) — `name` is the local ref
+   *  badge that was right-clicked. `force` is `git branch -D`, and only the
+   *  delete dialog's second step ever passes it: the first attempt is always
+   *  the safe `-d`, so the unsafe one is reachable only through git's own
+   *  "not fully merged" refusal on screen. */
+  async deleteBranch(name: string, force: boolean): Promise<boolean> {
+    return this.write('delete_branch', { name, force }, 'Delete branch');
   }
 
   /** The dirty-tree checkout failure's other half (§8.3) — not routed through
@@ -412,7 +453,11 @@ class RepoStore {
         line: file?.line ?? null,
       });
     } catch (err) {
-      this.writeError = String(err);
+      // Not a git write, but it is the recovery §13 offers when git has
+      // failed — so a launcher that itself fails must say so somewhere, or
+      // *Open in VS Code* silently does nothing and the user is stranded,
+      // which is the exact outcome §13's rule exists to forbid.
+      notices.raise(target, 'Open in VS Code', String(err));
     }
   }
 
@@ -430,7 +475,7 @@ class RepoStore {
    *  selected repo — the file lists only ever show that one — and
    *  fire-and-forget like `openInTerminal`: nothing in Corgit's own state
    *  changes because a shell window opened, and a failure here has no place in
-   *  `writeError`, which is about git writes. */
+   *  the error banner, which is about operations the user asked git for. */
   async revealInExplorer(path: string): Promise<void> {
     const id = this.selectedId;
     if (!id) return;
@@ -442,11 +487,11 @@ class RepoStore {
   }
 
   /** Right-click → Fetch on a row that may not be the selected repo (§5.1).
-   *  Goes through the same write queue as every other write; failures land in
-   *  `rowErrors` rather than the compose pane's `writeError`, since the row
-   *  that failed is not necessarily the one currently shown there. */
+   *  Goes through the same write queue as every other write; failures badge
+   *  the row as well as raising the banner, since the row that failed is not
+   *  necessarily the one currently shown. */
   async fetchRepo(id: string): Promise<void> {
-    await this.rowWrite(id, 'fetch_repo', () => this.fetchRepo(id));
+    await this.rowWrite(id, 'fetch_repo', 'Fetch', () => this.fetchRepo(id));
   }
 
   /** Row-level Pull (§5.1) — the dashboard's whole thesis is acting without
@@ -454,28 +499,61 @@ class RepoStore {
    *  forcing a select-then-cross-the-window trip. Same `rowErrors` reasoning
    *  as `fetchRepo`. */
   async pullRow(id: string): Promise<void> {
-    await this.rowWrite(id, 'pull_repo', () => this.pullRow(id));
+    await this.rowWrite(id, 'pull_repo', 'Pull', () => this.pullRow(id));
   }
 
-  /** The row error popover's "Retry" (§13's `index.lock` case) — re-runs
-   *  whichever of `fetchRepo`/`pullRow` most recently failed for this repo. */
+  /** The row error's "Retry" (§13's `index.lock` case) — re-runs whichever of
+   *  `fetchRepo`/`pullRow` most recently failed for this repo. */
   async retryRow(id: string): Promise<void> {
     await this.#rowRetry[id]?.();
   }
 
-  private async rowWrite(id: string, command: string, retry: () => Promise<void>): Promise<void> {
+  /** Right-click ▸ Dismiss on a row carrying an error badge (§13).
+   *
+   *  This is the *only* badge that may be dismissed, and the reason is in
+   *  where it lives rather than in what it says: `rowErrors` is owned outright
+   *  by the frontend and nothing regenerates it until the operation is tried
+   *  again. `errors` and `authNeeded` are replaced wholesale from sweep events
+   *  (see `applySweep`), so dismissing either would be a lie the next tick
+   *  contradicts — §13's rule that an event may be dismissed and a state may
+   *  not, read off the code rather than imposed on it. */
+  dismissRowError(id: string): void {
+    const { [id]: _removed, ...rest } = this.rowErrors;
+    this.rowErrors = rest;
+    delete this.#rowOperation[id];
+  }
+
+  /** What the row's error badge is about. `undefined` when the badge is being
+   *  drawn for a failed *status read* instead, which belongs to no operation
+   *  the user asked for. */
+  rowOperation(id: string): string | undefined {
+    return this.#rowOperation[id];
+  }
+
+  private async rowWrite(
+    id: string,
+    command: string,
+    operation: string,
+    retry: () => Promise<void>,
+  ): Promise<void> {
     delete this.rowErrors[id];
     this.#rowRetry[id] = retry;
     try {
       await invoke(command, { repoId: id });
       delete this.#rowRetry[id];
     } catch (err) {
+      // Both, and they are not redundant (§13): the badge is this row's
+      // durable record that something failed here, the banner is the one
+      // announcement — and the banner may be suppressed or replaced by a newer
+      // failure, at which point the badge is all that is left pointing at it.
       this.rowErrors = { ...this.rowErrors, [id]: String(err) };
+      this.#rowOperation[id] = operation;
+      notices.raise(id, operation, String(err), () => void retry());
     }
   }
 
   /** Every mutating command shares this shape: resolve the selected repo,
-   *  invoke, surface a failure in `writeError`. Both the row *and* the file
+   *  invoke, raise a banner on failure (§13). Both the row *and* the file
    *  list update themselves from the `status:repo` event (§7), which the
    *  backend emits before the command returns — including after a failure,
    *  since a failed stage can still have moved the index.
@@ -485,16 +563,25 @@ class RepoStore {
    *  repo's status twice: once in `write_and_refresh`, once again for the
    *  paths. Returns whether it succeeded, so e.g. the commit box only clears
    *  on success. */
-  private async write(command: string, args: Record<string, unknown>): Promise<boolean> {
+  private async write(
+    command: string,
+    args: Record<string, unknown>,
+    operation: string,
+  ): Promise<boolean> {
     const id = this.selectedId;
     if (!id) return false;
 
-    this.writeError = null;
+    this.#lastWriteError = null;
     try {
       await invoke(command, { repoId: id, ...args });
       return true;
     } catch (err) {
-      this.writeError = String(err);
+      this.#lastWriteError = String(err);
+      // §13: one surface, chosen by tier rather than by which pane called
+      // this. The compose pane used to render its own copy inline, which is
+      // how the same push rejection came to look like two different failures
+      // depending on whether it was started from the row or the button.
+      notices.raise(id, operation, String(err), () => void this.write(command, args, operation));
       return false;
     }
   }

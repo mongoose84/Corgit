@@ -54,6 +54,16 @@ pub struct Settings {
     pub status_sweep_secs: u64,
     pub fetch_sweep_secs: u64,
     pub recent_roots: Vec<PathBuf>,
+    /// Rule ids the user has ticked *Don't show this again* on (§13). Ids
+    /// rather than stderr text, so the set stays small and stable while git's
+    /// wording moves between versions.
+    ///
+    /// No version bump was needed for this: the struct carries `default`, so a
+    /// settings.json written before it existed simply reads back with none
+    /// suppressed — which is also the only safe way for this particular field
+    /// to fail, since the failure mode of guessing wrong is a warning the user
+    /// never sees.
+    pub suppressed_notices: Vec<String>,
 }
 
 impl Default for Settings {
@@ -66,6 +76,7 @@ impl Default for Settings {
             status_sweep_secs: 60,
             fetch_sweep_secs: 300,
             recent_roots: Vec::new(),
+            suppressed_notices: Vec::new(),
         }
     }
 }

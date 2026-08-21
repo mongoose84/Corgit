@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest';
 
-import { translateGitError } from './gitErrors';
+import { isUnmergedBranchRefusal, translateGitError } from './gitErrors';
 
 /**
  * §13's rule is "never strand the user in a state Corgit can't get them out
@@ -138,5 +138,85 @@ describe('everything else', () => {
 
     expect(result.message).toBe('');
     expect(result.action).toBeNull();
+  });
+});
+
+describe('isUnmergedBranchRefusal', () => {
+  // The one failure that changes which button the user is offered (§8.3), so
+  // a miss here does not just word the error badly — it hides *Delete anyway*
+  // and leaves a squash-merged branch undeletable from Corgit.
+  test("matches git's refusal whatever it capitalises", () => {
+    expect(isUnmergedBranchRefusal("error: The branch 'feature-x' is not fully merged.")).toBe(true);
+    expect(isUnmergedBranchRefusal("error: the branch 'feature-x' is not fully merged.")).toBe(true);
+  });
+
+  test('does not match the other ways a delete fails', () => {
+    expect(isUnmergedBranchRefusal("error: branch 'feature-x' not found.")).toBe(false);
+    // Git 2.53's wording for deleting the branch you are on — the menu never
+    // offers that, but the classifier must not read it as the refusal that
+    // grows a *Delete anyway* button.
+    expect(
+      isUnmergedBranchRefusal(
+        "error: cannot delete branch 'main' used by worktree at 'C:/dev/repo'",
+      ),
+    ).toBe(false);
+    expect(isUnmergedBranchRefusal('')).toBe(false);
+  });
+});
+
+describe('ids and tiers (§13)', () => {
+  /**
+   * Ids are persisted in settings as suppressions, so they are a stable
+   * contract rather than an implementation detail: renaming one silently
+   * un-mutes whatever the user had muted, and the failure is invisible — a
+   * warning they told Corgit to stop showing starts showing again.
+   */
+  test('each translated case carries its id', () => {
+    expect(translateGitError('(non-fast-forward)').id).toBe('non-fast-forward');
+    expect(translateGitError("unable to create '.git/index.lock'").id).toBe('index-lock');
+    expect(translateGitError('git timed out after 120s and was stopped').id).toBe('timed-out');
+    expect(translateGitError('Please commit your changes or stash them').id).toBe('dirty-tree');
+    expect(translateGitError('Automatic merge failed; fix conflicts').id).toBe('merge-conflict');
+  });
+
+  /**
+   * The property §13 leans on rather than enforces: with no id there is
+   * nothing for *Don't warn me again* to key on, so an error Corgit does not
+   * recognise cannot be silenced — and the checkbox is simply not drawn.
+   * Checkout-blocked-by-local-changes is deliberately one of these.
+   */
+  test('an unrecognised failure has no id, and so cannot be suppressed', () => {
+    expect(translateGitError('error: some new thing git learned to say').id).toBeNull();
+  });
+
+  test('a stopped merge is the only blocking case', () => {
+    expect(translateGitError('Automatic merge failed; fix conflicts').tier).toBe('blocking');
+
+    // Everything else leaves the repo as it was, so its banner stays
+    // dismissible and suppressible.
+    for (const raw of [
+      '(non-fast-forward)',
+      "unable to create '.git/index.lock'",
+      'git timed out after 120s and was stopped',
+      'Please commit your changes or stash them',
+      'error: something unrecognised',
+    ]) {
+      expect(translateGitError(raw).tier).toBe('error');
+    }
+  });
+
+  test('a merge git refused outright is an error, not a block', () => {
+    // Nothing was merged, so there is no half-finished state for git to be
+    // stuck in — the dirty-tree rule wins and the banner stays dismissible.
+    const result = translateGitError(
+      [
+        'error: Your local changes to the following files would be overwritten by merge:',
+        '\tsrc/main.rs',
+        'Please commit your changes or stash them before you merge.',
+      ].join('\n'),
+    );
+
+    expect(result.id).toBe('dirty-tree');
+    expect(result.tier).toBe('error');
   });
 });

@@ -22,7 +22,7 @@
          app mark — this is the one screen with nothing to compete with, so it
          is where he can afford the most room. -->
     <div class="brand">
-      <Mascot pose="resting" height={150} />
+      <Mascot pose="resting" height={150} gaze />
       <h1>Corgit</h1>
     </div>
 

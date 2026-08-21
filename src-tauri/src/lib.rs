@@ -7,6 +7,7 @@ mod discovery;
 mod git;
 mod graph;
 mod menu;
+mod problems;
 mod remote;
 mod roots;
 mod settings;
@@ -37,6 +38,10 @@ const MAX_RECENT_ROOTS: usize = 10;
 
 const SWEEP_EVENT: &str = "status:sweep";
 const REPO_STATUS_EVENT: &str = "status:repo";
+/// A failure was added to the Recent Problems ring (§13). Emitted so the
+/// *other* windows learn about it — the one that triggered the operation
+/// already has the error in hand.
+const PROBLEM_EVENT: &str = "problem:recorded";
 
 /// Rust owns the state; the frontend is a view over it (SPEC.md §9.3).
 ///
@@ -417,13 +422,13 @@ async fn repo_files(repo_id: String, app: AppHandle) -> Result<FileChanges, Stri
 
 #[tauri::command]
 async fn stage_paths(repo_id: String, paths: Vec<String>, app: AppHandle) -> Result<(), String> {
-    write_and_refresh(&app, repo_id, |path| async move { commit::stage(&path, &paths).await })
+    write_and_refresh(&app, repo_id, "Stage", |path| async move { commit::stage(&path, &paths).await })
         .await
 }
 
 #[tauri::command]
 async fn unstage_paths(repo_id: String, paths: Vec<String>, app: AppHandle) -> Result<(), String> {
-    write_and_refresh(&app, repo_id, |path| async move { commit::unstage(&path, &paths).await })
+    write_and_refresh(&app, repo_id, "Unstage", |path| async move { commit::unstage(&path, &paths).await })
         .await
 }
 
@@ -432,23 +437,23 @@ async fn unstage_paths(repo_id: String, paths: Vec<String>, app: AppHandle) -> R
 /// `commit::discard`'s flags, and the confirmation entirely in the frontend.
 #[tauri::command]
 async fn discard_paths(repo_id: String, paths: Vec<String>, app: AppHandle) -> Result<(), String> {
-    write_and_refresh(&app, repo_id, |path| async move { commit::discard(&path, &paths).await })
+    write_and_refresh(&app, repo_id, "Discard", |path| async move { commit::discard(&path, &paths).await })
         .await
 }
 
 #[tauri::command]
 async fn stage_all(repo_id: String, app: AppHandle) -> Result<(), String> {
-    write_and_refresh(&app, repo_id, |path| async move { commit::stage_all(&path).await }).await
+    write_and_refresh(&app, repo_id, "Stage all", |path| async move { commit::stage_all(&path).await }).await
 }
 
 #[tauri::command]
 async fn unstage_all(repo_id: String, app: AppHandle) -> Result<(), String> {
-    write_and_refresh(&app, repo_id, |path| async move { commit::unstage_all(&path).await }).await
+    write_and_refresh(&app, repo_id, "Unstage all", |path| async move { commit::unstage_all(&path).await }).await
 }
 
 #[tauri::command]
 async fn commit_repo(repo_id: String, message: String, app: AppHandle) -> Result<(), String> {
-    write_and_refresh(&app, repo_id, |path| async move { commit::commit(&path, &message).await })
+    write_and_refresh(&app, repo_id, "Commit", |path| async move { commit::commit(&path, &message).await })
         .await
 }
 
@@ -506,7 +511,7 @@ async fn file_diff(
 /// trying to classify git's stderr (§8.3: never force-checkout).
 #[tauri::command]
 async fn switch_branch(repo_id: String, name: String, kind: graph::RefKind, app: AppHandle) -> Result<(), String> {
-    write_and_refresh(&app, repo_id, |path| async move {
+    write_and_refresh(&app, repo_id, "Switch branch", |path| async move {
         match kind {
             graph::RefKind::Local => branch::switch_local(&path, &name).await,
             graph::RefKind::Remote => branch::switch_remote_tracking(&path, &name).await,
@@ -528,10 +533,25 @@ async fn create_branch(
     checkout: bool,
     app: AppHandle,
 ) -> Result<(), String> {
-    write_and_refresh(&app, repo_id, |path| async move {
+    write_and_refresh(&app, repo_id, "Create branch", |path| async move {
         branch::create(&path, &name, &start_point, checkout).await
     })
     .await
+}
+
+/// Deleting a local branch (§8.3) — right-click its badge in the graph. The
+/// menu only offers this for local badges that are not the checked-out branch;
+/// `force` is never set by that first click, only by the *Delete anyway* the
+/// dialog grows once git has refused an unmerged branch.
+///
+/// Nothing here re-validates either condition. The frontend's checks are about
+/// which entries to *show*, and re-deriving them from cached status on this
+/// side would be deciding from the cache (§5.1) what git already knows for
+/// certain — a delete that should not happen fails as git's own error, which
+/// is the outcome anyway.
+#[tauri::command]
+async fn delete_branch(repo_id: String, name: String, force: bool, app: AppHandle) -> Result<(), String> {
+    write_and_refresh(&app, repo_id, "Delete branch", |path| async move { branch::delete(&path, &name, force).await }).await
 }
 
 /// Merging a branch into the checked-out one (§8.3) — right-click a ref badge
@@ -545,7 +565,7 @@ async fn create_branch(
 /// screen by the time the frontend shows the message.
 #[tauri::command]
 async fn merge_branch(repo_id: String, name: String, app: AppHandle) -> Result<(), String> {
-    write_and_refresh(&app, repo_id, |path| async move { branch::merge(&path, &name).await }).await
+    write_and_refresh(&app, repo_id, "Merge", |path| async move { branch::merge(&path, &name).await }).await
 }
 
 /// The dirty-tree checkout failure's other half (§8.3): launches VS Code on
@@ -668,6 +688,19 @@ async fn reveal_in_explorer(repo_id: String, path: String, app: AppHandle) -> Re
     open_folder(&fallback)
 }
 
+/// `git status` reports paths with forward slashes on every platform, so
+/// joining one onto a Windows root leaves `C:\repo/src/file.rs`. Everything
+/// that *opens* a path takes that as-is — `Path::exists` and `open_in_vscode`
+/// both do — but `explorer` does not open its argument, it parses it, and one
+/// forward slash makes it give up and show the user's home folder instead.
+/// That is the same silent wrong-window failure this pair already guards
+/// against for missing files, arriving by another route, so the separators are
+/// flipped here rather than at the join: explorer is the only thing that cares.
+#[cfg(windows)]
+fn explorer_arg(path: &Path) -> String {
+    path.display().to_string().replace('/', "\\")
+}
+
 /// `explorer /select,<file>` opens the containing folder with the file
 /// highlighted. The argument is written raw because explorer parses its own
 /// command line rather than reading argv: Rust's quoting would hand it
@@ -681,7 +714,7 @@ fn reveal_existing(target: &Path) -> Result<(), String> {
     // `explorer` exits non-zero even when it succeeds (menu.rs's log folder
     // says the same), so spawning is the only thing worth checking here.
     std::process::Command::new("explorer")
-        .raw_arg(format!("/select,\"{}\"", target.display()))
+        .raw_arg(format!("/select,\"{}\"", explorer_arg(target)))
         .spawn()
         .map(|_| ())
         .map_err(|err| format!("could not open File Explorer: {err}"))
@@ -695,9 +728,16 @@ fn reveal_existing(target: &Path) -> Result<(), String> {
 }
 
 fn open_folder(dir: &Path) -> Result<(), String> {
-    let opener = if cfg!(windows) { "explorer" } else { "xdg-open" };
+    // Same separator trap as `reveal_existing`, and the fallback path is the
+    // one most likely to carry a slash: it is an ancestor of a git-reported
+    // path. Explorer takes a mixed-separator folder to mean Documents.
+    #[cfg(windows)]
+    let (opener, arg) = ("explorer", explorer_arg(dir));
+    #[cfg(not(windows))]
+    let (opener, arg) = ("xdg-open", dir.display().to_string());
+
     std::process::Command::new(opener)
-        .arg(dir)
+        .arg(arg)
         .spawn()
         .map(|_| ())
         .map_err(|err| format!("could not open the folder: {err}"))
@@ -758,6 +798,27 @@ fn clear_pins(app: AppHandle) -> Result<HashSet<String>, String> {
     Ok(HashSet::new())
 }
 
+/// *Help ▸ Recent Problems…* (§13, §4.1). Reads the process-wide ring, so
+/// every window sees the same history of the same herd (§9.2).
+#[tauri::command]
+fn recent_problems() -> Vec<problems::Problem> {
+    problems::recent()
+}
+
+/// *Clear* in the Problems window. Empties the ring only — `corgit.log` keeps
+/// everything, because clearing a view of the record must not destroy the
+/// record. Same rule as §13's suppression, which silences a notification and
+/// never a condition.
+#[tauri::command]
+fn clear_problems(app: AppHandle) {
+    problems::clear();
+    // The list is process-wide, so a second window showing the old entries
+    // after this would be showing something that no longer exists.
+    if let Err(err) = app.emit(PROBLEM_EVENT, ()) {
+        log::warn!("could not publish the problems clear ({err})");
+    }
+}
+
 /// The frontend's current selection, mirrored server-side (§9.5's persisted
 /// `last_selected`, and the input to the hot set in §6/build step 9's
 /// watchers). `None` when nothing is selected.
@@ -807,26 +868,26 @@ fn persist_root_settings(app: &AppHandle, root_path: &Path, pins: HashSet<String
 /// the freshest signal about whether the repo still needs attention.
 #[tauri::command]
 async fn fetch_repo(repo_id: String, app: AppHandle) -> Result<(), String> {
-    let result = write_and_refresh(&app, repo_id.clone(), |path| async move { remote::fetch(&path).await }).await;
+    let result = write_and_refresh(&app, repo_id.clone(), "Fetch", |path| async move { remote::fetch(&path).await }).await;
     record_fetch_attempt(&app, &repo_id);
     result
 }
 
 #[tauri::command]
 async fn pull_repo(repo_id: String, app: AppHandle) -> Result<(), String> {
-    write_and_refresh(&app, repo_id, |path| async move { remote::pull(&path).await }).await
+    write_and_refresh(&app, repo_id, "Pull", |path| async move { remote::pull(&path).await }).await
 }
 
 #[tauri::command]
 async fn push_repo(repo_id: String, app: AppHandle) -> Result<(), String> {
-    write_and_refresh(&app, repo_id, |path| async move { remote::push(&path).await }).await
+    write_and_refresh(&app, repo_id, "Push", |path| async move { remote::push(&path).await }).await
 }
 
 /// §13's merge-conflict banner: "Abort merge", one of its exactly two ways
 /// out (the other is *Open in VS Code*).
 #[tauri::command]
 async fn merge_abort(repo_id: String, app: AppHandle) -> Result<(), String> {
-    write_and_refresh(&app, repo_id, |path| async move { remote::merge_abort(&path).await }).await
+    write_and_refresh(&app, repo_id, "Abort merge", |path| async move { remote::merge_abort(&path).await }).await
 }
 
 /// A branch with no upstream configured (§8.7). `remote::publish` pushes
@@ -835,7 +896,7 @@ async fn merge_abort(repo_id: String, app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 async fn publish_branch(repo_id: String, app: AppHandle) -> Result<(), String> {
     current_branch(&app, &repo_id)?;
-    write_and_refresh(&app, repo_id, |path| async move { remote::publish(&path).await }).await
+    write_and_refresh(&app, repo_id, "Publish branch", |path| async move { remote::publish(&path).await }).await
 }
 
 /// Commit, then push in one step. Whether that push needs `-u origin` is
@@ -863,7 +924,7 @@ async fn commit_and_push(repo_id: String, message: String, app: AppHandle) -> Re
     // it down the plain-push path to fail in git's words instead of ours.
     let needs_publish = publish_needed(&app, &repo_id)?;
 
-    write_and_refresh(&app, repo_id, |path| async move {
+    write_and_refresh(&app, repo_id, "Commit + Push", |path| async move {
         commit::commit(&path, &message).await?;
         if needs_publish { remote::publish(&path).await } else { remote::push(&path).await }
     })
@@ -927,7 +988,12 @@ fn record_fetch_attempt(app: &AppHandle, repo_id: &str) {
 /// publish its status regardless of whether `op` succeeded — a failed stage
 /// or commit can still have changed something (e.g. a partial index update),
 /// and the row must never show data staler than the attempt just made.
-async fn write_and_refresh<F, Fut>(app: &AppHandle, repo_id: String, op: F) -> Result<(), String>
+async fn write_and_refresh<F, Fut>(
+    app: &AppHandle,
+    repo_id: String,
+    operation: &str,
+    op: F,
+) -> Result<(), String>
 where
     F: FnOnce(PathBuf) -> Fut,
     Fut: std::future::Future<Output = Result<(), String>>,
@@ -938,6 +1004,21 @@ where
         let _write_guard = app.state::<AppState>().write_queues.write(&repo_id).await;
         op(path.clone()).await
     };
+
+    // Recorded here rather than at each call site for the same reason the
+    // status refresh below is: this is the one shape every mutating command
+    // has, so a new write command cannot forget to be in the record (§13).
+    //
+    // `operation` is the user's word for what they asked — "Push", "Merge" —
+    // not the git argv, which `git.rs` already logged next to this stderr.
+    // The Problems list answers "what of mine failed"; the log answers "with
+    // what command", and they are different questions.
+    if let Err(err) = &result {
+        let problem = problems::record(Some(repo_id.clone()), operation, err);
+        if let Err(err) = app.emit(PROBLEM_EVENT, problem) {
+            log::warn!("could not publish a recorded problem ({err})");
+        }
+    }
 
     emit_repo_status(app, &repo_id, &path).await;
     result
@@ -1056,12 +1137,26 @@ fn start_sweep(app: &AppHandle, generation: u64, repos: Vec<Repo>) {
 }
 
 async fn sweep(app: AppHandle, generation: u64, repos: Vec<Repo>) {
-    let write_queues = {
+    let (write_queues, reconcile) = {
         let state = app.state::<AppState>();
         if state.sweeping.swap(true, Ordering::SeqCst) {
             return;
         }
-        state.write_queues.clone()
+
+        // Which repo this sweep owes a *full* republish to when it lands, if
+        // it is covering that repo at all. Taken here because `collect` below
+        // consumes the list, and because the answer is only interesting for
+        // the one repo whose paths anybody is looking at.
+        let reconcile = {
+            let current = state.root.lock().expect("root mutex poisoned");
+            current.as_ref().and_then(|root| {
+                let id = root.selected.as_ref()?;
+                let repo = repos.iter().find(|repo| &repo.id == id)?;
+                Some((repo.id.clone(), repo.path.clone()))
+            })
+        };
+
+        (state.write_queues.clone(), reconcile)
     };
 
     let started = Instant::now();
@@ -1125,6 +1220,31 @@ async fn sweep(app: AppHandle, generation: u64, repos: Vec<Repo>) {
             // this one for the same root file (§6 — "a sweep never starts
             // while one is in flight").
             state.sweeping.store(false, Ordering::SeqCst);
+
+            // A sweep publishes counts, and counts are all the *rows* need.
+            // The middle pane's file list and the open diff are fed by
+            // `status:repo` instead (§5.2, §5.4), so reconciling the rows
+            // without reconciling the selected repo in full leaves those two
+            // describing the working tree as it was when a watcher last
+            // fired. The case that makes it visible is the one where the
+            // sweep itself has nothing to show: editing a file that was
+            // already modified moves no count, so the row is right, the list
+            // is right, and the diff under them is stale.
+            //
+            // This is what covers the window with no watchers at all — §6
+            // drops them on blur, so *every* change made in an editor while
+            // Corgit is in the background arrives through the focus-gain
+            // sweep and nothing else. It also covers repos that could never
+            // be watched (a linked worktree, a network share), which have no
+            // other path to a fresh diff than this one.
+            //
+            // One extra `git status` for one repo, on sweeps that covered it.
+            if let Some((repo_id, path)) = reconcile {
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    emit_repo_status(&app, &repo_id, &path).await;
+                });
+            }
         }
         Outcome::Restart(generation, repos) => {
             // Cleared before restarting, not after: `start_sweep` spawns a
@@ -1738,12 +1858,15 @@ pub fn run() {
             switch_branch,
             create_branch,
             merge_branch,
+            delete_branch,
             open_in_vscode,
             open_in_terminal,
             reveal_in_explorer,
             toggle_pin,
             clear_pins,
             set_selected_repo,
+            recent_problems,
+            clear_problems,
             menu::menu_command,
             menu::publish_pane_visibility,
         ])
@@ -1754,6 +1877,16 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The whole point of `explorer_arg`: a repo-relative path off `git status`
+    /// joined onto a Windows root is mixed-separator, and explorer answers that
+    /// by opening the home folder rather than failing.
+    #[cfg(windows)]
+    #[test]
+    fn explorer_arg_flips_git_slashes() {
+        let target = PathBuf::from(r"C:\dev\corgit").join("src/lib/repos.svelte.ts");
+        assert_eq!(explorer_arg(&target), r"C:\dev\corgit\src\lib\repos.svelte.ts");
+    }
 
     fn repo(id: &str) -> Repo {
         Repo { id: id.to_string(), name: id.to_string(), path: PathBuf::from(id) }

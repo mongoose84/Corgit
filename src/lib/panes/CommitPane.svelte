@@ -2,11 +2,11 @@
   import Pane from './Pane.svelte';
   import FileRow from './FileRow.svelte';
   import EmptyState from '../EmptyState.svelte';
-  import GitErrorNotice from '../GitErrorNotice.svelte';
+  import Mascot from '../Mascot.svelte';
   import Glyph from '../Glyph.svelte';
   import DiscardDialog from '../DiscardDialog.svelte';
   import ContextMenu from '../ContextMenu.svelte';
-  import { needsPublish, repos, type FileEntry } from '../repos.svelte';
+  import { hasConflict, needsPublish, repos, type FileEntry } from '../repos.svelte';
   import { diff, type DiffSource } from '../diff.svelte';
   import {
     extend,
@@ -34,7 +34,14 @@
   const publishable = $derived(status !== undefined && needsPublish(status));
   // §13: an unresolved merge conflict blocks commit and push for this repo
   // until it's resolved or aborted — exactly two ways out, never a third.
-  const conflicted = $derived(status !== undefined && status.conflicted > 0);
+  //
+  // The pane no longer *draws* the conflict: that is the blocking banner in
+  // the app chrome, which can hold a headline and both buttons on one line at
+  // window width and could not at this pane's 240px minimum (§4). What stays
+  // here is the part that was always this pane's own — the guard on its two
+  // buttons. Via the shared predicate, so the banner and the disabled Commit
+  // cannot disagree about whether this repo is wedged.
+  const conflicted = $derived(status !== undefined && hasConflict(status));
 
   const canCommit = $derived(
     hasRepo && !busy && !conflicted && message.trim().length > 0 && (files?.stagedTotal ?? 0) > 0,
@@ -44,6 +51,27 @@
   function sectionLabel(shown: number, total: number): string {
     return shown === total ? `${total}` : `${shown} of ${total}`;
   }
+
+  // The payoff state (SPEC.md §14.1, docs/mascot-clean-pane.md): a selected
+  // repo with genuinely nothing to commit. `content` is wired to the herd-wide
+  // version of this in the graph pane, which is unreachable while you are
+  // actually working — select a clean repo and it goes away.
+  //
+  // Judged from `files`, never from `isDirty(status)`. `status` comes from the
+  // sweep cache and the cache is never truth (§5.1) — it can be a sweep behind
+  // the rows this pane just drew, and a dog lying down over changes that are
+  // on screen is the one way this state can lie. This is the rare place where
+  // *not* reusing the shared predicate is the correct call.
+  //
+  // Totals, not `staged.length`/`unstaged.length`: those lists are capped, and
+  // that is what `sectionLabel` above exists for.
+  const atRest = $derived(
+    !conflicted &&
+      !repos.loadingFiles &&
+      files !== null &&
+      files.stagedTotal === 0 &&
+      files.unstagedTotal === 0,
+  );
 
   // Discard (§5.2) — the only thing in the pane that destroys work, so it is
   // scoped as narrowly as it can honestly be and confirmed every time.
@@ -198,15 +226,6 @@
     }
   }
 
-  async function doMergeAbort() {
-    busy = true;
-    try {
-      await repos.mergeAbort();
-    } finally {
-      busy = false;
-    }
-  }
-
   async function doFetch() {
     busy = true;
     try {
@@ -298,7 +317,7 @@
   }
 </script>
 
-<Pane title="Changes">
+<Pane title="Changes" class="commit-pane">
   {#snippet actions()}
     <!-- Icon-only and hover-revealed per feedback, rather than a full button
          row, since they act on the selected repo the same way the menu bar's
@@ -324,17 +343,6 @@
   {#if !hasRepo}
     <EmptyState message="No repository selected" hint="Select a repository to stage and commit changes" />
   {:else}
-    {#if conflicted}
-      <!-- §13: exactly two buttons, never a third — never force-anything. -->
-      <div class="conflict-banner">
-        <p class="selectable">This repository has a merge conflict. Commit and push are blocked until it's resolved or aborted.</p>
-        <div class="conflict-actions">
-          <button type="button" disabled={busy} onclick={doMergeAbort}>Abort merge</button>
-          <button type="button" disabled={busy} onclick={() => repos.openInVSCode()}>Open in VS Code</button>
-        </div>
-      </div>
-    {/if}
-
     <div class="compose">
       <div class="message-field">
         <textarea
@@ -374,15 +382,6 @@
       >
         Commit + Push
       </button>
-
-      {#if repos.writeError}
-        <GitErrorNotice
-          error={repos.writeError}
-          onPull={doPull}
-          onOpenVSCode={() => repos.openInVSCode()}
-          onDismiss={() => (repos.writeError = null)}
-        />
-      {/if}
     </div>
 
     {#if repos.loadingFiles && !files}
@@ -465,6 +464,21 @@
           {/each}
         </ul>
       {/if}
+
+      {#if atRest}
+        <!-- A sibling of both sections rather than nested in either: he
+             reports on the pair of them. The two grey lines above stay — they
+             carry the meaning, and the dog is `aria-hidden` decoration
+             (Mascot.svelte), so removing them would put semantic weight on an
+             image.
+
+             Not `EmptyState`: that is `height: 100%` and centres against the
+             whole pane, which would fight the sections above it. -->
+        <div class="rest">
+          <Mascot pose="content" height={75} />
+          <p>Nothing to commit</p>
+        </div>
+      {/if}
     {/if}
   {/if}
 </Pane>
@@ -487,41 +501,79 @@
 {/if}
 
 <style>
-  .conflict-banner {
+  /* `Pane`'s `.body` is a plain block box, so nothing in this pane knows how
+     tall the pane is: a mascot appended after the sections would land directly
+     under "No changes" with a void beneath it, which reads as a rendering bug
+     rather than a rest state. A flex column gives `.rest` below something to
+     claim the leftover space with.
+
+     `.body` is `Pane`'s markup, hence the `class` prop and the `:global()` —
+     that prop exists for exactly this. */
+  :global(.commit-pane .body) {
     display: flex;
+    flex-direction: column;
+  }
+
+  /* The cost of the rule above: every child of `.body` is now a flex item, and
+     flex items shrink by default. In a scrolling container that lets the file
+     lists compress below their content height instead of letting `.body`
+     scroll. Every stacking child needs this, and missing one only shows up on
+     a repo with enough files to overflow — not the repo you test on.
+
+     `.rest` is deliberately absent: it is the one thing here that *should*
+     flex. `EmptyState` is too — it is never a sibling, only ever the sole
+     child of its own branch. */
+  .compose,
+  .section,
+  .section-empty,
+  ul {
+    flex-shrink: 0;
+  }
+
+  /* Claims whatever is left below the two sections and sits him at the foot of
+     it — `flex-end`, not `center`. Centring floated him in the middle of the
+     void on a tall window, which reads as "placed nowhere"; resting on the
+     floor of the pane is a position with a reason, and it holds still as the
+     file lists above grow.
+     No `min-height: 0`: on a short window he should push `.body` into a
+     scroll rather than be squashed. */
+  .rest {
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
     align-items: center;
-    justify-content: space-between;
+    justify-content: flex-end;
     gap: var(--space-2);
-    padding: var(--space-2) var(--space-3);
-    border-bottom: 1px solid var(--border);
-    background: var(--bg-raised);
+    /* Bottom padding is much smaller than the top: the artwork is drawn with
+       its own floor shadow, so a generous gap under it reads as him hovering
+       rather than as breathing room. `--space-1` is close to the floor of what
+       is available — the caption sits below the dog, so this is clearance for
+       a line of text, and taking it to zero would crowd its descenders against
+       the pane edge. If he needs to sit lower still, the gap to spend is the
+       `gap` above, not this. */
+    padding: var(--space-4) var(--space-3) var(--space-1);
   }
 
-  .conflict-banner p {
+  /* `content` is the widest, shortest pose (1.57:1), so 75px tall is 118px
+     wide against a 240px `MIN_MIDDLE` (App.svelte) — the guard below is now
+     slack at every width the pane can reach, but it stays: it costs nothing
+     and the size is the kind of number that gets revisited.
+     `Mascot.svelte` sets a height with `width: auto` and cannot answer a
+     narrow pane on its own, so the guard lives here rather than there —
+     keeping it out is what keeps its height-only API, and with it the poses
+     looking like one set. */
+  .rest :global(img) {
+    max-width: 100%;
+    height: auto;
+  }
+
+  /* Muted rather than `--text-disabled`: it is the caption to the artwork, not
+     a third grey line like "No changes" above it. Same size, so it does not
+     compete with the pane's own section headings either. */
+  .rest p {
     margin: 0;
-    min-width: 0;
     font-size: var(--text-sm);
-    color: var(--status-conflict);
-  }
-
-  .conflict-actions {
-    display: flex;
-    flex: 0 0 auto;
-    gap: var(--space-2);
-  }
-
-  .conflict-actions button {
-    height: 22px;
-    padding: 0 var(--space-2);
-    font-size: var(--text-xs);
-    color: var(--text-primary);
-    background: var(--bg-hover);
-    border: 1px solid var(--border-strong);
-    border-radius: var(--radius-sm);
-  }
-
-  .conflict-actions button:hover:not(:disabled) {
-    background: var(--bg-active);
+    color: var(--text-muted);
   }
 
   .compose {

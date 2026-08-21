@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest';
 
-import { isDirty, needsPublish, type RepoStatus } from './repos.svelte';
+import { hasConflict, isDirty, needsPublish, type RepoStatus } from './repos.svelte';
 
 function status(overrides: Partial<RepoStatus> = {}): RepoStatus {
   return {
@@ -94,5 +94,28 @@ describe('isDirty (§5.1)', () => {
    *  frontend fails if they ever part. */
   test('a status with counts but no changedFiles is still dirty', () => {
     expect(isDirty(status({ unstaged: 2, changedFiles: 0 }))).toBe(true);
+  });
+});
+
+describe('hasConflict (§13)', () => {
+  /**
+   * The blocking tier's whole predicate. It decides three things that must
+   * never disagree: the row's ⚠, the banner above the panes, and whether
+   * Commit and Push are usable at all — which is why it is shared rather than
+   * re-derived at each of the three.
+   */
+  test('a clean repo is not conflicted', () => {
+    expect(hasConflict(status())).toBe(false);
+  });
+
+  test('any unmerged path is a conflict', () => {
+    expect(hasConflict(status({ conflicted: 1, changedFiles: 1 }))).toBe(true);
+  });
+
+  test('an ordinarily dirty repo is not blocked', () => {
+    // The distinction the tiers rest on: work in progress is not a state git
+    // refuses to leave, so it must not raise a banner that cannot be
+    // dismissed or block the two buttons.
+    expect(hasConflict(status({ unstaged: 4, changedFiles: 4 }))).toBe(false);
   });
 });
