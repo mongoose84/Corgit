@@ -1,7 +1,8 @@
 # Corgit — the dog in a clean commit pane
 
-**Status: proposed, not implemented.** Design note for a change to
-`src/lib/panes/CommitPane.svelte`.
+**Status: implemented.** Design note for the mascot in `src/lib/panes/CommitPane.svelte`,
+kept as the decision record for it — §2.1 and §8 are the reasoning behind what the code
+does *not* do, which the code cannot carry on its own. Option A in §4 is what was built.
 
 Governing rules: [SPEC.md](SPEC.md) §14.1 (where the mascot may appear) and
 [mascot.md](mascot.md) §2 and §5. This change needs no amendment to either — it fills a
@@ -110,7 +111,7 @@ which looks like a rendering bug rather than a rest state.
 
 Two ways out.
 
-### Option A — centre it in the leftover space (recommended)
+### Option A — claim the leftover space (recommended)
 
 `Pane.svelte` already exposes a `class` prop documented as *"a styling hook for a
 caller-owned `:global()` rule"*. This is the case it was put there for.
@@ -118,7 +119,17 @@ caller-owned `:global()` rule"*. This is the case it was put there for.
 1. `<Pane title="Changes" class="commit-pane">`
 2. In `CommitPane.svelte`'s style block: `:global(.commit-pane .body) { display: flex;
    flex-direction: column; }`
-3. Wrap the mascot in a `.rest` div with `flex: 1 1 auto` and flex-centre its contents.
+3. Wrap the mascot in a `.rest` div with `flex: 1 1 auto` and flex-align its contents.
+
+*Revised after seeing it run:* `.rest` justifies to `flex-end`, not `center`. Centred in the
+leftover space he floats in the middle of the void on a tall window and moves up the pane
+every time a file appears above him; on the floor of the pane he has a position with a
+reason and stays put. The wrapper's bottom padding is what keeps him off the edge, and it
+is deliberately much tighter than its top (`--space-1` against `--space-4`): the pose is
+drawn with its own floor shadow, so a symmetric gap under it reads as hovering rather than
+as breathing room. That 4px is clearance for the caption's descenders rather than for the
+artwork, so it is close to the floor of what the padding can give — lowering him further
+means closing the `gap` between dog and caption instead.
 
 **The gotcha that will bite:** turning `.body` into a flex column makes every existing
 child a flex item, and flex items default to `flex-shrink: 1`. In a scrolling container
@@ -143,14 +154,23 @@ It ships drawn with a green check badge overlapping it (mascot.md §5); since th
 counts beside "Staged Changes" and "Changes" already say the same thing, check whether the
 badge reads as redundant here.
 
-**Size: 128px**, against the 112px the same pose gets in the graph pane. Deliberately
-bolder — this is a payoff state and it should feel like one — but the two numbers it sits
-between are both real.
+**Size: 75px**, against the 112px the same pose gets in the graph pane.
+
+*This started at 128px* — bolder than the graph pane's on the reasoning that a payoff state
+should feel like one — and came down after living with it. Two things the mock could not
+show: this state is reached every time you select a clean repo, so it is the most frequently
+seen placement in the app rather than a rare reward, and unlike the graph pane's it shares
+its pane with the two sections above it instead of owning the whole column. At 128px it
+read as an illustration the pane was built around. It came down in three passes, 128 to 75,
+each one a look at the running app rather than a calculation — treat the number as found,
+not derived, and re-look rather than re-reason if it moves again. The bounds below were the
+argument for 128 being *safe*; they were never an argument for it being right.
 
 *The upper bound is the artwork.* `content.png` is **349 × 222** native, and mascot.md §3
 notes the slices are already the 2× asset. 222 ÷ 2 = 111, so the graph pane's 112px is
 precisely the largest render that is still pixel-crisp on a 200%-scaled display — which is
-most Windows laptops. 128px is a 1.28× upscale there. That is safe for this artwork
+most Windows laptops. 75px is well under that, so this placement is a downscale and crisp
+everywhere; the 128px it replaced was a 1.28× upscale there. That was safe for this artwork
 specifically: it is soft-shaded illustration with a hand-drawn outline, which tolerates
 mild upscaling far better than crisp vector or pixel art would. Around 180px it starts to
 look mushy, and there is no way to fix that by asking for a bigger number — the slices are
@@ -158,10 +178,12 @@ exact crops from a 1536×1024 contact sheet, so more pixels means regenerating t
 higher resolution and re-cutting.
 
 *The tighter bound is width.* `content` is the widest, shortest pose in the set at 1.57:1,
-so 128px tall is **201px wide**. `App.svelte:19` sets `MIN_MIDDLE = 240`, and the default
-middle pane is 20% of usable width (`DEFAULT_PANE_WIDTHS` in `settings.svelte.ts:31`) —
-roughly 290px at a 1440px window, 380px at 1920px. Comfortable at the default, snug at the
-minimum. **Check it at 240px, not on a dragged-wide pane.**
+so 75px tall is **118px wide** (128px was 201px). `App.svelte:19` sets `MIN_MIDDLE = 240`,
+and the default middle pane is 20% of usable width (`DEFAULT_PANE_WIDTHS` in
+`settings.svelte.ts:31`) — roughly 290px at a 1440px window, 380px at 1920px. This is what
+made 128px snug at the minimum and comfortable at the default; 75px clears `MIN_MIDDLE`
+with ~60px either side and stopped being the binding constraint. **Still check it at 240px
+rather than on a dragged-wide pane** if the size ever goes back up.
 
 Because of that, add a shrink guard. `Mascot.svelte` sets a fixed height with `width: auto`,
 so it cannot respond to a narrow pane at all today — at `MIN_MIDDLE` the dog will sit
@@ -197,10 +219,10 @@ opposite of that.
 
 ## 7. Update in the same change
 
-- **`docs/mascot.md` §5, "Where they are wired"** — add the row: `Content, 128px |
+- **`docs/mascot.md` §5, "Where they are wired"** — add the row: `Content, 75px |
   panes/CommitPane.svelte | A repo is selected, its file list has been read, and both
-  totals are zero`. Worth also amending §3's "largest on-screen use is ~130px", which this
-  change makes exactly true rather than approximately.
+  totals are zero`. §3's "largest on-screen use" line is about the asset resolution and
+  tracks the biggest placement anywhere, which is `Welcome.svelte`'s 150px, not this one.
 - **`docs/SPEC.md`** — no change. §14.1 already permits it; §5.2 describes the pane's
   sections and does not enumerate its empty states.
 
@@ -210,7 +232,7 @@ component-test harness in the project. `npm run check` is the gate.
 Check it in the running app against four cases, in this order — the first two are the
 feature, the last two are the regression risk from §4:
 
-1. A clean repo — dog centred in the space below "No changes".
+1. A clean repo — dog at the foot of the pane below "No changes".
 2. A repo with two changed files — no dog, and no layout shift versus today.
 3. A repo with ~200 changed files — list scrolls, nothing squashed.
 4. The middle pane dragged to `MIN_MIDDLE` — dog scales down, does not clip or overflow.

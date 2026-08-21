@@ -402,14 +402,14 @@ It is **not resizable** and has no stored fraction — the graph's `1fr` track a
 (§4). The only constraint it adds is that the graph must still clear its minimum width
 while the panel is open.
 
-**Opening it is a deliberate act, and selecting a row is not one.** *Info* on a row's
+**Opening it is a deliberate act, and selecting a row is not one.** *Show info* on a row's
 context menu is the only way in. Selection used to be: clicking any commit opened the
 column, which meant reading the graph — the ordinary thing to do in that pane — cost a
 320 px reflow every click, and shelled out to `git show` for a commit the user was only
-scrolling past. Right-click ▸ Info separates "I am looking at the graph" from "tell me
-about this one".
+scrolling past. Right-click ▸ Show info separates "I am looking at the graph" from "tell
+me about this one".
 
-Every row's menu carries *Info*, including rows with no ref badges on them, which before
+Every row's menu carries *Show info*, including rows with no ref badges on them, which before
 this had no menu at all. It is the first entry, above the branch entries (§8.3) that only
 appear on rows carrying a badge.
 
@@ -465,9 +465,9 @@ Selected repo only — one repo at a time, so graph cost never multiplies by 77.
   before the message column gets its remaining space.
 - Loads **300 commits at a time** with a "Load more" row at the bottom.
 - Click a commit → it is selected, and nothing else happens. **The info panel does not
-  open on selection** (§5.2); *Info* on the row's context menu opens it.
-- Right-click a commit → **Info** first, then the branch entries for any ref badges the row
-  carries (§8.3). Copy hash, Copy message and Open in VS Code belong here too. (Thin by
+  open on selection** (§5.2); *Show info* on the row's context menu opens it.
+- Right-click a commit → **Show info** first, then the branch entries for any ref badges the
+  row carries (§8.3). Copy hash, Copy message and Open in VS Code belong here too. (Thin by
   design — the graph is a viewer in v1.)
 
 **Rendering: SVG lanes + virtualized DOM rows.** Not canvas. A few hundred SVG paths for
@@ -749,6 +749,8 @@ git switch -c <branch> --track origin/<branch>   # remote-tracking
 git branch <new> <start-point>                   # create, stay put
 git switch -c <new> <start-point>                # create and check out
 git merge --no-edit <source>                     # into the checked-out branch
+git branch -d <branch>                           # delete, refuses if unmerged
+git branch -D <branch>                           # delete anyway, only after -d refused
 ```
 
 The switcher lists **local branches, plus remote branches with no local counterpart**,
@@ -780,6 +782,23 @@ cached (§5.1). Remote-tracking badges are offered too: merging `origin/main` in
 you are on is the same gesture, and it is the case Pull does not cover, since Pull only ever
 merges *your* upstream. The badge for the current branch itself offers nothing — merging a
 branch into itself is git's own no-op. On a detached HEAD the entry is absent entirely.
+
+**Deleting a branch** (same menu): right-click a *local* ref badge in the graph → *Delete
+`<ref>`*. Local badges only — a remote badge names a branch on the server, and removing
+that is `push --delete`, a network write with a different blast radius that is not folded
+into the same entry. The badge for the checked-out branch does not offer it either: git
+refuses to delete the branch HEAD is on, and an entry that can only fail is not an entry.
+
+The confirmation is **two-stepped, in one dialog**, and this is where §8.3's
+"never force-checkout" rule is honoured rather than broken. The first press always runs
+`git branch -d`; *Delete anyway* (`-D`) appears only after git has refused, with git's own
+"not fully merged" text above it. So the destructive button is never the one on screen when
+the dialog opens, and the reason for it is git's rather than a warning Corgit guessed at in
+advance. Forcing has to be reachable at all because a squash-merged branch is unmerged to
+git forever — which is the most common branch a user wants to delete.
+
+Everything else — a delete that fails for any other reason — closes the dialog and surfaces
+as an ordinary write error (§13), exactly like a failed switch or merge.
 
 `--no-edit` for the same reason Pull passes `--no-rebase`: user config (`merge.edit`,
 `GIT_MERGE_AUTOEDIT`) can otherwise summon an editor, and an editor spawned by a process

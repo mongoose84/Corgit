@@ -103,7 +103,7 @@ fixed. `--eyes` is unaffected — it never re-cuts from the sheet.
 
 The app imports its copies rather than reaching into `docs/`, so shipping code never
 depends on the documentation tree. They stay at the slices' native resolution — the largest
-is 382px wide against a ~130px largest on-screen use, so they are already the 2× asset.
+is 382px wide against a 150px largest on-screen use, so they are already the 2× asset.
 
 The `*-alpha.png` variants have the paper background, the decorative halo behind the seated
 poses and the floor shadow knocked out. That cut has to flood in from the border and spread
@@ -142,6 +142,7 @@ resting placements also pass `gaze`, which is §6.1.
 | Resting + gaze, 150px | `Welcome.svelte` | The first screen, above the wordmark. Standing in for the greeting pose until that is drawn — sitting up waiting for something to herd is what this screen means anyway. The one place with nothing to compete with, so he gets the most room |
 | Resting + gaze, 132px | `panes/GraphPane.svelte` | No repo selected, and something in the herd still needs attention |
 | Content, 112px | `panes/GraphPane.svelte` | No repo selected and `repos.allClean` — every repo swept, clean, and neither ahead nor behind |
+| Content, 75px | `panes/CommitPane.svelte` | A repo is selected, its file list has been read, and both totals are zero, sat at the foot of the pane. The same payoff state as the row above, reachable while you are actually working rather than only with nothing selected. Smaller than the 112px, not bolder: this one shows up every time you select a clean repo, which in a herd of mostly-clean repos is often, and it shares the pane with the sections above it rather than owning the whole of one. Well under the 111px pixel-crisp ceiling at 200% scaling, so unlike the earlier 128px it is a downscale |
 | Mini working, 18px | `panes/RepoList.svelte` | A status sweep is in flight; the pane header's timing readout takes the slot back when it lands |
 | Mini sorry, 20px | `GitErrorNotice.svelte` | Any git failure, wherever the notice is used. Kept small because the narrowest host is the 240px commit pane |
 | App mark, 20px | `TitleBar.svelte` | Always, at the left end of the combined title bar (SPEC.md §4.1). Below the 24px floor above, which is the case the head crop exists for — the taskbar and the window caption have been rendering the same artwork at 16px all along. It became a UI placement only when the window's caption stopped being drawn by Windows and started being ours |

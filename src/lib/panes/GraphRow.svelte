@@ -23,7 +23,7 @@
     /** Right-clicking the row, or a single badge on it (§8.3, §5.2) — the
      *  badge passes just itself, so its branch entries are about that branch
      *  alone rather than every ref sharing the commit. The hash goes with it
-     *  either way: *Info* is about the commit under the pointer, and a row
+     *  either way: *Show info* is about the commit under the pointer, and a row
      *  with no badges at all still has that one entry. */
     onContextMenu: (event: MouseEvent, refs: RefBadge[], hash: string) => void;
   }

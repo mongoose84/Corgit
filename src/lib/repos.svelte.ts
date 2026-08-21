@@ -393,6 +393,15 @@ class RepoStore {
     return this.write('merge_branch', { name });
   }
 
+  /** Deleting a local branch from the graph (§8.3) — `name` is the local ref
+   *  badge that was right-clicked. `force` is `git branch -D`, and only the
+   *  delete dialog's second step ever passes it: the first attempt is always
+   *  the safe `-d`, so the unsafe one is reachable only through git's own
+   *  "not fully merged" refusal on screen. */
+  async deleteBranch(name: string, force: boolean): Promise<boolean> {
+    return this.write('delete_branch', { name, force });
+  }
+
   /** The dirty-tree checkout failure's other half (§8.3) — not routed through
    *  `write()`, since it never mutates repo state and has nothing to refresh.
    *  Defaults to the selected repo; the row context menu (§5.1) passes an

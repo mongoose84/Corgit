@@ -7,9 +7,11 @@
   import Mascot from '../Mascot.svelte';
   import ContextMenu from '../ContextMenu.svelte';
   import CreateBranchDialog from '../CreateBranchDialog.svelte';
+  import DeleteBranchDialog from '../DeleteBranchDialog.svelte';
   import GitErrorNotice from '../GitErrorNotice.svelte';
   import { repos, isDirty } from '../repos.svelte';
   import { graph, type RefBadge } from '../graph.svelte';
+  import { isUnmergedBranchRefusal } from '../gitErrors';
   import { diff } from '../diff.svelte';
   import { laneCount as computeLaneCount, laneColorVar, ROW_HEIGHT, LANE_WIDTH } from '../graphLayout';
 
@@ -106,9 +108,15 @@
   // Non-null while the Create Branch dialog is up; the value is the start
   // point the new branch will be cut from (§8.3).
   let createFrom = $state<string | null>(null);
+  // Non-null while the Delete Branch dialog is up (§8.3). `refusal` carries
+  // git's "not fully merged" text once a safe delete has come back with one,
+  // which is what turns the dialog's second step on; it lives here rather than
+  // in the dialog because it *is* the failed write's error, and every other
+  // write's error is the pane's to hold.
+  let deleting = $state<{ name: string; refusal: string | null } | null>(null);
 
   // Esc shuts the info panel (§5.2) and leaves the row selected — it undoes
-  // the *Info* that opened the column, not the click that picked the row.
+  // the *Show info* that opened the column, not the click that picked the row.
   // Guarded three ways: the panel has to be open; the graph has to be the view
   // on screen, since DiffView owns Esc while the diff tab is showing and one
   // press must not close two things; and the context menu gets it first. The
@@ -176,19 +184,47 @@
     return ok;
   }
 
-  // Every row has a menu now, badges or not: *Info* is the only way into the
-  // info column (§5.2), so a plain commit with no refs on it must still open
-  // one. That is why the old `refs.length === 0` bail is gone.
+  // Deleting a local branch (§8.3). Safe-first: the dialog's first button
+  // passes `force: false`, and the only way to reach `true` is through the
+  // *Delete anyway* that appears once git has refused an unmerged branch.
+  //
+  // That refusal is the one write failure this pane does not report as
+  // `actionError`: the dialog is still up, showing it, and a notice behind the
+  // scrim saying the same thing would be the same error twice. Every other
+  // failure closes the dialog and goes through the usual notice.
+  async function deleteBranch(force: boolean) {
+    const target = deleting;
+    if (!target || busy) return;
+    busy = true;
+    actionError = null;
+    actionErrorDirty = false;
+
+    const ok = await repos.deleteBranch(target.name, force);
+    const raw = repos.writeError;
+    if (ok) {
+      deleting = null;
+    } else if (!force && raw !== null && isUnmergedBranchRefusal(raw)) {
+      deleting = { name: target.name, refusal: raw };
+    } else {
+      actionError = raw;
+      deleting = null;
+    }
+    busy = false;
+  }
+
+  // Every row has a menu now, badges or not: *Show info* is the only way into
+  // the info column (§5.2), so a plain commit with no refs on it must still
+  // open one. That is why the old `refs.length === 0` bail is gone.
   function openMenu(event: MouseEvent, refs: RefBadge[], hash: string) {
     event.preventDefault();
     menu = { x: event.clientX, y: event.clientY, refs, hash };
   }
 
-  // *Info* leads because it is the one entry every row has; the branch entries
-  // below it exist only on the rows carrying a badge.
+  // *Show info* leads because it is the one entry every row has; the branch
+  // entries below it exist only on the rows carrying a badge.
   function menuItems(refs: RefBadge[], hash: string) {
     return [
-      { label: 'Info', onSelect: () => graph.showInfo(hash) },
+      { label: 'Show info', onSelect: () => graph.showInfo(hash) },
       ...refs.flatMap((ref) => [
         {
           label: ref.kind === 'local' ? `Switch to ${ref.name}` : `Switch to ${ref.name} (new local branch)`,
@@ -207,6 +243,18 @@
               {
                 label: `Merge ${ref.name} into ${currentBranch}`,
                 onSelect: () => mergeInto(ref),
+              },
+            ]
+          : []),
+        // Local badges only, and never the one you are standing on: git
+        // refuses to delete the checked-out branch, and deleting a remote
+        // badge would be a `push --delete` — a network write with a different
+        // blast radius, so it is not folded into the same entry (§8.3).
+        ...(ref.kind === 'local' && ref.name !== currentBranch
+          ? [
+              {
+                label: `Delete ${ref.name}`,
+                onSelect: () => (deleting = { name: ref.name, refusal: null }),
               },
             ]
           : []),
@@ -263,7 +311,9 @@
     {#if !hasRepo}
       <!-- The dog lives here (SPEC §14.1). The commit pane sits empty at the
            same moment and is deliberately left bare, because two of him on
-           screen at once stops being charming.
+           screen at once stops being charming. Its own `content` placement is
+           the opposite case — a repo selected and clean — so the two can never
+           both be showing.
 
            Two poses share the slot: he lies down once the whole herd is clean
            and in sync, and sits up waiting otherwise (docs/mascot.md §5). -->
@@ -384,6 +434,16 @@
     existingLocal={localBranchNames}
     onCreate={createBranch}
     onClose={() => (createFrom = null)}
+  />
+{/if}
+
+{#if deleting}
+  <DeleteBranchDialog
+    name={deleting.name}
+    refusal={deleting.refusal}
+    {busy}
+    onDelete={deleteBranch}
+    onClose={() => (deleting = null)}
   />
 {/if}
 

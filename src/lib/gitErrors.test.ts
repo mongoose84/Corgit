@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest';
 
-import { translateGitError } from './gitErrors';
+import { isUnmergedBranchRefusal, translateGitError } from './gitErrors';
 
 /**
  * §13's rule is "never strand the user in a state Corgit can't get them out
@@ -138,5 +138,28 @@ describe('everything else', () => {
 
     expect(result.message).toBe('');
     expect(result.action).toBeNull();
+  });
+});
+
+describe('isUnmergedBranchRefusal', () => {
+  // The one failure that changes which button the user is offered (§8.3), so
+  // a miss here does not just word the error badly — it hides *Delete anyway*
+  // and leaves a squash-merged branch undeletable from Corgit.
+  test("matches git's refusal whatever it capitalises", () => {
+    expect(isUnmergedBranchRefusal("error: The branch 'feature-x' is not fully merged.")).toBe(true);
+    expect(isUnmergedBranchRefusal("error: the branch 'feature-x' is not fully merged.")).toBe(true);
+  });
+
+  test('does not match the other ways a delete fails', () => {
+    expect(isUnmergedBranchRefusal("error: branch 'feature-x' not found.")).toBe(false);
+    // Git 2.53's wording for deleting the branch you are on — the menu never
+    // offers that, but the classifier must not read it as the refusal that
+    // grows a *Delete anyway* button.
+    expect(
+      isUnmergedBranchRefusal(
+        "error: cannot delete branch 'main' used by worktree at 'C:/dev/repo'",
+      ),
+    ).toBe(false);
+    expect(isUnmergedBranchRefusal('')).toBe(false);
   });
 });

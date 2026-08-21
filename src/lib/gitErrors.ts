@@ -70,3 +70,18 @@ export function translateGitError(raw: string): TranslatedGitError {
     ? { message: rule.message, action: rule.action, raw }
     : { message: raw, action: null, raw };
 }
+
+/**
+ * Whether a failed `git branch -d` was git refusing to drop commits, rather
+ * than any of the other ways a delete can fail (§8.3). This is the one git
+ * failure Corgit answers with a *different button* instead of a headline, so
+ * it is a predicate here rather than a `RULES` entry: the delete dialog uses
+ * it to decide whether to offer *Delete anyway*, and everything it does not
+ * match is surfaced as an ordinary write error.
+ *
+ * Matched on git's own wording, lowercased — the capitalisation of "The
+ * branch" changed between git versions, the four words after it have not.
+ */
+export function isUnmergedBranchRefusal(raw: string): boolean {
+  return raw.toLowerCase().includes('not fully merged');
+}

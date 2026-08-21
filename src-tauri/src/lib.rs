@@ -534,6 +534,21 @@ async fn create_branch(
     .await
 }
 
+/// Deleting a local branch (§8.3) — right-click its badge in the graph. The
+/// menu only offers this for local badges that are not the checked-out branch;
+/// `force` is never set by that first click, only by the *Delete anyway* the
+/// dialog grows once git has refused an unmerged branch.
+///
+/// Nothing here re-validates either condition. The frontend's checks are about
+/// which entries to *show*, and re-deriving them from cached status on this
+/// side would be deciding from the cache (§5.1) what git already knows for
+/// certain — a delete that should not happen fails as git's own error, which
+/// is the outcome anyway.
+#[tauri::command]
+async fn delete_branch(repo_id: String, name: String, force: bool, app: AppHandle) -> Result<(), String> {
+    write_and_refresh(&app, repo_id, |path| async move { branch::delete(&path, &name, force).await }).await
+}
+
 /// Merging a branch into the checked-out one (§8.3) — right-click a ref badge
 /// in the graph. Only the source is named: the destination is HEAD, decided by
 /// git at the moment it runs rather than by anything Corgit has cached, for the
@@ -668,6 +683,19 @@ async fn reveal_in_explorer(repo_id: String, path: String, app: AppHandle) -> Re
     open_folder(&fallback)
 }
 
+/// `git status` reports paths with forward slashes on every platform, so
+/// joining one onto a Windows root leaves `C:\repo/src/file.rs`. Everything
+/// that *opens* a path takes that as-is — `Path::exists` and `open_in_vscode`
+/// both do — but `explorer` does not open its argument, it parses it, and one
+/// forward slash makes it give up and show the user's home folder instead.
+/// That is the same silent wrong-window failure this pair already guards
+/// against for missing files, arriving by another route, so the separators are
+/// flipped here rather than at the join: explorer is the only thing that cares.
+#[cfg(windows)]
+fn explorer_arg(path: &Path) -> String {
+    path.display().to_string().replace('/', "\\")
+}
+
 /// `explorer /select,<file>` opens the containing folder with the file
 /// highlighted. The argument is written raw because explorer parses its own
 /// command line rather than reading argv: Rust's quoting would hand it
@@ -681,7 +709,7 @@ fn reveal_existing(target: &Path) -> Result<(), String> {
     // `explorer` exits non-zero even when it succeeds (menu.rs's log folder
     // says the same), so spawning is the only thing worth checking here.
     std::process::Command::new("explorer")
-        .raw_arg(format!("/select,\"{}\"", target.display()))
+        .raw_arg(format!("/select,\"{}\"", explorer_arg(target)))
         .spawn()
         .map(|_| ())
         .map_err(|err| format!("could not open File Explorer: {err}"))
@@ -695,9 +723,16 @@ fn reveal_existing(target: &Path) -> Result<(), String> {
 }
 
 fn open_folder(dir: &Path) -> Result<(), String> {
-    let opener = if cfg!(windows) { "explorer" } else { "xdg-open" };
+    // Same separator trap as `reveal_existing`, and the fallback path is the
+    // one most likely to carry a slash: it is an ancestor of a git-reported
+    // path. Explorer takes a mixed-separator folder to mean Documents.
+    #[cfg(windows)]
+    let (opener, arg) = ("explorer", explorer_arg(dir));
+    #[cfg(not(windows))]
+    let (opener, arg) = ("xdg-open", dir.display().to_string());
+
     std::process::Command::new(opener)
-        .arg(dir)
+        .arg(arg)
         .spawn()
         .map(|_| ())
         .map_err(|err| format!("could not open the folder: {err}"))
@@ -1777,6 +1812,7 @@ pub fn run() {
             switch_branch,
             create_branch,
             merge_branch,
+            delete_branch,
             open_in_vscode,
             open_in_terminal,
             reveal_in_explorer,
@@ -1793,6 +1829,16 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The whole point of `explorer_arg`: a repo-relative path off `git status`
+    /// joined onto a Windows root is mixed-separator, and explorer answers that
+    /// by opening the home folder rather than failing.
+    #[cfg(windows)]
+    #[test]
+    fn explorer_arg_flips_git_slashes() {
+        let target = PathBuf::from(r"C:\dev\corgit").join("src/lib/repos.svelte.ts");
+        assert_eq!(explorer_arg(&target), r"C:\dev\corgit\src\lib\repos.svelte.ts");
+    }
 
     fn repo(id: &str) -> Repo {
         Repo { id: id.to_string(), name: id.to_string(), path: PathBuf::from(id) }

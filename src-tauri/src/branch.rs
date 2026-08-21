@@ -1,4 +1,4 @@
-//! Branch switching, creation and merging (SPEC.md §8.3, build step 8).
+//! Branch switching, creation, merging and deletion (SPEC.md §8.3, build step 8).
 //!
 //! Switching has two shapes only, matching the two ref kinds the graph already
 //! badges (`graph::RefKind`): a local branch is a plain `git switch`, a
@@ -14,6 +14,10 @@
 //! Merging (§8.3, the same menu) is the mirror image: the badge names the
 //! *source*, and the destination is always whatever is checked out — Corgit
 //! never merges two branches neither of which you are on.
+//!
+//! Deletion (§8.3, the same menu) is local-only, and safe-first: `-d` always
+//! runs before `-D`, so the only way to reach the forceful one is through
+//! git's own refusal shown on screen.
 
 use std::path::Path;
 
@@ -105,6 +109,44 @@ fn full_message(stderr: &str) -> String {
 fn create_message(stderr: &str) -> String {
     let trimmed = stderr.trim();
     if trimmed.is_empty() { "could not create the branch".to_string() } else { trimmed.to_string() }
+}
+
+/// Deleting a local branch (§8.3, the same menu). Only local ones: a
+/// remote-tracking badge names a branch on the server, and removing that is a
+/// `push --delete` — a network write with a different blast radius, not this.
+///
+/// `force` picks `-D` over `-d`, and the two are a *sequence*, not a choice
+/// the caller makes up front: the frontend always tries the safe one first and
+/// only offers the forceful one after git has said the branch is not fully
+/// merged. That ordering is why this does not fall foul of §8.3's
+/// "never force-checkout" rule — the point there is that nothing may discard
+/// work *silently*, and here git's own refusal is what puts the question on
+/// screen. Squash-merged branches make the unsafe path unavoidable: to git
+/// they are unmerged forever, so `-d` alone would mean the most common
+/// deletion could never be done from Corgit at all.
+///
+/// Deleting the checked-out branch is git's own error, and the menu does not
+/// offer it — but nothing here re-checks that. HEAD as this process sees it is
+/// the only authority (§5.1), and git is holding it.
+pub async fn delete(repo: &Path, name: &str, force: bool) -> Result<(), String> {
+    let output = git::write(repo, &delete_args(name, force)).await?;
+    if !output.ok {
+        return Err(delete_message(&output.stderr));
+    }
+    Ok(())
+}
+
+fn delete_args(name: &str, force: bool) -> Vec<&str> {
+    vec!["branch", if force { "-D" } else { "-d" }, name]
+}
+
+/// Same whole-stderr rule as [`full_message`] (§13). The "not fully merged"
+/// refusal has to survive intact in particular — the frontend reads it to
+/// decide whether to offer the forceful delete, so trimming it to a headline
+/// here would take that branch away.
+fn delete_message(stderr: &str) -> String {
+    let trimmed = stderr.trim();
+    if trimmed.is_empty() { "could not delete the branch".to_string() } else { trimmed.to_string() }
 }
 
 /// Merge another branch into the checked-out one (§8.3, right-click a ref
@@ -200,6 +242,31 @@ mod tests {
             let args = create_args("feature-x", "origin/feature-x", checkout);
             assert!(args.contains(&"--no-track"), "{args:?} would inherit origin/feature-x as upstream");
         }
+    }
+
+    #[test]
+    fn a_plain_delete_is_the_safe_one() {
+        assert_eq!(delete_args("feature-x", false), ["branch", "-d", "feature-x"]);
+    }
+
+    #[test]
+    fn a_forced_delete_is_the_capital_one() {
+        assert_eq!(delete_args("feature-x", true), ["branch", "-D", "feature-x"]);
+    }
+
+    /// The frontend decides whether to offer *Delete anyway* by looking for
+    /// git's own words in this message, so it must come through whole.
+    #[test]
+    fn the_not_fully_merged_refusal_survives_whole() {
+        let message = delete_message("error: the branch 'feature-x' is not fully merged.
+");
+        assert_eq!(message, "error: the branch 'feature-x' is not fully merged.");
+    }
+
+    #[test]
+    fn a_silent_delete_failure_still_says_something() {
+        assert_eq!(delete_message("  
+"), "could not delete the branch");
     }
 
     #[test]
