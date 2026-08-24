@@ -18,6 +18,12 @@
   // Commit selection drives the middle pane's Mode B in build step 7 (§5.2);
   // until then, clicking a row only highlights it here.
   const hasRepo = $derived(repos.selectedId !== undefined);
+  // The pane is about one repo and never said which. The repo list reorders
+  // under pinning, so the row that answered the question can move — or leave
+  // the viewport entirely — while the history on screen does not change at
+  // all. Naming the subject here means the graph is self-describing whatever
+  // the left pane is doing; RepoRow's scroll-into-view is the other half.
+  const repoName = $derived(repos.selectedRepo?.name);
   const status = $derived(repos.selectedId ? repos.status(repos.selectedId) : undefined);
   const dirty = $derived(status !== undefined && isDirty(status));
   // Merging needs a destination, and Corgit's is always what is checked out.
@@ -285,6 +291,16 @@
     {/if}
   {/snippet}
 
+  {#snippet actions()}
+    {#if repoName}
+      <!-- Right-hand side rather than beside the tabs: the tab strip is a
+           tablist, and a label that is not a tab does not belong inside it —
+           nor should the repo name grow into a third tab-looking thing when a
+           diff is open. -->
+      <span class="repo-name" title={repos.selectedRepo?.path}>{repoName}</span>
+    {/if}
+  {/snippet}
+
   <!-- Both views stay mounted and laid out (§5.4), stacked rather than swapped:
        each is a scroll container, and the graph carries scroll position and
        however many pages the user loaded. Unmounting it — or even `display:
@@ -512,6 +528,21 @@
   .tab-close:hover {
     background: var(--bg-active);
     color: var(--text-primary);
+  }
+
+  /* A name, so it keeps its own case — deliberately unlike the uppercase
+     pane titles and tabs around it, which are labels. */
+  .repo-name {
+    /* Bounded rather than free-growing: Pane's `.actions` never shrinks, so
+       without a cap a long directory name would squeeze the tab strip — and
+       a tab you cannot read is worse than a name you cannot. */
+    max-width: 22ch;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    font-size: var(--text-sm);
+    color: var(--text-secondary);
   }
 
   .graph-body {

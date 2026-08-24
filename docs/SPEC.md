@@ -256,6 +256,13 @@ A **filter box** sits between them. Typing filters both sections by substring on
 only** — not branch, not path. This is the primary navigation tool for 77 repos; it is not
 optional.
 
+**The selected row is scrolled back into view whenever it moves.** Pinning and unpinning
+move a repo between the two sections, and over 77 rows the new position is usually outside
+the viewport — the selection is untouched, but the only thing on screen showing it has
+gone, which reads as though pinning cleared it. Scroll it to the nearest edge, never to
+the centre: a row already visible must not jump, so clicking a row you can see stays a
+no-op. The same rule restores the startup selection (§9.5) into view.
+
 **Row contents:** repo name · current branch · changed-files badge · ahead/behind badge.
 
 The **changed-files badge** is a filled dot grown enough to hold a number — the count of
@@ -460,7 +467,11 @@ The right pane is **two views behind a tab strip** in its header: the graph belo
 open file's diff (§5.4). Selecting *Graph* does not close the diff — the tab stays, and
 the graph keeps its scroll position and loaded pages, so glancing between the two is free.
 
-Selected repo only — one repo at a time, so graph cost never multiplies by 77.
+Selected repo only — one repo at a time, so graph cost never multiplies by 77. **The
+header names it**, right-aligned opposite the tab strip and in the repo's own case, so the
+pane says what it is showing without the left pane having to. It is not inside the tab
+strip: that is a tablist, and a name sitting beside the tabs would read as a third tab
+whenever a diff is open.
 
 - **Synthetic "Uncommitted Changes" node** pinned at the top when the working tree is dirty.
   Clicking it selects the working tree, which also closes the info panel (§5.2). This is

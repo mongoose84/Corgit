@@ -57,6 +57,27 @@
 
   let menuPos = $state<{ x: number; y: number } | null>(null);
   let pulling = $state(false);
+  let rowEl: HTMLButtonElement | undefined = $state();
+
+  /**
+   * Keep the selected row on screen. Pinning moves a repo between the two
+   * sections of the list (§5.1), which destroys this component and builds it
+   * again in the other one — at a scroll offset that, over a folder of 77
+   * repos, is usually nowhere near the viewport. Nothing about the selection
+   * changed, but the only thing showing it just left the screen, which reads
+   * exactly like the selection was cleared.
+   *
+   * The effect belongs on the row rather than on the list because the row is
+   * what remounts: a list-level effect would have to watch for a reorder it
+   * cannot see. It also covers the restored selection on startup (§9.5),
+   * which has the same problem for the same reason.
+   *
+   * `nearest` deliberately: a row already in view must not jump, and the
+   * common case — clicking a row you can see — has to be a no-op.
+   */
+  $effect(() => {
+    if (selected) rowEl?.scrollIntoView({ block: 'nearest' });
+  });
 
   function openMenu(event: MouseEvent) {
     event.preventDefault();
@@ -128,6 +149,7 @@
 </script>
 
 <button
+  bind:this={rowEl}
   type="button"
   class="row"
   class:selected

@@ -258,6 +258,15 @@ class RepoStore {
     return this.selected.values().next().value;
   }
 
+  /** The selected repo itself, not just its id — every pane that names what
+   *  it is showing needs this, and a `find` re-derived per consumer is how
+   *  two headers end up disagreeing about the same selection. `undefined`
+   *  while a selection names a repo the current root no longer lists. */
+  get selectedRepo(): Repo | undefined {
+    const id = this.selectedId;
+    return id === undefined ? undefined : this.repos.find((repo) => repo.id === id);
+  }
+
   select(id: string): void {
     this.selected = new Set([id]);
     void this.loadFiles();
