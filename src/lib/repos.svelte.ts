@@ -597,7 +597,16 @@ class RepoStore {
     }
 
     try {
-      this.git = await invoke<GitInfo>('git_info');
+      // Deliberately not awaited. `git_info` waits on a process spawn, which
+      // is the one startup cost with no bound worth trusting, and none of the
+      // work below depends on the answer — the field starts optimistic
+      // (`available: true`) precisely so the welcome screen can be drawn
+      // before it lands. Waiting for it here held `ready` false, and `ready`
+      // false is a blank window.
+      void invoke<GitInfo>('git_info').then((info) => {
+        this.git = info;
+      });
+
       await listen<SweepEvent>('status:sweep', (event) => this.applySweep(event.payload));
       await listen<RepoStatusEvent>('status:repo', (event) => this.applyRepoStatus(event.payload));
       await listen<FetchSweepEvent>('fetch:sweep', (event) => this.applyFetchSweep(event.payload));

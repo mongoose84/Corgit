@@ -48,7 +48,10 @@ const FSMONITOR_MIN_VERSION: (u32, u32) = (2, 37);
 /// Local reads — status, log, for-each-ref, remote. Bounded by repo size and
 /// nothing else: no network, no hooks, no credential prompt. The §1 budget for
 /// *all 77* is 300 ms, so a single read reaching 30 s is not slow, it is stuck.
-const READ_TIMEOUT: Duration = Duration::from_secs(30);
+/// `pub(crate)` for one assertion: the status sweep publishes without a repo
+/// that outruns `SWEEP_PATIENCE`, and that only means anything while a read is
+/// allowed to outlive it.
+pub(crate) const READ_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// The startup probe, and the tightest budget of the lot because it is the
 /// only one that blocks the app from existing: `run`'s setup hook waits on it

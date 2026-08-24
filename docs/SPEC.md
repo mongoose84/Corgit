@@ -32,6 +32,20 @@ the product. The graph is a viewer.
 
 First paint renders from cache. It never waits on git.
 
+**And nothing on the startup path runs on the main thread.** That thread runs the event
+loop, so work on it is not slow painting, it is no window at all — the window is created
+before the setup hook but cannot be composited by a thread that is not pumping messages.
+A `#[tauri::command]` without `(async)` is dispatched there, which is what `open_root`,
+`refresh_root` and `initial_root` all used to do: a directory read plus two stats per
+child, a cache file, and a subtree watch handle per repo, all in front of the first frame.
+Warm that is ~120 ms and invisible; cold, with every open going through a filter driver,
+it is the whole of "Corgit took ages to open". The rule generalises past startup: a
+command that touches the filesystem or spawns a process takes `(async)`, including the
+ones that only write a small file (`save_settings`, `toggle_pin`, `set_selected_repo`) —
+`%APPDATA%` is redirectable to a network share by policy, and a freeze on every click in
+the repo list is a worse failure than a slow save. The exception is `menu_command`, which
+closes windows and exits the app: that work *is* the main thread's.
+
 ---
 
 ## 2. Scope
@@ -100,6 +114,16 @@ proves spawning is the bottleneck.
 Resolve `git` from PATH at startup. If absent, show a blocking first-run screen with a
 download link rather than failing per-operation. Record the version — `core.fsmonitor`
 support (§6) needs ≥ 2.37.
+
+**"At startup" means started at startup, not waited for.** The probe is a process spawn,
+and process spawn is the one startup cost with no upper bound worth trusting: an
+anti-malware scan of a rarely-run binary, a revocation check with no route to its
+responder. Blocking the setup hook on it — which this originally did — spent that wait
+with the event loop stopped, so there was no window on screen to spend it in, and hitting
+the 5 s probe timeout produced five seconds of nothing followed by the *wrong* screen,
+since a git that is slow to answer is not a git that is absent. It is now warmed into a
+cell that `git_info` awaits; nothing else on the startup path depends on the answer, and
+the frontend starts optimistic so the welcome screen draws without it.
 
 ---
 
@@ -1337,15 +1361,28 @@ menu bar (§4.1) · window restores the last selected repo · multi-window defer
 
 · scan depth 1 (§8.1) · *Open Folder…* replaces the current root.
 
-Still open, none blocking:
-- [ ] **Should the status sweep emit incrementally rather than in one batch?**
-      Step 2 emits a single event when all repos are done, so every row stays
-      branch-less until the whole sweep lands — 20 s on a cold start on the
-      first machine measured. Cache-first paint (step 3) should hide this,
-      since rows arrive filled in from disk and the sweep only corrects them.
-      Decide *after* the cache is in and only if it still reads badly: doing
-      both means 77 IPC round trips per sweep to solve a problem the cache may
-      already have solved. The change is local to `collect()`.
+- [x] **Should the status sweep emit incrementally rather than in one batch?**
+      **Batch, minus its stragglers.** Cache-first paint did solve the case
+      this was raised for — rows arrive filled in from disk and no longer wait
+      branch-less — but it did not solve the case where a *stale* row is the
+      wrong one: the batch lands when its slowest repo does, so one repo taking
+      the whole 30 s `READ_TIMEOUT` on a cold cache held all 69 rows and the
+      sweeping indicator for 30 s after every launch. Measured on the 69-repo
+      root, first launch of the day, repeatably one repo.
+
+      So `collect()` waits `SWEEP_PATIENCE` (3 s — above a healthy full pass at
+      ~1.2 s, far below a killed read) and publishes what it has. Repos still
+      reading keep their process and their read guard, and publish themselves
+      through the per-repo `status:repo` event a watcher already uses (§6). The
+      re-entrancy guard is held until they land, so §6's "a sweep never starts
+      while one is in flight" holds and a straggler cannot be overtaken by the
+      next tick's read of the same repo.
+
+      This is not the 77-round-trip incremental sweep the question was about.
+      The healthy case is still exactly one event; the extra ones are one per
+      repo that was genuinely stuck, which is the number worth paying.
+
+Still open: none.
 
 ---
 
