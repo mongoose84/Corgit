@@ -285,8 +285,27 @@
      inside it — and here that would push the title bar off the top. */
   .shell {
     display: grid;
+    /* The column needs the same bound as the rows above, for a failure that
+       is worse than the one they prevent. The implicit track is `auto`, whose
+       base size is its widest item's *minimum* contribution — so a banner
+       that cannot squeeze below the window (§13 gives it a repo name, a
+       message and up to four controls on one line) widens the track, and
+       `main` stretches to that track and reports the oversized width back
+       through `bind:clientWidth`. With `body { overflow: hidden }` the excess
+       is not scrollable, it is simply gone: the banner's rightmost control is
+       the Dismiss ✕, so the one banner too wide to fit is also the one that
+       cannot be dismissed. */
+    grid-template-columns: minmax(0, 1fr);
     grid-template-rows: var(--titlebar-height) auto minmax(0, 1fr);
     height: 100%;
+  }
+
+  /* Bounding the track is only half of it — a grid item's own automatic
+     minimum size can still overflow the track it sits in. Both children opt
+     out so the window stays the outer limit for everything below it. */
+  .notice-slot,
+  main {
+    min-width: 0;
   }
 
   main {

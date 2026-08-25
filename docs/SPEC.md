@@ -1203,7 +1203,7 @@ the shortage rather than around the message.
 **The banner is app chrome: full window width, directly under the title bar (§4.1), and it
 always names the repo it is about.** Full width is not a style preference — it is the only
 place in the layout wide enough to hold a headline, an action and *Details* on one line,
-which is precisely what the pane-local notices could not do. Naming the repo is load-bearing
+which is precisely what the pane-local notices could not do. One line is the target and not a guarantee: when the controls stop fitting the row wraps and they take a second line. The alternative is worse than a two-line banner — a row that simply refuses to fit is clipped by `body { overflow: hidden }`, and the rightmost control is *Dismiss*. Naming the repo is load-bearing
 for a different reason: row-level Pull (§5.1) can fail in a repo that is not selected, so a
 banner reading only "Remote has commits you don't have" is ambiguous across a 77-row list.
 

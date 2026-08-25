@@ -34,12 +34,12 @@
   /* The one place the app defers to Windows' palette instead of its own: a
      close button that goes red on hover is learned behaviour from every other
      window on the desktop, and this is Windows 11's value for it. Close to
-     --status-error and kept separate on purpose — that token means "a git
+     --status-conflict and kept separate on purpose — that token means "a git
      operation failed", and the two must be free to diverge. */
   --titlebar-close-hover: #c42b1c;
 
   /* Destructive confirmation — the Discard button and its dialog (§5.2). Kept
-     apart from --status-error for the same reason --titlebar-close-hover is:
+     apart from --status-conflict for the same reason --titlebar-close-hover is:
      that token reports something that already failed, this one offers to
      destroy work that is still there, and the two must be free to diverge.
      Same four-token shape as --accent because it is styled the same way —
@@ -57,7 +57,25 @@
   --status-dirty: #e3b341;
   --status-ahead: #3fb950;
   --status-behind: #db6d28;
-  --status-error: #f85149;
+  /* Error and conflict held the same red, which collapsed §13's three tiers
+     into two on screen: a background fetch that failed shouted exactly as
+     loudly as a repo that cannot commit or push, and NoticeBanner's careful
+     `.blocking` styling rendered as nothing at all.
+
+     Separated by saturation rather than by hue, because hue is not available.
+     Amber is dirty, orange is behind, green is ahead — and the `!` badge sits
+     on the same repo row as the ⚿ one (§5.1), so an amber error would be
+     indistinguishable from auth-needed in the pane whose entire job is being
+     scannable. Red keeps meaning "a git operation failed"; full strength now
+     additionally means "and git will not leave this state on its own".
+
+     Muting settled a contrast bug rather than trading one for the separation:
+     #f85149 is 3.90:1 on --bg-active and 3.94:1 on a selected row, so the `!`
+     badge fell under 4.5:1 precisely when its row was hovered or picked.
+     #e08085 is 4.72:1 at its worst. --status-conflict keeps the shortfall and
+     the saturation with it — it is the one tier entitled to be loud, and it
+     is the pair's louder half that has to stay legible as *louder*. */
+  --status-error: #e08085;
   --status-conflict: #f85149;
 
   /* The repo row's changed-files badge (§5.1) — the app's one filled badge,
