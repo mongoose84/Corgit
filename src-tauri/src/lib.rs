@@ -6,6 +6,7 @@ mod diff;
 mod discovery;
 mod git;
 mod graph;
+mod inflight;
 mod menu;
 mod problems;
 mod remote;
@@ -42,6 +43,14 @@ const REPO_STATUS_EVENT: &str = "status:repo";
 /// *other* windows learn about it — the one that triggered the operation
 /// already has the error in hand.
 const PROBLEM_EVENT: &str = "problem:recorded";
+
+/// A write started or finished on a repo (§13, *Work in progress*). Unlike
+/// `PROBLEM_EVENT`, the window that started the operation needs these too: it
+/// knows it called `switch_branch`, but not that the call has stopped waiting
+/// on the write queue and started doing something, and the row it has to mark
+/// may not be the selected one.
+const WRITE_BEGIN_EVENT: &str = "write:begin";
+const WRITE_END_EVENT: &str = "write:end";
 
 /// Rust owns the state; the frontend is a view over it (SPEC.md §9.3).
 ///
@@ -86,6 +95,10 @@ struct AppState {
     /// `Arc`-wrapped so the sweep can clone a handle into its per-repo tasks
     /// without needing an `AppHandle` there too (§6, §7 rule 2).
     write_queues: Arc<WriteQueues>,
+    /// Which repos have a write running, for §13's *Work in progress*. Beside
+    /// `write_queues` rather than inside it on purpose — see `inflight.rs`:
+    /// the queue is a correctness guarantee, this is something to draw.
+    in_flight: Arc<inflight::InFlightWrites>,
     /// FS watchers, one per repo (§6). No longer the hot set: on Windows a
     /// subtree watch is one handle whatever its depth, so every repo gets one
     /// and the sweep stops being the refresh mechanism.
@@ -1053,11 +1066,73 @@ fn record_fetch_attempt(app: &AppHandle, repo_id: &str) {
     persist_cache(app, &root_path, statuses, last_fetch_at);
 }
 
+/// §13's *Work in progress*, published for one repo. `operation` is the
+/// user's word for what they asked — "Switch branch", "Pull" — the same one
+/// the Problems record and the error banner use, so the row's tooltip and the
+/// failure that may follow it name the same thing.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WriteBeginEvent {
+    repo_id: String,
+    operation: String,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WriteEndEvent {
+    repo_id: String,
+}
+
+/// Marks a repo busy for as long as it is alive (§13, *Work in progress*).
+///
+/// A guard rather than a pair of calls in `write_and_refresh`, for the same
+/// reason the Problems record lives there rather than at each call site: the
+/// end must be unmissable. An early `?`, a panic inside the operation, a
+/// future dropped because the window closed mid-write — every one of those
+/// has to clear the row, and a `Drop` impl is the only version of that which
+/// cannot be forgotten by a future write command.
+struct WriteMarker {
+    app: AppHandle,
+    repo_id: String,
+}
+
+impl WriteMarker {
+    fn begin(app: &AppHandle, repo_id: &str, operation: &str) -> Self {
+        if app.state::<AppState>().in_flight.begin(repo_id) {
+            let event = WriteBeginEvent { repo_id: repo_id.to_string(), operation: operation.to_string() };
+            if let Err(err) = app.emit(WRITE_BEGIN_EVENT, event) {
+                log::warn!("could not publish the start of a write ({err})");
+            }
+        }
+        Self { app: app.clone(), repo_id: repo_id.to_string() }
+    }
+}
+
+impl Drop for WriteMarker {
+    fn drop(&mut self) {
+        if self.app.state::<AppState>().in_flight.end(&self.repo_id) {
+            let event = WriteEndEvent { repo_id: self.repo_id.clone() };
+            if let Err(err) = self.app.emit(WRITE_END_EVENT, event) {
+                // Nothing to recover with — but a lost end is a row that spins
+                // forever, so it must not be silent in the log either.
+                log::warn!("could not publish the end of a write ({err})");
+            }
+        }
+    }
+}
+
 /// Shared shape for every mutating command (§7 rule 1): resolve the repo,
 /// hold its write-queue lock for the duration of `op`, then refresh and
 /// publish its status regardless of whether `op` succeeded — a failed stage
 /// or commit can still have changed something (e.g. a partial index update),
 /// and the row must never show data staler than the attempt just made.
+///
+/// It is also where §13's *Work in progress* is published, and the marker is
+/// taken *before* the write queue rather than after: a write queued behind an
+/// earlier one on the same repo is time the user spends waiting with nothing
+/// happening on screen, which is precisely the case the indicator exists for.
+/// It lives until this function returns, so the status refresh below is inside
+/// the window too — the row must not go quiet while it is still being redrawn.
 async fn write_and_refresh<F, Fut>(
     app: &AppHandle,
     repo_id: String,
@@ -1069,6 +1144,7 @@ where
     Fut: std::future::Future<Output = Result<(), String>>,
 {
     let path = repo_path(app, &repo_id)?;
+    let _busy = WriteMarker::begin(app, &repo_id, operation);
 
     let result = {
         let _write_guard = app.state::<AppState>().write_queues.write(&repo_id).await;
@@ -2046,6 +2122,7 @@ pub fn run() {
                 fetch_sweeping: AtomicBool::new(false),
                 fetch_ticker: Mutex::new(None),
                 write_queues: Arc::new(WriteQueues::default()),
+                in_flight: Arc::new(inflight::InFlightWrites::default()),
                 watchers: watch::RepoWatchers::default(),
                 // No repo is open yet, so the panes default to visible.
                 pane_visibility: Mutex::new(menu::PaneVisibility::default()),

@@ -265,6 +265,12 @@ no-op. The same rule restores the startup selection (§9.5) into view.
 
 **Row contents:** repo name · current branch · changed-files badge · ahead/behind badge.
 
+A row whose repo has a write running shows it in the **pin gutter** (§13, *Work in
+progress*) — a slot already reserved at a fixed width and already hidden and revealed, so the
+indicator costs no layout and never squeezes the badge strip. It takes the pin's place for
+the duration: which repos are pinned is not a question anyone is asking mid-write. Not the
+mascot, which docs/mascot.md §2 keeps out of repository rows.
+
 The **changed-files badge** is a filled dot grown enough to hold a number — the count of
 files with uncommitted changes, and nothing finer. No distinction between staged and
 unstaged; that detail lives in the middle pane. The row answers "does this need me?", and
@@ -811,6 +817,13 @@ required, not polish. Stale remote branches are handled by `--prune` on fetch (�
 On checkout failure with a dirty tree: show git's actual stderr plus **Open in VS Code**.
 **Never offer force-checkout** — it silently discards work.
 
+**A switch that takes time has to say so.** Checking out a branch that differs by thousands
+of files is seconds of work, and the gesture that starts it — a double-click on a ref badge
+— leaves no trace of itself: nothing on screen changes until the checkout lands, so a silent
+pane reads as a double-click that missed rather than as work in progress. See §13's *Work in
+progress*, which covers every write. Switching is only the one reliably slow enough to make
+the absence obvious.
+
 **Creating a branch** (Git Graph's gesture): right-click a ref badge in the graph → *Create
 branch from `<ref>`…* → a small modal takes the name plus a **Check out after creating**
 checkbox, which picks between the two commands above. The start point is always the badge
@@ -1224,6 +1237,69 @@ help. Modals stay reserved for what they already do — `DiscardDialog`, `Delete
 non-dismissible banner offering **Abort merge…**, and that ellipsis leads to a modal which
 confirms the discard. The report is a banner; the *recovery* may be a modal.
 
+### Work in progress
+
+§13's rule has a mirror image: **never leave the user unable to tell whether Corgit heard
+them.** Every write can take long enough to need saying so — a checkout across thousands of
+files, a pull over a slow link, a push of a large history — and none of them changes anything
+on screen until it lands.
+
+In-progress is **not a fourth tier, and it never uses the banner.** The banner reports
+something that already happened, and it is chrome the full width of the window; borrowing it
+for "this is happening" would put a full-width bar on screen for every stage and unstage —
+the four-pane-local-notices mistake above, run in reverse. Nor is it ever a modal: those stay
+reserved for confirming an irreversible act before it happens.
+
+Two things are shown, and they answer different questions:
+
+| | Where | When |
+| --- | --- | --- |
+| **Acknowledgement** | The control that was used — the ref badge, the row's Pull chevron | Immediately |
+| **Narration** | The repo row, and the pane the operation was started from | After a delay |
+
+Splitting them is the point. "Did it hear me" and "how long will this take" are different
+complaints, and the first one is answered by the thing under the pointer changing in the same
+frame as the click. Delaying *that* is what produced the original bug.
+
+Rules that follow:
+
+- **Narration is the backend's signal, not the pane's.** Rust owns which repos have a write
+  in flight (§7, §9.2) and publishes it per repo, so a write on a repo that is not selected —
+  row-level Pull (§5.1) — still marks its row, and a second window is not silent while the
+  first is busy. A pane-local flag structurally cannot do either.
+- **The window covers the whole wait**: from the moment the command is accepted, including
+  time queued behind an earlier write on that repo (§7 rule 1), until the status refresh and
+  any view reload that follows have landed. An indicator that clears while the graph is still
+  being rebuilt is worse than none — it says "done" over a view about to swap.
+- **Don't paint a wait no one notices.** Reveal after ~150 ms, and once revealed hold for
+  ~300 ms, so the common fast write leaves the list perfectly still and a write landing either
+  side of the threshold does not flash.
+- **It is a state, not an event**, so it is never dismissible (below). It goes when the write
+  does.
+- **No Cancel.** A checkout in progress cannot be stopped without leaving a half-written
+  working tree, and a button that claims otherwise is worse than no button.
+
+**In the graph**, the destination row additionally becomes *pending HEAD*. A switch is HEAD
+moving from one commit to another and both ends are usually on screen, so the row HEAD is
+still genuinely on keeps its full treatment while the destination takes a weaker copy of the
+same one — the tint at 5% instead of 12%, a dashed ring where the filled halo goes, and the
+dot left at its normal radius. Landing is then the row *finishing* rather than changing:
+nothing appears, nothing switches meaning. A failed switch is the same three receding, which
+is what makes a failure read as "that did not happen" rather than as an undo of something
+that did.
+
+What the graph must **not** do is dim or overlay itself during a switch, however common that
+is elsewhere. A switch changes no commit on screen — only which badge is HEAD — so greying
+the history claims the view is untrustworthy at the one moment it is entirely true. Pull and
+merge do bring new commits, and the reload already covers those.
+
+*Deliberately absent:* a percentage. `git switch --progress` will report `Updating files:
+47% (2823/6000)` on stderr without a terminal, so it is available — but collecting it means
+streaming stderr rather than reading it at the end, and filtering those lines back out before
+the raw text is retained for *Details*. Worth revisiting only if measurement shows switches
+are routinely multi-second; not worth an animation asserting precision Corgit has not
+measured.
+
 ### Merge conflict
 
 `pull` is `fetch` + `merge`, and merge is precisely what produces conflicts. Detect via
@@ -1253,6 +1329,7 @@ interval (§5.1) and then loses the argument anyway. Sorting what exists:
 | `!` status error | `errors[id]` from the sweep | No — republished every sweep |
 | `⚠` conflict | `status.conflicted > 0` | No — derived state |
 | counts, ↑/↓ | derived | No — not notifications |
+| spinner, in progress | a write in flight, from the backend | No — derived state |
 
 `⚿` looks like the second dismissible case and is not. `auth_needed` is a **scheduling** flag,
 not a display flag: the fetch sweep filters those repos out (§6, §8.7) until a manual fetch

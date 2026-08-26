@@ -14,6 +14,7 @@
   import { notices } from '../notices.svelte';
   import { diff } from '../diff.svelte';
   import { laneCount as computeLaneCount, laneColorVar, ROW_HEIGHT, LANE_WIDTH } from '../graphLayout';
+  import { BusyIndicator } from '../busyIndicator';
 
   // Commit selection drives the middle pane's Mode B in build step 7 (§5.2);
   // until then, clicking a row only highlights it here.
@@ -103,6 +104,60 @@
   // yet, which would leave the two failures fighting over one banner.
   let busy = $state(false);
 
+  /** The branch a switch is on its way to (§13, *Work in progress*), `null`
+   *  when none is running. Pane state rather than store state because it is
+   *  the *destination* — the backend's `write:begin` says this repo is busy
+   *  and with which operation, but only the click knows which badge it named,
+   *  and naming it is what separates a slow switch from a slow merge started
+   *  from the same menu. */
+  let switchingTo = $state<string | null>(null);
+
+  /** Cleared here rather than in `switchTo` because the wait does not end when
+   *  the command returns. `write_and_refresh` emits `status:repo` before it
+   *  does, `graph.svelte.ts` reloads the page and refs off that event, and
+   *  until *that* lands the badges on screen are still the pre-switch ones.
+   *  Dropping the label at the command boundary would say "done" over a view
+   *  about to swap (§13).
+   *
+   *  `repos.isBusy` and not just the local `busy`, and the difference is the
+   *  whole reason this works: `busy` falls when the *invoke* resolves, which
+   *  is unordered against event delivery, so the reload may not have started
+   *  and `graph.loading` may still be false — clearing then would be the exact
+   *  early drop this effect exists to prevent. `write:end` is emitted after
+   *  `emit_repo_status`, so by the time it lands the status event has already
+   *  been delivered and the reload it triggers has already set `loading`. */
+  $effect(() => {
+    const id = repos.selectedId;
+    const stillWriting = busy || (id !== undefined && repos.isBusy(id));
+    if (switchingTo !== null && !stillWriting && !graph.loading) switchingTo = null;
+  });
+
+  /** Narration for anything else the repo is doing — a merge from the same
+   *  menu, a pull started from the row while the graph is open. Gated at
+   *  150 ms like the repo row's spinner; the switch label above is not, since
+   *  it is cleared by a condition rather than by a timer and would otherwise
+   *  need two clocks agreeing. */
+  let writeShown = $state(false);
+  const writeIndicator = new BusyIndicator((shown) => (writeShown = shown));
+
+  $effect(() => {
+    const id = repos.selectedId;
+    writeIndicator.set(id !== undefined && repos.isBusy(id));
+  });
+
+  $effect(() => () => writeIndicator.dispose());
+
+  /** What the header says while something is running. The switch names its
+   *  branch; everything else falls back to the operation's own word, which is
+   *  the same one the error banner would use if it fails. */
+  const workingLabel = $derived.by(() => {
+    if (switchingTo !== null) return `Switching to ${switchingTo}…`;
+    if (!writeShown) return null;
+    const id = repos.selectedId;
+    const operation = id === undefined ? undefined : repos.busyOperation(id);
+    return operation === undefined ? null : `${operation}…`;
+  });
+
   let menu = $state<{ x: number; y: number; refs: RefBadge[]; hash: string } | null>(null);
   // Non-null while the Create Branch dialog is up; the value is the start
   // point the new branch will be cut from (§8.3).
@@ -137,12 +192,17 @@
   async function switchTo(ref: RefBadge) {
     if (busy) return;
     busy = true;
+    // Set before the await, not after it: this is the acknowledgement, and it
+    // has to be on screen in the same frame as the double-click (§13).
+    switchingTo = ref.name;
     const ok = await repos.switchBranch(ref.name, ref.kind);
     // The banner is already up (§13); this only tells it something git's
     // stderr does not carry — that the tree was dirty when the checkout was
     // refused, which is what makes *Open in VS Code* the right way out.
     if (!ok && dirty) notices.overrideAction('open-vscode');
     busy = false;
+    // `switchingTo` is left standing — the effect above takes it down once the
+    // graph reload triggered by this write has landed.
   }
 
   // Merging from the graph (§8.3) — the badge names the source, the
@@ -292,7 +352,18 @@
   {/snippet}
 
   {#snippet actions()}
-    {#if repoName}
+    {#if workingLabel}
+      <!-- Takes the repo name's slot rather than sitting beside it, the same
+           mechanic RepoList's header already uses for the sweep (§13): the two
+           never fight for the space, and the name comes back the moment the
+           write lands. The dog is permitted here and nowhere near the rows —
+           docs/mascot.md §2 draws that line at "dead space and dead time", and
+           a pane header is chrome. -->
+      <span class="working" aria-live="polite">
+        <Mascot pose="mini-working" height={18} />
+        <span>{workingLabel}</span>
+      </span>
+    {:else if repoName}
       <!-- Right-hand side rather than beside the tabs: the tab strip is a
            tablist, and a label that is not a tab does not belong inside it —
            nor should the repo name grow into a third tab-looking thing when a
@@ -387,6 +458,7 @@
                     selected={graph.selection === row.commit.hash}
                     {currentBranch}
                     headHash={status?.head ?? null}
+                    {switchingTo}
                     onSelect={() => graph.select(row.commit.hash)}
                     onSwitchBranch={switchTo}
                     onContextMenu={openMenu}
@@ -532,6 +604,25 @@
 
   /* A name, so it keeps its own case — deliberately unlike the uppercase
      pane titles and tabs around it, which are labels. */
+  /* Same bounds as .repo-name below, whose slot it takes — a label that
+     changed the header's width on every switch would move the tab strip. */
+  .working {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    max-width: 22ch;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    font-size: var(--text-sm);
+    color: var(--text-secondary);
+  }
+
+  .working span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
   .repo-name {
     /* Bounded rather than free-growing: Pane's `.actions` never shrinks, so
        without a cap a long directory name would squeeze the tab strip — and

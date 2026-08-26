@@ -16,6 +16,13 @@
     /** Short oid of the commit HEAD points at (§8.2's `branch.oid`), `null` in
      *  a repo with no commits — the row it names is drawn as "you are here". */
     headHash: string | null;
+    /** The branch a switch is currently on its way to, `null` when none is
+     *  running (§13, *Work in progress*). A switch is HEAD moving from one row
+     *  to another and both ends are usually on screen, so the destination row
+     *  says "you are going here" while the real HEAD keeps saying "you are
+     *  still here" — see `.pending` in the styles for why it is the same three
+     *  properties rather than a fourth signal. */
+    switchingTo: string | null;
     onSelect: () => void;
     /** Double-clicking a ref badge (§8.3, §8.4) — checks out that exact
      *  branch directly, skipping any dropdown. */
@@ -28,8 +35,18 @@
     onContextMenu: (event: MouseEvent, refs: RefBadge[], hash: string) => void;
   }
 
-  let { row, laneCount, refs, selected, currentBranch, headHash, onSelect, onSwitchBranch, onContextMenu }: Props =
-    $props();
+  let {
+    row,
+    laneCount,
+    refs,
+    selected,
+    currentBranch,
+    headHash,
+    switchingTo,
+    onSelect,
+    onSwitchBranch,
+    onContextMenu,
+  }: Props = $props();
 
   const cx = (lane: number) => lane * LANE_WIDTH + LANE_WIDTH / 2;
   const cy = ROW_HEIGHT / 2;
@@ -50,6 +67,25 @@
   // inline style.
   const headTint = $derived(
     `--head-tint: color-mix(in srgb, ${laneColorVar(row.lane)} 12%, transparent);`,
+  );
+
+  // Whether a switch in flight is heading for *this* row. Matched on the ref
+  // rather than on a commit hash the pane would have to carry separately: the
+  // badge that was double-clicked is drawn on this row, so the row already
+  // holds the answer. A remote badge counts — `switch_remote_tracking` creates
+  // a local branch at the same commit, so the destination row is the same one.
+  const isPending = $derived(switchingTo !== null && refs.some((ref) => ref.name === switchingTo));
+
+  // Pending HEAD reuses `headTint`'s hue at less than half strength. Not a
+  // separate token: the whole point is that landing *strengthens* what is
+  // already there rather than swapping one signal for another, and two hues
+  // could drift apart.
+  const pendingTint = $derived(
+    `--pending-tint: color-mix(in srgb, ${laneColorVar(row.lane)} 5%, transparent);`,
+  );
+
+  const rowStyle = $derived(
+    isPending ? `${headTint} ${pendingTint}` : isHead ? headTint : undefined,
   );
 
   // Ties the badge to the exact dot it names, rather than inventing a ninth
@@ -82,7 +118,8 @@
   class="graph-row"
   class:selected
   class:head={isHead}
-  style={isHead ? headTint : undefined}
+  class:pending={isPending}
+  style={rowStyle}
   onclick={onSelect}
   oncontextmenu={(event) => onContextMenu(event, refs, row.commit.hash)}
   title={row.commit.subject}
@@ -110,7 +147,24 @@
            reads as bigger from across the pane without colliding with its
            neighbours or with the lines crossing the row. -->
       <circle cx={cx(row.lane)} cy={cy} r="7.5" fill={laneColorVar(row.lane)} opacity="0.25" />
+    {:else if isPending}
+      <!-- The same halo, not yet filled in: a dashed ring at the identical
+           radius, so when the switch lands the ring becomes the disc without
+           anything moving. A failed switch takes it away again and HEAD never
+           left the row it was on (§13). -->
+      <circle
+        class="pending-halo"
+        cx={cx(row.lane)}
+        cy={cy}
+        r="7.5"
+        fill="none"
+        stroke={laneColorVar(row.lane)}
+      />
     {/if}
+    <!-- The dot grows only for the real HEAD. Pending deliberately leaves it
+         at 4: the row is announcing where HEAD is *going*, and a dot already
+         at its final size would be the one part of the treatment claiming to
+         have arrived. -->
     <circle cx={cx(row.lane)} cy={cy} r={isHead ? 5.5 : 4} fill={laneColorVar(row.lane)} />
   </svg>
 
@@ -123,14 +177,17 @@
     <span
       class="ref ref-{ref.kind}"
       class:current={isCurrent(ref)}
+      class:working={ref.name === switchingTo}
       style={isCurrent(ref) ? currentBadgeStyle(row.lane) : undefined}
       role="button"
       tabindex="-1"
       ondblclick={(event) => badgeDblclick(event, ref)}
       oncontextmenu={(event) => badgeContextMenu(event, ref)}
-      title={isCurrent(ref)
-        ? `${ref.name} — current branch, right-click for actions`
-        : `${ref.name} — double-click to switch, right-click for actions`}
+      title={ref.name === switchingTo
+        ? `Switching to ${ref.name}…`
+        : isCurrent(ref)
+          ? `${ref.name} — current branch, right-click for actions`
+          : `${ref.name} — double-click to switch, right-click for actions`}
     >{ref.name}</span>
   {/each}
   <span class="subject">{row.commit.subject}</span>
@@ -156,6 +213,46 @@
      HEAD is a standing fact about the row, not a transient state. */
   .graph-row.head {
     background: var(--head-tint);
+  }
+
+  /* Pending HEAD (§13). The row already says "HEAD is here" with three things
+     at once — this tint, the halo on the dot, and the dot's own radius — so
+     saying "HEAD is arriving here" is those same three at partial strength
+     rather than a fourth signal competing with them. Landing is then the row
+     *finishing*: the tint deepens to 12%, the dashed ring fills into the disc,
+     the dot grows. Nothing appears and nothing changes meaning.
+
+     Italic was the obvious alternative and is unavailable: `.ref-remote` below
+     already spends it on "this ref lives on the server", and the destination
+     row usually carries both `x` and `origin/x`, so italicising the row would
+     make the two badges typographically identical during the one operation
+     where the difference picks the command. It would also mark the wrong fact
+     — the subject and hash on this row are true throughout; only HEAD's
+     position is provisional. */
+  .graph-row.pending {
+    background: var(--pending-tint);
+  }
+
+  .pending-halo {
+    stroke-width: 1.3;
+    stroke-dasharray: 3 3;
+    opacity: 0.75;
+    animation: pending-creep 3.2s linear infinite;
+  }
+
+  /* Slow enough to be caught rather than watched — the same reasoning as the
+     mascot's 37 s gaze. The ring's job is to look unfinished, and a fast crawl
+     would make it the loudest thing in the pane. */
+  @keyframes pending-creep {
+    to {
+      stroke-dashoffset: -24;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .pending-halo {
+      animation: none;
+    }
   }
 
   .graph-row:hover {
@@ -228,6 +325,31 @@
   .ref-remote {
     color: var(--text-muted);
     font-style: italic;
+  }
+
+  /* Acknowledgement, and the only part of §13's *Work in progress* with no
+     delay in front of it. The reported bug was never "how long is this going
+     to take" — it was "did my double-click land", and every millisecond spent
+     waiting to answer that re-creates it. There is no flicker to guard
+     against either: this is a state on the element under the pointer, no
+     different from :active.
+
+     One badge does not fully take it: the current branch's, whose colours come
+     from an inline `currentBadgeStyle` and so outrank any class here. That is
+     the switch-to-the-branch-you-are-already-on case, which git answers
+     instantly — the cursor and the trailing ellipsis still land, and there is
+     no wait left to narrate. */
+  .ref.working {
+    background: var(--bg-active);
+    border-color: var(--text-muted);
+    color: var(--text-primary);
+    cursor: progress;
+  }
+
+  .ref.working::after {
+    content: '…';
+    margin-left: 1px;
+    color: var(--text-muted);
   }
 
   /* HEAD's own branch (§8.3) — bold and a size up from the other badges so

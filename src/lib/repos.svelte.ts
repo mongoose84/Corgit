@@ -93,6 +93,22 @@ interface FetchSweepEvent {
   elapsedMs: number;
 }
 
+/** A write started or finished on a repo (§13, *Work in progress*). Emitted
+ *  by `write_and_refresh` around every mutating command, so the row that is
+ *  about to change can say so — including a repo that is not selected, which
+ *  row-level Pull (§5.1) can write to and which no pane-local flag could ever
+ *  cover. */
+interface WriteBeginEvent {
+  repoId: string;
+  /** The user's word for the operation — "Switch branch", "Pull". Same string
+   *  the error banner would use if this write goes on to fail. */
+  operation: string;
+}
+
+interface WriteEndEvent {
+  repoId: string;
+}
+
 /** Emitted after a stage, unstage or commit lands — updates one row and the
  *  middle pane immediately rather than waiting up to 60 s for the next sweep. */
 interface RepoStatusEvent {
@@ -206,6 +222,17 @@ class RepoStore {
    *  announcement of the newest failure (`notices.svelte.ts`), and this is the
    *  per-row record that outlives it. */
   rowErrors = $state<Record<string, string>>({});
+  /** Repos with a write running right now, mapped to the operation's name
+   *  (§13, *Work in progress*). Backend-owned like `errors` and `authNeeded`,
+   *  and for the same reason those are: a write can be running in a repo this
+   *  window has not selected, and — once §9.2's second window exists — one it
+   *  did not start.
+   *
+   *  A missed `write:begin` (a reload lands mid-write, say) leaves a row that
+   *  never spins; a missed `write:end` would leave one spinning forever. The
+   *  backend's marker is a `Drop` guard for exactly that asymmetry, and this
+   *  side inherits the safer failure of the two by keying on presence. */
+  busyWrites = $state<Record<string, string>>({});
   /** Whichever of `fetchRepo`/`pullRow` most recently failed for a repo, so
    *  the row's "Retry" re-runs the operation that actually failed rather than
    *  guessing. */
@@ -319,6 +346,21 @@ class RepoStore {
 
   error(id: string): string | undefined {
     return this.errors[id];
+  }
+
+  /** Whether a write is running on this repo (§13). Shared rather than
+   *  re-derived at each call site, the same reasoning as `isDirty` and
+   *  `needsPublish`: the row's spinner, the graph pane's label and any control
+   *  that disables itself must not be able to disagree about whether this repo
+   *  is busy. */
+  isBusy(id: string): boolean {
+    return this.busyWrites[id] !== undefined;
+  }
+
+  /** What that write is, for the tooltip — the row has no space to print it.
+   *  `undefined` when nothing is running. */
+  busyOperation(id: string): string | undefined {
+    return this.busyWrites[id];
   }
 
   /** Re-fetch the selected repo's file list — after selecting a repo, and
@@ -619,6 +661,14 @@ class RepoStore {
       await listen<SweepEvent>('status:sweep', (event) => this.applySweep(event.payload));
       await listen<RepoStatusEvent>('status:repo', (event) => this.applyRepoStatus(event.payload));
       await listen<FetchSweepEvent>('fetch:sweep', (event) => this.applyFetchSweep(event.payload));
+      await listen<WriteBeginEvent>('write:begin', (event) => {
+        const { repoId, operation } = event.payload;
+        this.busyWrites = { ...this.busyWrites, [repoId]: operation };
+      });
+      await listen<WriteEndEvent>('write:end', (event) => {
+        const { [event.payload.repoId]: _done, ...rest } = this.busyWrites;
+        this.busyWrites = rest;
+      });
 
       // A reload lands here with the backend's root still open; reuse it
       // rather than sweeping again.
