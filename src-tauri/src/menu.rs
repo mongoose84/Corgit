@@ -138,9 +138,17 @@ fn open_log_folder(app: &AppHandle) {
 
 fn show_about(app: &AppHandle) {
     let state = app.state::<crate::AppState>();
-    let git_line = match &state.git.version {
-        Some(version) => format!("Git {version} ({})", state.git.read_binary.as_deref().unwrap_or("git")),
-        None => "Git not found".to_string(),
+    // `get` rather than awaiting the probe: this is a synchronous menu
+    // handler, and by the time anyone reaches Help ▸ About the answer has been
+    // in the cell for minutes. The unresolved arm exists so that the one case
+    // where it has not — a probe still stuck in an anti-malware scan — says so
+    // instead of claiming git is missing (§3).
+    let git_line = match state.git.get() {
+        Some(git) => match &git.version {
+            Some(version) => format!("Git {version} ({})", git.read_binary.as_deref().unwrap_or("git")),
+            None => "Git not found".to_string(),
+        },
+        None => "Still looking for git".to_string(),
     };
     let message = format!("Corgit {}\n{git_line}", env!("CARGO_PKG_VERSION"));
 

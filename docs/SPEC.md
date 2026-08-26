@@ -32,6 +32,20 @@ the product. The graph is a viewer.
 
 First paint renders from cache. It never waits on git.
 
+**And nothing on the startup path runs on the main thread.** That thread runs the event
+loop, so work on it is not slow painting, it is no window at all — the window is created
+before the setup hook but cannot be composited by a thread that is not pumping messages.
+A `#[tauri::command]` without `(async)` is dispatched there, which is what `open_root`,
+`refresh_root` and `initial_root` all used to do: a directory read plus two stats per
+child, a cache file, and a subtree watch handle per repo, all in front of the first frame.
+Warm that is ~120 ms and invisible; cold, with every open going through a filter driver,
+it is the whole of "Corgit took ages to open". The rule generalises past startup: a
+command that touches the filesystem or spawns a process takes `(async)`, including the
+ones that only write a small file (`save_settings`, `toggle_pin`, `set_selected_repo`) —
+`%APPDATA%` is redirectable to a network share by policy, and a freeze on every click in
+the repo list is a worse failure than a slow save. The exception is `menu_command`, which
+closes windows and exits the app: that work *is* the main thread's.
+
 ---
 
 ## 2. Scope
@@ -100,6 +114,16 @@ proves spawning is the bottleneck.
 Resolve `git` from PATH at startup. If absent, show a blocking first-run screen with a
 download link rather than failing per-operation. Record the version — `core.fsmonitor`
 support (§6) needs ≥ 2.37.
+
+**"At startup" means started at startup, not waited for.** The probe is a process spawn,
+and process spawn is the one startup cost with no upper bound worth trusting: an
+anti-malware scan of a rarely-run binary, a revocation check with no route to its
+responder. Blocking the setup hook on it — which this originally did — spent that wait
+with the event loop stopped, so there was no window on screen to spend it in, and hitting
+the 5 s probe timeout produced five seconds of nothing followed by the *wrong* screen,
+since a git that is slow to answer is not a git that is absent. It is now warmed into a
+cell that `git_info` awaits; nothing else on the startup path depends on the answer, and
+the frontend starts optimistic so the welcome screen draws without it.
 
 ---
 
@@ -232,7 +256,20 @@ A **filter box** sits between them. Typing filters both sections by substring on
 only** — not branch, not path. This is the primary navigation tool for 77 repos; it is not
 optional.
 
+**The selected row is scrolled back into view whenever it moves.** Pinning and unpinning
+move a repo between the two sections, and over 77 rows the new position is usually outside
+the viewport — the selection is untouched, but the only thing on screen showing it has
+gone, which reads as though pinning cleared it. Scroll it to the nearest edge, never to
+the centre: a row already visible must not jump, so clicking a row you can see stays a
+no-op. The same rule restores the startup selection (§9.5) into view.
+
 **Row contents:** repo name · current branch · changed-files badge · ahead/behind badge.
+
+A row whose repo has a write running shows it in the **pin gutter** (§13, *Work in
+progress*) — a slot already reserved at a fixed width and already hidden and revealed, so the
+indicator costs no layout and never squeezes the badge strip. It takes the pin's place for
+the duration: which repos are pinned is not a question anyone is asking mid-write. Not the
+mascot, which docs/mascot.md §2 keeps out of repository rows.
 
 The **changed-files badge** is a filled dot grown enough to hold a number — the count of
 files with uncommitted changes, and nothing finer. No distinction between staged and
@@ -436,7 +473,11 @@ The right pane is **two views behind a tab strip** in its header: the graph belo
 open file's diff (§5.4). Selecting *Graph* does not close the diff — the tab stays, and
 the graph keeps its scroll position and loaded pages, so glancing between the two is free.
 
-Selected repo only — one repo at a time, so graph cost never multiplies by 77.
+Selected repo only — one repo at a time, so graph cost never multiplies by 77. **The
+header names it**, right-aligned opposite the tab strip and in the repo's own case, so the
+pane says what it is showing without the left pane having to. It is not inside the tab
+strip: that is a tablist, and a name sitting beside the tabs would read as a third tab
+whenever a diff is open.
 
 - **Synthetic "Uncommitted Changes" node** pinned at the top when the working tree is dirty.
   Clicking it selects the working tree, which also closes the info panel (§5.2). This is
@@ -534,6 +575,16 @@ One file at a time, read-only, opened by clicking a file row in either §5.2 mod
   is what it is.
 - Switching repos closes the diff — the path it names may not exist in the new one. Esc
   closes it. A commit's diff is immutable and is never re-read.
+- **The tab lives as long as its row.** A live diff is a view of a middle-pane row (§5.2),
+  so discarding or committing the open file closes the tab, and staging or unstaging it
+  re-points the tab at the section the row moved to rather than closing it. Neither case is
+  covered by the re-read below: git compares the two sides of a file that is no longer
+  there, finds them identical, and correctly reports nothing — which leaves the tab
+  selected over an empty diff. Keeping the last content instead is worse, being a
+  working-tree diff that no longer describes the working tree with nothing on screen saying
+  so. **A truncated file list decides nothing**: the lists stop at 100 rows per section
+  (§5.2), a missing path there is not a missing file, and closing a tab someone is reading
+  on a guess is the worse of the two mistakes.
 - **An open working-tree diff is live.** Anything that moves the file re-reads it — our own
   writes (stage, unstage, commit), an editor saving over it, a terminal `git checkout`.
   This costs nothing extra to arrange: the diff re-reads on the per-repo status event, so
@@ -765,6 +816,13 @@ required, not polish. Stale remote branches are handled by `--prune` on fetch (�
 
 On checkout failure with a dirty tree: show git's actual stderr plus **Open in VS Code**.
 **Never offer force-checkout** — it silently discards work.
+
+**A switch that takes time has to say so.** Checking out a branch that differs by thousands
+of files is seconds of work, and the gesture that starts it — a double-click on a ref badge
+— leaves no trace of itself: nothing on screen changes until the checkout lands, so a silent
+pane reads as a double-click that missed rather than as work in progress. See §13's *Work in
+progress*, which covers every write. Switching is only the one reliably slow enough to make
+the absence obvious.
 
 **Creating a branch** (Git Graph's gesture): right-click a ref badge in the graph → *Create
 branch from `<ref>`…* → a small modal takes the name plus a **Check out after creating**
@@ -1168,7 +1226,7 @@ the shortage rather than around the message.
 **The banner is app chrome: full window width, directly under the title bar (§4.1), and it
 always names the repo it is about.** Full width is not a style preference — it is the only
 place in the layout wide enough to hold a headline, an action and *Details* on one line,
-which is precisely what the pane-local notices could not do. Naming the repo is load-bearing
+which is precisely what the pane-local notices could not do. One line is the target and not a guarantee: when the controls stop fitting the row wraps and they take a second line. The alternative is worse than a two-line banner — a row that simply refuses to fit is clipped by `body { overflow: hidden }`, and the rightmost control is *Dismiss*. Naming the repo is load-bearing
 for a different reason: row-level Pull (§5.1) can fail in a repo that is not selected, so a
 banner reading only "Remote has commits you don't have" is ambiguous across a 77-row list.
 
@@ -1178,6 +1236,69 @@ help. Modals stay reserved for what they already do — `DiscardDialog`, `Delete
 **confirming an irreversible act before it happens.** So a merge conflict is a
 non-dismissible banner offering **Abort merge…**, and that ellipsis leads to a modal which
 confirms the discard. The report is a banner; the *recovery* may be a modal.
+
+### Work in progress
+
+§13's rule has a mirror image: **never leave the user unable to tell whether Corgit heard
+them.** Every write can take long enough to need saying so — a checkout across thousands of
+files, a pull over a slow link, a push of a large history — and none of them changes anything
+on screen until it lands.
+
+In-progress is **not a fourth tier, and it never uses the banner.** The banner reports
+something that already happened, and it is chrome the full width of the window; borrowing it
+for "this is happening" would put a full-width bar on screen for every stage and unstage —
+the four-pane-local-notices mistake above, run in reverse. Nor is it ever a modal: those stay
+reserved for confirming an irreversible act before it happens.
+
+Two things are shown, and they answer different questions:
+
+| | Where | When |
+| --- | --- | --- |
+| **Acknowledgement** | The control that was used — the ref badge, the row's Pull chevron | Immediately |
+| **Narration** | The repo row, and the pane the operation was started from | After a delay |
+
+Splitting them is the point. "Did it hear me" and "how long will this take" are different
+complaints, and the first one is answered by the thing under the pointer changing in the same
+frame as the click. Delaying *that* is what produced the original bug.
+
+Rules that follow:
+
+- **Narration is the backend's signal, not the pane's.** Rust owns which repos have a write
+  in flight (§7, §9.2) and publishes it per repo, so a write on a repo that is not selected —
+  row-level Pull (§5.1) — still marks its row, and a second window is not silent while the
+  first is busy. A pane-local flag structurally cannot do either.
+- **The window covers the whole wait**: from the moment the command is accepted, including
+  time queued behind an earlier write on that repo (§7 rule 1), until the status refresh and
+  any view reload that follows have landed. An indicator that clears while the graph is still
+  being rebuilt is worse than none — it says "done" over a view about to swap.
+- **Don't paint a wait no one notices.** Reveal after ~150 ms, and once revealed hold for
+  ~300 ms, so the common fast write leaves the list perfectly still and a write landing either
+  side of the threshold does not flash.
+- **It is a state, not an event**, so it is never dismissible (below). It goes when the write
+  does.
+- **No Cancel.** A checkout in progress cannot be stopped without leaving a half-written
+  working tree, and a button that claims otherwise is worse than no button.
+
+**In the graph**, the destination row additionally becomes *pending HEAD*. A switch is HEAD
+moving from one commit to another and both ends are usually on screen, so the row HEAD is
+still genuinely on keeps its full treatment while the destination takes a weaker copy of the
+same one — the tint at 5% instead of 12%, a dashed ring where the filled halo goes, and the
+dot left at its normal radius. Landing is then the row *finishing* rather than changing:
+nothing appears, nothing switches meaning. A failed switch is the same three receding, which
+is what makes a failure read as "that did not happen" rather than as an undo of something
+that did.
+
+What the graph must **not** do is dim or overlay itself during a switch, however common that
+is elsewhere. A switch changes no commit on screen — only which badge is HEAD — so greying
+the history claims the view is untrustworthy at the one moment it is entirely true. Pull and
+merge do bring new commits, and the reload already covers those.
+
+*Deliberately absent:* a percentage. `git switch --progress` will report `Updating files:
+47% (2823/6000)` on stderr without a terminal, so it is available — but collecting it means
+streaming stderr rather than reading it at the end, and filtering those lines back out before
+the raw text is retained for *Details*. Worth revisiting only if measurement shows switches
+are routinely multi-second; not worth an animation asserting precision Corgit has not
+measured.
 
 ### Merge conflict
 
@@ -1208,6 +1329,7 @@ interval (§5.1) and then loses the argument anyway. Sorting what exists:
 | `!` status error | `errors[id]` from the sweep | No — republished every sweep |
 | `⚠` conflict | `status.conflicted > 0` | No — derived state |
 | counts, ↑/↓ | derived | No — not notifications |
+| spinner, in progress | a write in flight, from the backend | No — derived state |
 
 `⚿` looks like the second dismissible case and is not. `auth_needed` is a **scheduling** flag,
 not a display flag: the fetch sweep filters those repos out (§6, §8.7) until a manual fetch
@@ -1337,15 +1459,28 @@ menu bar (§4.1) · window restores the last selected repo · multi-window defer
 
 · scan depth 1 (§8.1) · *Open Folder…* replaces the current root.
 
-Still open, none blocking:
-- [ ] **Should the status sweep emit incrementally rather than in one batch?**
-      Step 2 emits a single event when all repos are done, so every row stays
-      branch-less until the whole sweep lands — 20 s on a cold start on the
-      first machine measured. Cache-first paint (step 3) should hide this,
-      since rows arrive filled in from disk and the sweep only corrects them.
-      Decide *after* the cache is in and only if it still reads badly: doing
-      both means 77 IPC round trips per sweep to solve a problem the cache may
-      already have solved. The change is local to `collect()`.
+- [x] **Should the status sweep emit incrementally rather than in one batch?**
+      **Batch, minus its stragglers.** Cache-first paint did solve the case
+      this was raised for — rows arrive filled in from disk and no longer wait
+      branch-less — but it did not solve the case where a *stale* row is the
+      wrong one: the batch lands when its slowest repo does, so one repo taking
+      the whole 30 s `READ_TIMEOUT` on a cold cache held all 69 rows and the
+      sweeping indicator for 30 s after every launch. Measured on the 69-repo
+      root, first launch of the day, repeatably one repo.
+
+      So `collect()` waits `SWEEP_PATIENCE` (3 s — above a healthy full pass at
+      ~1.2 s, far below a killed read) and publishes what it has. Repos still
+      reading keep their process and their read guard, and publish themselves
+      through the per-repo `status:repo` event a watcher already uses (§6). The
+      re-entrancy guard is held until they land, so §6's "a sweep never starts
+      while one is in flight" holds and a straggler cannot be overtaken by the
+      next tick's read of the same repo.
+
+      This is not the 77-round-trip incremental sweep the question was about.
+      The healthy case is still exactly one event; the extra ones are one per
+      repo that was genuinely stuck, which is the number worth paying.
+
+Still open: none.
 
 ---
 

@@ -3,6 +3,7 @@ import { listen } from '@tauri-apps/api/event';
 
 import { inTauri } from './tauri';
 import { layoutDiff, type DiffLayout, type FileDiff } from './diffLayout';
+import type { FileChanges, FileEntry } from './repos.svelte';
 
 /**
  * The right pane's second view (SPEC.md §5.4).
@@ -38,12 +39,94 @@ export type PaneView = 'graph' | 'diff';
 interface RepoStatusEvent {
   root: string;
   repoId: string;
+  /** The middle pane's rows, carried only for the selected repo (§5.2) and
+   *  `null` on every other event. Its absence is "nothing to decide from",
+   *  never "the file list is empty" — see `reconcile`. */
+  files: FileChanges | null;
+}
+
+/** Which two sides a middle-pane row compares (§5.2, §5.4). It has to come from
+ *  the section rather than from the entry: the same path sits in both lists
+ *  whenever a file is partly staged, with a different diff on each side. An
+ *  untracked file has no other side at all, so it gets its own source rather
+ *  than a `git diff` that would correctly report nothing.
+ *
+ *  Shared with `sourcesFor` below rather than left inline in the pane — the row
+ *  a click opens and the row `reconcile` looks for afterwards must be the same
+ *  row, and two copies of this are two chances for them to disagree. */
+export function sourceForRow(section: 'staged' | 'unstaged', entry: FileEntry): DiffSource {
+  if (section === 'staged') return { kind: 'staged' };
+  return entry.status === '?' ? { kind: 'untracked' } : { kind: 'unstaged' };
+}
+
+/** Where the middle pane lists this path now, as the sources a row click would
+ *  have produced. Empty means the file has no row at all any more.
+ *
+ *  A partly-staged file is in both lists with a different diff on each side, so
+ *  this returns both. Staged is first because the one case where the open side
+ *  is neither of them is an untracked file that was just `git add`ed and then
+ *  edited again: the staged row holds the whole file, which is what the tab was
+ *  showing, and the unstaged one holds only the edit since.
+ *
+ *  `files.conflicted` is deliberately not consulted. Those are not rows in the
+ *  pane (§13 sends conflicts to VS Code instead), and the rule this serves is
+ *  about rows. */
+export function sourcesFor(files: FileChanges, path: string): DiffSource[] {
+  const sources: DiffSource[] = [];
+  for (const entry of files.staged) {
+    if (entry.path === path) sources.push(sourceForRow('staged', entry));
+  }
+  for (const entry of files.unstaged) {
+    if (entry.path === path) sources.push(sourceForRow('unstaged', entry));
+  }
+  return sources;
 }
 
 /** A commit is immutable, so its diff never needs re-reading; everything else
  *  is a view onto the working tree or the index, both of which a write moves. */
 function isLive(source: DiffSource): boolean {
   return source.kind !== 'commit';
+}
+
+/** What an open diff should do about a fresh file list — see `DiffStore.reconcile`. */
+export type Reconciliation =
+  | { kind: 'keep' }
+  | { kind: 'close' }
+  | { kind: 'repoint'; source: DiffSource };
+
+/**
+ * The tab's lifetime is the middle pane's rows (§5.2, §5.4): a live diff is a
+ * view of a row, so when the row goes the tab goes with it, and when the row
+ * moves section the tab follows it.
+ *
+ * Pure, and separate from the store, because this is the decision that can be
+ * *silently wrong* in both directions — a tab closed under a reader, or one
+ * left sitting over a file that is no longer there — and neither shows up as an
+ * error anywhere. Same reasoning as `prune` in fileSelection.ts.
+ */
+export function reconcileOpen(open: OpenDiff, files: FileChanges): Reconciliation {
+  // A commit's two sides are immutable; nothing a working tree does can move
+  // them, and its file rows are the info panel's, not this pane's.
+  if (!isLive(open.source)) return { kind: 'keep' };
+
+  // Both lists stop at `MAX_FILES_PER_SECTION` (status.rs). Past that a path's
+  // absence is not evidence that it is gone — the row may simply have been
+  // pushed off the end — and closing a tab the user is reading on a guess is
+  // worse than leaving one open a beat too long.
+  if (files.staged.length < files.stagedTotal || files.unstaged.length < files.unstagedTotal) {
+    return { kind: 'keep' };
+  }
+
+  const sources = sourcesFor(files, open.path);
+  if (sources.length === 0) return { kind: 'close' };
+  if (sources.some((source) => source.kind === open.source.kind)) return { kind: 'keep' };
+
+  // Still a row, just a different section's — staged, unstaged, or added out of
+  // untracked. Re-pointed rather than closed: it is the same file and, for a
+  // whole-file stage, the same lines, so a tab that vanished on the + button
+  // would make staging look like it lost something. The column captions change
+  // to `HEAD`/`Index`, which is the view saying what it swapped to.
+  return { kind: 'repoint', source: sources[0] };
 }
 
 class DiffStore {
@@ -68,9 +151,13 @@ class DiffStore {
     if (!inTauri) return;
     await listen<RepoStatusEvent>('status:repo', (event) => {
       const open = this.open;
-      if (open && open.repoId === event.payload.repoId && isLive(open.source)) {
-        void this.reload();
-      }
+      if (!open || open.repoId !== event.payload.repoId || !isLive(open.source)) return;
+      // Reconcile first: a re-read of a file that is no longer there returns a
+      // perfectly valid empty diff, and rendering that is how the tab ends up
+      // sitting over "No changes" after a discard or a commit.
+      const files = event.payload.files;
+      if (files && this.reconcile(files)) return;
+      void this.reload();
     });
   }
 
@@ -110,6 +197,36 @@ class DiffStore {
       return open.source.hash === source.hash;
     }
     return true;
+  }
+
+  /**
+   * Applies `reconcileOpen` to a fresh file list.
+   *
+   * Without it, discarding or committing the open file leaves the tab selected
+   * over an empty diff — git compares the two sides, finds them identical, and
+   * says so, which is true and useless. Keeping the last content instead was
+   * the other option and is worse: a working-tree diff that no longer describes
+   * the working tree, with nothing on screen saying so.
+   *
+   * Returns whether it handled the event, so the caller's plain re-read is
+   * skipped for a tab that just closed or re-pointed.
+   */
+  private reconcile(files: FileChanges): boolean {
+    const open = this.open;
+    if (!open) return true;
+
+    const next = reconcileOpen(open, files);
+    switch (next.kind) {
+      case 'keep':
+        return false;
+      case 'close':
+        this.close();
+        return true;
+      case 'repoint':
+        this.open = { ...open, source: next.source };
+        void this.reload();
+        return true;
+    }
   }
 
   private async reload(): Promise<void> {

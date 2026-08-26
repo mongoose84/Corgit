@@ -5,6 +5,9 @@ import {
   laneColorVar,
   laneCount,
   layoutRows,
+  visibleWindow,
+  OVERSCAN,
+  ROW_HEIGHT,
   type Commit,
   type LaneState,
 } from './graphLayout';
@@ -161,5 +164,64 @@ describe('lane metrics', () => {
     expect(laneColorVar(7)).toBe('var(--lane-8)');
     expect(laneColorVar(8)).toBe('var(--lane-1)');
     expect(laneColorVar(21)).toBe('var(--lane-6)');
+  });
+});
+
+describe('virtualization window', () => {
+  // A 20-row viewport, the shape the pane actually runs in.
+  const VIEWPORT = 20 * ROW_HEIGHT;
+
+  test('a fresh graph starts at the first row', () => {
+    const { start, end, topOffset } = visibleWindow(300, 0, VIEWPORT);
+
+    expect(start).toBe(0);
+    expect(topOffset).toBe(0);
+    expect(end).toBe(20 + OVERSCAN);
+  });
+
+  test('the window follows the offset with overscan either side', () => {
+    const { start, end, topOffset } = visibleWindow(300, 100 * ROW_HEIGHT, VIEWPORT);
+
+    expect(start).toBe(100 - OVERSCAN);
+    expect(topOffset).toBe((100 - OVERSCAN) * ROW_HEIGHT);
+    expect(end).toBe(120 + OVERSCAN);
+  });
+
+  test('an offset left over from a longer history still draws rows', () => {
+    // The bug this exists for: a rebuilt scroll box, or a page replaced under
+    // a scrolled one, leaves `scrollTop` pointing past the end of the new
+    // content. Unclamped, `start` ran past `rowCount` and the slice was empty
+    // — a graph that drew nothing and never recovered.
+    const { start, end, topOffset } = visibleWindow(12, 3000, VIEWPORT);
+
+    expect(start).toBe(0);
+    expect(topOffset).toBe(0);
+    expect(end).toBe(12);
+  });
+
+  test('a history shorter than the viewport is never scrolled off the top', () => {
+    // No scrollbar means no scroll event to correct a stale offset, which is
+    // what made the blank graph stick.
+    expect(visibleWindow(5, 900, VIEWPORT).start).toBe(0);
+    expect(visibleWindow(5, 900, VIEWPORT).end).toBe(5);
+  });
+
+  test('the last row survives being scrolled to the very bottom', () => {
+    // `maxScroll` deliberately ignores the "Load more" row below the spacer,
+    // so the clamp undershoots by one row height; the overscan has to absorb
+    // that without dropping the end of the history.
+    const total = 300 * ROW_HEIGHT;
+    const { end } = visibleWindow(300, total - VIEWPORT, VIEWPORT);
+
+    expect(end).toBe(300);
+  });
+
+  test('an empty graph asks for no rows and no spacer', () => {
+    expect(visibleWindow(0, 0, VIEWPORT)).toEqual({
+      start: 0,
+      end: 0,
+      topOffset: 0,
+      totalHeight: 0,
+    });
   });
 });

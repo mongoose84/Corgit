@@ -7,7 +7,7 @@
   import DiscardDialog from '../DiscardDialog.svelte';
   import ContextMenu from '../ContextMenu.svelte';
   import { hasConflict, needsPublish, repos, type FileEntry } from '../repos.svelte';
-  import { diff, type DiffSource } from '../diff.svelte';
+  import { diff, sourceForRow } from '../diff.svelte';
   import {
     extend,
     isSelected,
@@ -117,25 +117,15 @@
     if (pruned !== selection) selection = pruned;
   });
 
-  /** Which two sides the right pane compares (§5.4). It has to come from the
-   *  section rather than from the entry: the same path sits in both lists
-   *  whenever a file is partly staged, with a different diff on each side.
-   *  An untracked file has no other side at all, so it gets its own source
-   *  rather than a `git diff` that would correctly report nothing. */
-  function sourceFor(section: 'staged' | 'unstaged', entry: FileEntry): DiffSource {
-    if (section === 'staged') return { kind: 'staged' };
-    return entry.status === '?' ? { kind: 'untracked' } : { kind: 'unstaged' };
-  }
-
   function openDiff(section: FileSection, entry: FileEntry) {
     const id = repos.selectedId;
     if (!id) return;
-    diff.show(id, entry.path, sourceFor(section, entry));
+    diff.show(id, entry.path, sourceForRow(section, entry));
   }
 
   function isOpen(section: FileSection, entry: FileEntry): boolean {
     const id = repos.selectedId;
-    return id !== undefined && diff.isOpen(id, entry.path, sourceFor(section, entry));
+    return id !== undefined && diff.isOpen(id, entry.path, sourceForRow(section, entry));
   }
 
   /** A modified click builds the selection; a plain one is what it always was,

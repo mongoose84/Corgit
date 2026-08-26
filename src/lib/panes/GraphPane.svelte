@@ -13,11 +13,24 @@
   import { isUnmergedBranchRefusal } from '../gitErrors';
   import { notices } from '../notices.svelte';
   import { diff } from '../diff.svelte';
-  import { laneCount as computeLaneCount, laneColorVar, ROW_HEIGHT, LANE_WIDTH } from '../graphLayout';
+  import {
+    laneCount as computeLaneCount,
+    laneColorVar,
+    visibleWindow,
+    ROW_HEIGHT,
+    LANE_WIDTH,
+  } from '../graphLayout';
+  import { BusyIndicator } from '../busyIndicator';
 
   // Commit selection drives the middle pane's Mode B in build step 7 (§5.2);
   // until then, clicking a row only highlights it here.
   const hasRepo = $derived(repos.selectedId !== undefined);
+  // The pane is about one repo and never said which. The repo list reorders
+  // under pinning, so the row that answered the question can move — or leave
+  // the viewport entirely — while the history on screen does not change at
+  // all. Naming the subject here means the graph is self-describing whatever
+  // the left pane is doing; RepoRow's scroll-into-view is the other half.
+  const repoName = $derived(repos.selectedRepo?.name);
   const status = $derived(repos.selectedId ? repos.status(repos.selectedId) : undefined);
   const dirty = $derived(status !== undefined && isDirty(status));
   // Merging needs a destination, and Corgit's is always what is checked out.
@@ -51,24 +64,34 @@
 
   // Virtualized rows (§5.3): only the rows within the scrolled viewport (plus
   // a small overscan) exist in the DOM. Lane layout runs once over the whole
-  // loaded set in graph.svelte.ts; this only slices the precomputed result.
-  const OVERSCAN = 8;
+  // loaded set in graph.svelte.ts, and the window arithmetic lives in
+  // `visibleWindow`; this only holds the two measurements they need.
   let scrollEl: HTMLElement | undefined = $state();
   let spacerEl: HTMLElement | undefined = $state();
   let scrollTop = $state(0);
   let viewportHeight = $state(0);
 
-  const startIndex = $derived(Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - OVERSCAN));
-  const endIndex = $derived(
-    Math.min(graph.rows.length, Math.ceil((scrollTop + viewportHeight) / ROW_HEIGHT) + OVERSCAN),
-  );
-  const visibleRows = $derived(graph.rows.slice(startIndex, endIndex));
-  const topOffset = $derived(startIndex * ROW_HEIGHT);
-  const totalHeight = $derived(graph.rows.length * ROW_HEIGHT);
+  const rowWindow = $derived(visibleWindow(graph.rows.length, scrollTop, viewportHeight));
+  const visibleRows = $derived(graph.rows.slice(rowWindow.start, rowWindow.end));
 
   function onScroll() {
     if (scrollEl) scrollTop = scrollEl.scrollTop;
   }
+
+  // Re-read the offset off the element whenever it is a *different* element,
+  // because the scroll box does not survive a repo change: selecting a repo
+  // empties `graph.rows` before the page lands, which swaps the whole
+  // `.graph-body` out for the "Reading history…" state and back. The rebuilt
+  // box starts at the top and fires no scroll event saying so, so `scrollTop`
+  // kept whatever the *previous* repo had been scrolled to and the window was
+  // translated that far down a graph the user is looking at the top of. The
+  // clamp in `visibleWindow` bounds the damage to "the last few rows" instead
+  // of blank, but only this stops it happening: nothing else corrects the
+  // reading, and a repo whose history is too short to scroll never produces
+  // the scroll event that would.
+  $effect(() => {
+    if (scrollEl) scrollTop = scrollEl.scrollTop;
+  });
 
   // Back to the working tree, which also shuts the info column (§5.2) — there
   // is no commit left for it to be about. Two ways in, because the
@@ -96,6 +119,60 @@
   // click cannot queue a switch behind a merge whose result is not on screen
   // yet, which would leave the two failures fighting over one banner.
   let busy = $state(false);
+
+  /** The branch a switch is on its way to (§13, *Work in progress*), `null`
+   *  when none is running. Pane state rather than store state because it is
+   *  the *destination* — the backend's `write:begin` says this repo is busy
+   *  and with which operation, but only the click knows which badge it named,
+   *  and naming it is what separates a slow switch from a slow merge started
+   *  from the same menu. */
+  let switchingTo = $state<string | null>(null);
+
+  /** Cleared here rather than in `switchTo` because the wait does not end when
+   *  the command returns. `write_and_refresh` emits `status:repo` before it
+   *  does, `graph.svelte.ts` reloads the page and refs off that event, and
+   *  until *that* lands the badges on screen are still the pre-switch ones.
+   *  Dropping the label at the command boundary would say "done" over a view
+   *  about to swap (§13).
+   *
+   *  `repos.isBusy` and not just the local `busy`, and the difference is the
+   *  whole reason this works: `busy` falls when the *invoke* resolves, which
+   *  is unordered against event delivery, so the reload may not have started
+   *  and `graph.loading` may still be false — clearing then would be the exact
+   *  early drop this effect exists to prevent. `write:end` is emitted after
+   *  `emit_repo_status`, so by the time it lands the status event has already
+   *  been delivered and the reload it triggers has already set `loading`. */
+  $effect(() => {
+    const id = repos.selectedId;
+    const stillWriting = busy || (id !== undefined && repos.isBusy(id));
+    if (switchingTo !== null && !stillWriting && !graph.loading) switchingTo = null;
+  });
+
+  /** Narration for anything else the repo is doing — a merge from the same
+   *  menu, a pull started from the row while the graph is open. Gated at
+   *  150 ms like the repo row's spinner; the switch label above is not, since
+   *  it is cleared by a condition rather than by a timer and would otherwise
+   *  need two clocks agreeing. */
+  let writeShown = $state(false);
+  const writeIndicator = new BusyIndicator((shown) => (writeShown = shown));
+
+  $effect(() => {
+    const id = repos.selectedId;
+    writeIndicator.set(id !== undefined && repos.isBusy(id));
+  });
+
+  $effect(() => () => writeIndicator.dispose());
+
+  /** What the header says while something is running. The switch names its
+   *  branch; everything else falls back to the operation's own word, which is
+   *  the same one the error banner would use if it fails. */
+  const workingLabel = $derived.by(() => {
+    if (switchingTo !== null) return `Switching to ${switchingTo}…`;
+    if (!writeShown) return null;
+    const id = repos.selectedId;
+    const operation = id === undefined ? undefined : repos.busyOperation(id);
+    return operation === undefined ? null : `${operation}…`;
+  });
 
   let menu = $state<{ x: number; y: number; refs: RefBadge[]; hash: string } | null>(null);
   // Non-null while the Create Branch dialog is up; the value is the start
@@ -131,12 +208,17 @@
   async function switchTo(ref: RefBadge) {
     if (busy) return;
     busy = true;
+    // Set before the await, not after it: this is the acknowledgement, and it
+    // has to be on screen in the same frame as the double-click (§13).
+    switchingTo = ref.name;
     const ok = await repos.switchBranch(ref.name, ref.kind);
     // The banner is already up (§13); this only tells it something git's
     // stderr does not carry — that the tree was dirty when the checkout was
     // refused, which is what makes *Open in VS Code* the right way out.
     if (!ok && dirty) notices.overrideAction('open-vscode');
     busy = false;
+    // `switchingTo` is left standing — the effect above takes it down once the
+    // graph reload triggered by this write has landed.
   }
 
   // Merging from the graph (§8.3) — the badge names the source, the
@@ -285,6 +367,27 @@
     {/if}
   {/snippet}
 
+  {#snippet actions()}
+    {#if workingLabel}
+      <!-- Takes the repo name's slot rather than sitting beside it, the same
+           mechanic RepoList's header already uses for the sweep (§13): the two
+           never fight for the space, and the name comes back the moment the
+           write lands. The dog is permitted here and nowhere near the rows —
+           docs/mascot.md §2 draws that line at "dead space and dead time", and
+           a pane header is chrome. -->
+      <span class="working" aria-live="polite">
+        <Mascot pose="mini-working" height={18} />
+        <span>{workingLabel}</span>
+      </span>
+    {:else if repoName}
+      <!-- Right-hand side rather than beside the tabs: the tab strip is a
+           tablist, and a label that is not a tab does not belong inside it —
+           nor should the repo name grow into a third tab-looking thing when a
+           diff is open. -->
+      <span class="repo-name" title={repos.selectedRepo?.path}>{repoName}</span>
+    {/if}
+  {/snippet}
+
   <!-- Both views stay mounted and laid out (§5.4), stacked rather than swapped:
        each is a scroll container, and the graph carries scroll position and
        however many pages the user loaded. Unmounting it — or even `display:
@@ -361,8 +464,8 @@
             onscroll={onScroll}
             onclick={onBackgroundClick}
           >
-            <div class="spacer" bind:this={spacerEl} style="height: {totalHeight}px">
-              <div class="window" style="transform: translateY({topOffset}px)">
+            <div class="spacer" bind:this={spacerEl} style="height: {rowWindow.totalHeight}px">
+              <div class="window" style="transform: translateY({rowWindow.topOffset}px)">
                 {#each visibleRows as row (row.commit.hash)}
                   <GraphRow
                     {row}
@@ -371,6 +474,7 @@
                     selected={graph.selection === row.commit.hash}
                     {currentBranch}
                     headHash={status?.head ?? null}
+                    {switchingTo}
                     onSelect={() => graph.select(row.commit.hash)}
                     onSwitchBranch={switchTo}
                     onContextMenu={openMenu}
@@ -512,6 +616,40 @@
   .tab-close:hover {
     background: var(--bg-active);
     color: var(--text-primary);
+  }
+
+  /* A name, so it keeps its own case — deliberately unlike the uppercase
+     pane titles and tabs around it, which are labels. */
+  /* Same bounds as .repo-name below, whose slot it takes — a label that
+     changed the header's width on every switch would move the tab strip. */
+  .working {
+    display: flex;
+    align-items: center;
+    gap: var(--space-1);
+    max-width: 22ch;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    font-size: var(--text-sm);
+    color: var(--text-secondary);
+  }
+
+  .working span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .repo-name {
+    /* Bounded rather than free-growing: Pane's `.actions` never shrinks, so
+       without a cap a long directory name would squeeze the tab strip — and
+       a tab you cannot read is worse than a name you cannot. */
+    max-width: 22ch;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    font-size: var(--text-sm);
+    color: var(--text-secondary);
   }
 
   .graph-body {

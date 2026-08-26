@@ -6,6 +6,7 @@ mod diff;
 mod discovery;
 mod git;
 mod graph;
+mod inflight;
 mod menu;
 mod problems;
 mod remote;
@@ -43,6 +44,14 @@ const REPO_STATUS_EVENT: &str = "status:repo";
 /// already has the error in hand.
 const PROBLEM_EVENT: &str = "problem:recorded";
 
+/// A write started or finished on a repo (§13, *Work in progress*). Unlike
+/// `PROBLEM_EVENT`, the window that started the operation needs these too: it
+/// knows it called `switch_branch`, but not that the call has stopped waiting
+/// on the write queue and started doing something, and the row it has to mark
+/// may not be the selected one.
+const WRITE_BEGIN_EVENT: &str = "write:begin";
+const WRITE_END_EVENT: &str = "write:end";
+
 /// Rust owns the state; the frontend is a view over it (SPEC.md §9.3).
 ///
 /// The global git semaphore lives in `git.rs` instead, as a static — it has to
@@ -52,8 +61,20 @@ struct AppState {
     config_dir: PathBuf,
     cache_dir: PathBuf,
     settings: Mutex<Settings>,
-    /// Resolved once at startup: git either exists or the UI says so (§3).
-    git: GitInfo,
+    /// Whether git exists, resolved *off* the startup path (§3).
+    ///
+    /// A cell rather than a value because the probe is a process spawn, and a
+    /// process spawn is the one startup cost with no upper bound worth
+    /// trusting: an anti-malware scan of a rarely-run binary, a revocation
+    /// check that cannot reach its responder. Blocking `setup` on it — which
+    /// this used to do — spent that time with the event loop stopped, so the
+    /// window did not exist yet, and hitting `PROBE_TIMEOUT` meant five
+    /// seconds of nothing followed by the wrong screen.
+    ///
+    /// `OnceCell` and not a plain spawn-and-store because `git_info` must be
+    /// able to *wait* for the answer without racing it: whoever asks first
+    /// runs the probe, everyone else awaits that same run.
+    git: Arc<tokio::sync::OnceCell<GitInfo>>,
     root: Mutex<Option<RootState>>,
     /// Re-entrancy guard (§6): a sweep never starts while one is in flight.
     /// The tick is skipped, not queued.
@@ -74,6 +95,10 @@ struct AppState {
     /// `Arc`-wrapped so the sweep can clone a handle into its per-repo tasks
     /// without needing an `AppHandle` there too (§6, §7 rule 2).
     write_queues: Arc<WriteQueues>,
+    /// Which repos have a write running, for §13's *Work in progress*. Beside
+    /// `write_queues` rather than inside it on purpose — see `inflight.rs`:
+    /// the queue is a correctness guarantee, this is something to draw.
+    in_flight: Arc<inflight::InFlightWrites>,
     /// FS watchers, one per repo (§6). No longer the hot set: on Windows a
     /// subtree watch is one handle whatever its depth, so every repo gets one
     /// and the sweep stops being the refresh mechanism.
@@ -222,7 +247,15 @@ fn get_settings(state: State<'_, AppState>) -> Settings {
         .clone()
 }
 
-#[tauri::command]
+/// `(async)` for the reason in §1: this writes a file, and a command without
+/// it is dispatched on the thread running the event loop. `%APPDATA%` is
+/// normally a local disk and this is normally sub-millisecond — but it is
+/// redirectable to a network share by policy, and the failure that buys is a
+/// UI that freezes on a settings write rather than one that is slow to save.
+/// The same applies to `toggle_pin`, `clear_pins` and `set_selected_repo`
+/// below, which write the per-root file on a pin toggle and on every click in
+/// the repo list.
+#[tauri::command(async)]
 fn save_settings(mut settings: Settings, state: State<'_, AppState>) -> Result<(), String> {
     let mut current = state.settings.lock().expect("settings mutex poisoned");
 
@@ -236,16 +269,32 @@ fn save_settings(mut settings: Settings, state: State<'_, AppState>) -> Result<(
     Ok(())
 }
 
+/// Waits for the probe rather than reporting "unknown", because the one caller
+/// is the frontend deciding whether to show §3's blocking first-run screen and
+/// there is no honest third answer to draw. It costs the frontend nothing to
+/// wait: `repos.svelte.ts` starts optimistic and no longer holds up first paint
+/// for this.
+///
+/// `AppHandle` rather than `State<'_, _>`: an async command taking a reference
+/// is required to return `Result`, and there is nothing here that can fail.
 #[tauri::command]
-fn git_info(state: State<'_, AppState>) -> GitInfo {
-    state.git.clone()
+async fn git_info(app: AppHandle) -> GitInfo {
+    // Cloned out before the await so no `State` guard is held across it.
+    let git = app.state::<AppState>().git.clone();
+    git.get_or_init(git::probe).await.clone()
 }
 
 /// The root to reopen on launch: the most recent one that still exists. A
 /// renamed folder or a disconnected drive yields `None`, and the frontend
 /// shows the welcome screen — never an empty repo list, never a crash (§9.1).
-#[tauri::command]
-fn initial_root(state: State<'_, AppState>) -> Option<PathBuf> {
+///
+/// `(async)`, and taking an `AppHandle` so it can be: `is_dir` is a stat per
+/// remembered root, and a disconnected drive is precisely the case where that
+/// stat waits on a timeout rather than on a disk. On the main thread that wait
+/// is the window not appearing.
+#[tauri::command(async)]
+fn initial_root(app: AppHandle) -> Option<PathBuf> {
+    let state = app.state::<AppState>();
     let settings = state.settings.lock().expect("settings mutex poisoned");
     settings
         .recent_roots
@@ -274,17 +323,32 @@ async fn pick_root(app: AppHandle) -> Option<PathBuf> {
 /// paintable repo list immediately and leaves git to the sweep. First paint
 /// never waits on git (§1) — rows arrive filled in from the on-disk cache,
 /// stale by at most one sweep interval, and the sweep corrects them (§6).
-#[tauri::command]
+/// `(async)` on a synchronous body, which is the whole of the fix: a
+/// `#[tauri::command]` without it is dispatched on the thread running the
+/// event loop, so every stat below — one directory read plus two per child
+/// (§8.1), a cache file, a subtree handle per repo (§6) — was time the window
+/// spent not painting and not accepting input. Warm that is ~120 ms and
+/// invisible. Cold, with each of those opens going through a filter driver, it
+/// is the whole of "Corgit took ages to open".
+///
+/// It still blocks *a* thread, now one of the async runtime's, which is the
+/// honest cost of not restructuring a body that is all `std::fs`. That thread
+/// is one of several and none of them paint.
+#[tauri::command(async)]
 fn open_root(path: PathBuf, app: AppHandle) -> Result<RootView, String> {
+    let opened = Instant::now();
+
     let root = discovery::canonicalize(&path);
     if !root.is_dir() {
         return Err(format!("{} is not a folder", root.display()));
     }
 
     let repos = discovery::scan(&root);
+    let scanned = opened.elapsed();
     let state = app.state::<AppState>();
 
     let mut cached = cache::load(&state.cache_dir, &root);
+    let loaded = opened.elapsed();
     // A repo that no longer exists under this root has nothing left to
     // correct it, so it must not linger in the view.
     cached.statuses.retain(|id, _| repos.iter().any(|repo| &repo.id == id));
@@ -326,6 +390,21 @@ fn open_root(path: PathBuf, app: AppHandle) -> Result<RootView, String> {
     start_sweep(&app, generation, repos.clone());
     sync_watchers(&app);
 
+    // Split rather than a single total, because the three phases fail for
+    // different reasons: `scan` is one directory read plus two stats per child
+    // (§8.1), `cache` is one file, and `watchers` is a subtree handle per repo
+    // (§6). A cold start that is slow in only one of them says which.
+    let watched = opened.elapsed();
+    log::info!(
+        "open_root {}: scan {} ms ({} repos), cache {} ms, sweep+watchers {} ms, total {} ms",
+        root.display(),
+        scanned.as_millis(),
+        repos.len(),
+        (loaded - scanned).as_millis(),
+        (watched - loaded).as_millis(),
+        watched.as_millis(),
+    );
+
     Ok(RootView {
         path: root,
         repos,
@@ -361,7 +440,11 @@ fn current_root(state: State<'_, AppState>) -> Option<RootView> {
 /// Rescan the root and sweep again. Discovery is repeated because a repo may
 /// have been cloned or deleted since the folder was opened, so the caller gets
 /// the new repo list back rather than only the statuses the sweep will emit.
-#[tauri::command]
+///
+/// `(async)` for the same reason as `open_root`: it repeats that scan and
+/// rebuilds the watchers, so on the main thread it froze the window on every
+/// F5 rather than only at launch.
+#[tauri::command(async)]
 fn refresh_root(app: AppHandle) -> Result<RootView, String> {
     let state = app.state::<AppState>();
 
@@ -761,7 +844,7 @@ fn windows_terminal_on_path() -> Option<PathBuf> {
 /// Pin/unpin a repo (§5.1) — persisted immediately, same reasoning as
 /// `remember_root`: a pin toggle is a deliberate, infrequent user action, not
 /// something worth debouncing.
-#[tauri::command]
+#[tauri::command(async)]
 fn toggle_pin(repo_id: String, app: AppHandle) -> Result<HashSet<String>, String> {
     let state = app.state::<AppState>();
     let (root_path, pins, selected) = {
@@ -784,7 +867,7 @@ fn toggle_pin(repo_id: String, app: AppHandle) -> Result<HashSet<String>, String
 /// frontend would do the same thing, but it would write `roots/<hash>.json`
 /// once per pin — this is one write, and it cannot leave a half-cleared set
 /// behind if a call in the middle fails.
-#[tauri::command]
+#[tauri::command(async)]
 fn clear_pins(app: AppHandle) -> Result<HashSet<String>, String> {
     let state = app.state::<AppState>();
     let (root_path, selected) = {
@@ -822,7 +905,7 @@ fn clear_problems(app: AppHandle) {
 /// The frontend's current selection, mirrored server-side (§9.5's persisted
 /// `last_selected`, and the input to the hot set in §6/build step 9's
 /// watchers). `None` when nothing is selected.
-#[tauri::command]
+#[tauri::command(async)]
 fn set_selected_repo(repo_id: Option<String>, app: AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
     let (root_path, pins, selected) = {
@@ -983,11 +1066,73 @@ fn record_fetch_attempt(app: &AppHandle, repo_id: &str) {
     persist_cache(app, &root_path, statuses, last_fetch_at);
 }
 
+/// §13's *Work in progress*, published for one repo. `operation` is the
+/// user's word for what they asked — "Switch branch", "Pull" — the same one
+/// the Problems record and the error banner use, so the row's tooltip and the
+/// failure that may follow it name the same thing.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WriteBeginEvent {
+    repo_id: String,
+    operation: String,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WriteEndEvent {
+    repo_id: String,
+}
+
+/// Marks a repo busy for as long as it is alive (§13, *Work in progress*).
+///
+/// A guard rather than a pair of calls in `write_and_refresh`, for the same
+/// reason the Problems record lives there rather than at each call site: the
+/// end must be unmissable. An early `?`, a panic inside the operation, a
+/// future dropped because the window closed mid-write — every one of those
+/// has to clear the row, and a `Drop` impl is the only version of that which
+/// cannot be forgotten by a future write command.
+struct WriteMarker {
+    app: AppHandle,
+    repo_id: String,
+}
+
+impl WriteMarker {
+    fn begin(app: &AppHandle, repo_id: &str, operation: &str) -> Self {
+        if app.state::<AppState>().in_flight.begin(repo_id) {
+            let event = WriteBeginEvent { repo_id: repo_id.to_string(), operation: operation.to_string() };
+            if let Err(err) = app.emit(WRITE_BEGIN_EVENT, event) {
+                log::warn!("could not publish the start of a write ({err})");
+            }
+        }
+        Self { app: app.clone(), repo_id: repo_id.to_string() }
+    }
+}
+
+impl Drop for WriteMarker {
+    fn drop(&mut self) {
+        if self.app.state::<AppState>().in_flight.end(&self.repo_id) {
+            let event = WriteEndEvent { repo_id: self.repo_id.clone() };
+            if let Err(err) = self.app.emit(WRITE_END_EVENT, event) {
+                // Nothing to recover with — but a lost end is a row that spins
+                // forever, so it must not be silent in the log either.
+                log::warn!("could not publish the end of a write ({err})");
+            }
+        }
+    }
+}
+
 /// Shared shape for every mutating command (§7 rule 1): resolve the repo,
 /// hold its write-queue lock for the duration of `op`, then refresh and
 /// publish its status regardless of whether `op` succeeded — a failed stage
 /// or commit can still have changed something (e.g. a partial index update),
 /// and the row must never show data staler than the attempt just made.
+///
+/// It is also where §13's *Work in progress* is published, and the marker is
+/// taken *before* the write queue rather than after: a write queued behind an
+/// earlier one on the same repo is time the user spends waiting with nothing
+/// happening on screen, which is precisely the case the indicator exists for.
+/// It lives until this function returns, so the status refresh below is inside
+/// the window too — the row must not go quiet while it is still being redrawn.
 async fn write_and_refresh<F, Fut>(
     app: &AppHandle,
     repo_id: String,
@@ -999,6 +1144,7 @@ where
     Fut: std::future::Future<Output = Result<(), String>>,
 {
     let path = repo_path(app, &repo_id)?;
+    let _busy = WriteMarker::begin(app, &repo_id, operation);
 
     let result = {
         let _write_guard = app.state::<AppState>().write_queues.write(&repo_id).await;
@@ -1160,8 +1306,23 @@ async fn sweep(app: AppHandle, generation: u64, repos: Vec<Repo>) {
     };
 
     let started = Instant::now();
-    let (statuses, errors) = collect(write_queues, repos).await;
+    let (statuses, errors, stragglers) = collect(write_queues, repos, SWEEP_PATIENCE).await;
     let elapsed_ms = started.elapsed().as_millis() as u64;
+
+    // Only the slow ones. A sweep runs every 60 s and normally lands inside
+    // §1's 300 ms budget, so logging each would bury the launch it is here to
+    // explain; a sweep past this threshold is one that held the 8-process cap
+    // (§7.3) long enough for clicking a repo to feel stuck.
+    const SLOW_SWEEP_MS: u64 = 2_000;
+    if elapsed_ms >= SLOW_SWEEP_MS || !stragglers.is_empty() {
+        log::info!(
+            "slow sweep: {} ok, {} failed in {} ms, {} still reading",
+            statuses.len(),
+            errors.len(),
+            elapsed_ms,
+            stragglers.len(),
+        );
+    }
 
     let state = app.state::<AppState>();
 
@@ -1219,7 +1380,21 @@ async fn sweep(app: AppHandle, generation: u64, repos: Vec<Repo>) {
             // sweep triggered in that window races `cache::save` against
             // this one for the same root file (§6 — "a sweep never starts
             // while one is in flight").
-            state.sweeping.store(false, Ordering::SeqCst);
+            //
+            // And not here at all when repos are still reading: publishing
+            // early moved the *event*, not the end of the sweep. §6's "a sweep
+            // never starts while one is in flight" is what keeps a straggler
+            // from being overtaken by the next tick's read of the same repo
+            // and publishing the older answer second, so `finish_stragglers`
+            // owns the flag from here.
+            if stragglers.is_empty() {
+                state.sweeping.store(false, Ordering::SeqCst);
+            } else {
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    finish_stragglers(app, generation, stragglers).await;
+                });
+            }
 
             // A sweep publishes counts, and counts are all the *rows* need.
             // The middle pane's file list and the open diff are fed by
@@ -1246,7 +1421,15 @@ async fn sweep(app: AppHandle, generation: u64, repos: Vec<Repo>) {
                 });
             }
         }
+        // Both remaining arms describe a root nobody is looking at, so a
+        // straggler still reading one of its repos has no one to publish to.
+        // Aborted rather than left to finish: `kill_on_drop` (§7.3) turns that
+        // into killing the git process, which is the whole point — the results
+        // are worthless and the semaphore permits are not.
         Outcome::Restart(generation, repos) => {
+            for task in stragglers {
+                task.abort();
+            }
             // Cleared before restarting, not after: `start_sweep` spawns a
             // fresh sweep that immediately re-swaps the guard to `true`, so
             // it must find it `false` here or the restart silently no-ops.
@@ -1254,9 +1437,91 @@ async fn sweep(app: AppHandle, generation: u64, repos: Vec<Repo>) {
             start_sweep(&app, generation, repos);
         }
         Outcome::Nothing => {
+            for task in stragglers {
+                task.abort();
+            }
             state.sweeping.store(false, Ordering::SeqCst);
         }
     }
+}
+
+/// Publishes the repos that outran [`SWEEP_PATIENCE`], one at a time as they
+/// land, and only then lets the next sweep start.
+///
+/// Per-repo events rather than a second batch: this *is* the "one repo's
+/// status arrived on its own" case, which `status:repo` already exists for and
+/// which the frontend already merges without disturbing the other 68 rows
+/// (§5.2). Carrying the status the read already produced rather than calling
+/// `emit_repo_status` matters for the same reason `query_with_files` exists —
+/// re-reading would spend another process to learn what is in hand.
+async fn finish_stragglers(app: AppHandle, generation: u64, stragglers: Vec<StatusTask>) {
+    let state = app.state::<AppState>();
+    let mut published = 0usize;
+
+    let mut remaining = stragglers.into_iter();
+    while let Some(task) = remaining.next() {
+        let Ok((repo_id, Some(status))) = task.await else { continue };
+
+        let root_path = {
+            let mut current = state.root.lock().expect("root mutex poisoned");
+            // Same guard as the batch: a result whose root was replaced while
+            // it was reading must not be written over the new one.
+            match current.as_mut() {
+                Some(root) if root.generation == generation => {
+                    match &status {
+                        Ok(fresh) => {
+                            root.statuses.insert(repo_id.clone(), fresh.clone());
+                            root.errors.remove(&repo_id);
+                        }
+                        Err(err) => {
+                            root.errors.insert(repo_id.clone(), err.clone());
+                            root.statuses.remove(&repo_id);
+                        }
+                    }
+                    root.path.clone()
+                }
+                // The root was replaced under us. Every straggler still out
+                // describes it, so they go the same way the `Restart` arm
+                // sends them rather than being awaited for nothing.
+                _ => {
+                    remaining.by_ref().for_each(|task| task.abort());
+                    break;
+                }
+            }
+        };
+
+        published += 1;
+        let event = RepoStatusEvent {
+            root: root_path,
+            repo_id,
+            status: status.as_ref().ok().cloned(),
+            error: status.as_ref().err().cloned(),
+            // Counts only, exactly as the batch would have carried. A straggler
+            // that happens to be the selected repo gets its file list from the
+            // reconciling read the sweep already scheduled (§5.2, §5.4).
+            files: None,
+        };
+        if let Err(err) = app.emit(REPO_STATUS_EVENT, event) {
+            log::warn!("could not publish a late repo status ({err})");
+        }
+    }
+
+    // Once, not per repo: the file is rewritten wholesale (§9.5), and these
+    // arrived seconds apart at most.
+    if published > 0 {
+        let snapshot = {
+            let current = state.root.lock().expect("root mutex poisoned");
+            current
+                .as_ref()
+                .filter(|root| root.generation == generation)
+                .map(|root| (root.path.clone(), root.statuses.clone(), root.last_fetch_at.clone()))
+        };
+        if let Some((root_path, statuses, last_fetch_at)) = snapshot {
+            persist_cache(&app, &root_path, statuses, last_fetch_at);
+        }
+    }
+
+    state.sweeping.store(false, Ordering::SeqCst);
 }
 
 /// Points a watcher at every repo in the open root (§6) and records the ones
@@ -1475,7 +1740,8 @@ enum Outcome {
 async fn collect(
     write_queues: Arc<WriteQueues>,
     repos: Vec<Repo>,
-) -> (HashMap<String, RepoStatus>, HashMap<String, String>) {
+    patience: Duration,
+) -> (HashMap<String, RepoStatus>, HashMap<String, String>, Vec<StatusTask>) {
     let tasks: Vec<_> = repos
         .into_iter()
         .map(|repo| {
@@ -1492,24 +1758,58 @@ async fn collect(
 
     let mut statuses = HashMap::new();
     let mut errors = HashMap::new();
+    let mut stragglers = Vec::new();
 
-    for task in tasks {
-        // A panicked task is a bug in the parser, not a reason to lose the
-        // other 76 repos' results.
-        let Ok((id, result)) = task.await else { continue };
-        match result {
-            Some(Ok(status)) => {
-                statuses.insert(id, status);
-            }
-            Some(Err(err)) => {
-                errors.insert(id, err);
-            }
-            None => {}
+    // One deadline for the batch, not one per repo: what the user is waiting
+    // for is the *list*, and the list arrives when the last repo in it does.
+    let deadline = tokio::time::Instant::now() + patience;
+
+    for mut task in tasks {
+        // `&mut task`, so a repo that runs past the deadline keeps running and
+        // keeps its read guard. Taking the handle by value would drop it, and
+        // a dropped `JoinHandle` detaches the task — the read would still cost
+        // its process and its semaphore permit, and then throw the answer
+        // away. `timeout_at` polls the task before it looks at the clock, so a
+        // task that finished while we waited on an earlier one is still
+        // collected here rather than needlessly deferred.
+        match tokio::time::timeout_at(deadline, &mut task).await {
+            // A panicked task is a bug in the parser, not a reason to lose the
+            // other 76 repos' results.
+            Ok(Err(_)) => continue,
+            Ok(Ok((id, result))) => match result {
+                Some(Ok(status)) => {
+                    statuses.insert(id, status);
+                }
+                Some(Err(err)) => {
+                    errors.insert(id, err);
+                }
+                None => {}
+            },
+            Err(_) => stragglers.push(task),
         }
     }
 
-    (statuses, errors)
+    (statuses, errors, stragglers)
 }
+
+/// One repo's in-flight status read. `None` in the payload means the repo was
+/// skipped because a write held it, which is not an outcome a straggler can
+/// have — a skipped repo never reaches the deadline — but the type is the same
+/// one `collect` dispatches, so both arms exist.
+type StatusTask = tauri::async_runtime::JoinHandle<(String, Option<Result<RepoStatus, String>>)>;
+
+/// How long the batch waits for its slowest repo before publishing without it
+/// (§1, §6).
+///
+/// A full pass over 69 repos costs about 1.2 s at best, so this is not a
+/// budget the healthy case is meant to feel — it is the point past which one
+/// repo is no longer merely slow. The case it exists for is real and
+/// repeatable: on a cold file cache a large repo can take the whole 30 s
+/// `READ_TIMEOUT` and then be killed, and holding all 69 rows and the sweeping
+/// indicator for that is what made a launch look like a hang. The stragglers
+/// publish themselves as they land, through the same per-repo event a watcher
+/// uses (§5.2), so nothing is lost — it arrives separately.
+const SWEEP_PATIENCE: Duration = Duration::from_secs(3);
 
 /// How many status ticks pass between full reconciliation sweeps (§6).
 ///
@@ -1781,18 +2081,35 @@ pub fn run() {
         .plugin(logging())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            // The window exists by the time `setup` runs, but the thread that
+            // paints it is this one — so every branch below is time the user
+            // spends looking at no window at all, not at an empty one.
+            let started = Instant::now();
+
             let config_dir = app.path().app_config_dir()?;
             let cache_dir = app.path().app_cache_dir()?;
             let settings = settings::load(&config_dir);
 
-            // One git spawn on the startup path, ~20 ms. It buys a single
-            // honest answer to "is git here?" instead of every later command
-            // failing in its own way (§3). Revisit if step 3's measurement
-            // shows the 500 ms budget is tight.
-            let git = tauri::async_runtime::block_on(git::probe());
-            if !git.available {
-                log::error!("no usable git on PATH");
-            }
+            // Started here, waited for nowhere: the answer is wanted once, by
+            // `git_info`, and everything else on the startup path — reading
+            // the cache, painting the last root — is true whether or not git
+            // exists (§3). Warming it now rather than leaving it to the first
+            // `git_info` only means the frontend usually finds it already
+            // there.
+            let git: Arc<tokio::sync::OnceCell<GitInfo>> = Arc::new(tokio::sync::OnceCell::new());
+            let warming = git.clone();
+            tauri::async_runtime::spawn(async move {
+                let probed = Instant::now();
+                let info = warming.get_or_init(git::probe).await;
+                if !info.available {
+                    log::error!("no usable git on PATH");
+                }
+                // The one startup cost that is a process spawn rather than a
+                // file read, and so the one with no upper bound worth
+                // trusting. It no longer blocks anything, but it is still the
+                // number that explains a slow first paint of the repo list.
+                log::info!("startup: git probe {} ms", probed.elapsed().as_millis());
+            });
 
             app.manage(AppState {
                 config_dir,
@@ -1805,6 +2122,7 @@ pub fn run() {
                 fetch_sweeping: AtomicBool::new(false),
                 fetch_ticker: Mutex::new(None),
                 write_queues: Arc::new(WriteQueues::default()),
+                in_flight: Arc::new(inflight::InFlightWrites::default()),
                 watchers: watch::RepoWatchers::default(),
                 // No repo is open yet, so the panes default to visible.
                 pane_visibility: Mutex::new(menu::PaneVisibility::default()),
@@ -1826,6 +2144,12 @@ pub fn run() {
                 });
             }
             on_focus(app.handle());
+
+            // The handover point: after this the event loop runs and the
+            // window can paint, so anything still slow from here on is the
+            // webview booting or a command blocking the main thread — which
+            // `open_root` now says for itself.
+            log::info!("startup: main thread free after {} ms", started.elapsed().as_millis());
 
             Ok(())
         })
@@ -1988,6 +2312,24 @@ mod tests {
         let interval = jittered_interval(0);
         assert!(interval.as_secs() >= 1, "base_secs is floored at 1");
     }
+
+    /// Both halves of what makes publishing early worth having. Raised to meet
+    /// `READ_TIMEOUT` the mechanism is dead code — no read can outlive its own
+    /// kill — and the 30 s wait it exists to remove comes straight back.
+    /// Lowered under a healthy full pass (about 1.2 s over 69 repos, per
+    /// `RECONCILE_EVERY`) it fires every time, and the batch the frontend
+    /// applies wholesale is routinely split for no reason.
+    #[test]
+    fn sweep_patience_sits_between_a_healthy_pass_and_a_killed_read() {
+        assert!(
+            SWEEP_PATIENCE < git::READ_TIMEOUT,
+            "a read that cannot outlive the patience can never straggle",
+        );
+        assert!(
+            SWEEP_PATIENCE >= Duration::from_secs(2),
+            "a full pass over 69 repos costs ~1.2 s; splitting that one is noise, not news",
+        );
+    }
 }
 
 #[cfg(test)]
@@ -2058,22 +2400,35 @@ mod bench {
         // behaves like every repo being free to read — same as production.
         let write_queues = Arc::new(WriteQueues::default());
 
+        // Longer than any read can live — `git.rs`'s `READ_TIMEOUT` kills one
+        // at 30 s — so nothing here becomes a straggler and each round is the
+        // cost of the *whole* pass. That is the number §1 budgets. Production
+        // uses `SWEEP_PATIENCE` instead and publishes without its slowest
+        // repo, which is a different question from how long the pass takes.
+        let no_stragglers = Duration::from_secs(60);
+
         // The first sweep pays for cold file caches. Real cold start pays that
         // too, but only once, and from build step 3 it paints from cache while
         // it happens — so the steady-state number is the one under budget.
-        let warm = tauri::async_runtime::block_on(collect(write_queues.clone(), repos.clone()));
+        let warm =
+            tauri::async_runtime::block_on(collect(write_queues.clone(), repos.clone(), no_stragglers));
         println!("warm-up:   {} ok, {} failed", warm.0.len(), warm.1.len());
 
         for round in 1..=6 {
             let started = Instant::now();
-            let (statuses, errors) =
-                tauri::async_runtime::block_on(collect(write_queues.clone(), repos.clone()));
+            let (statuses, errors, _) = tauri::async_runtime::block_on(collect(
+                write_queues.clone(),
+                repos.clone(),
+                no_stragglers,
+            ));
+            let elapsed = started.elapsed();
             println!(
-                "round {round}:   {} repos in {} ms ({} ok, {} failed)",
+                "round {round}:   {} repos in {} ms ({} ok, {} failed){}",
                 repos.len(),
-                started.elapsed().as_millis(),
+                elapsed.as_millis(),
                 statuses.len(),
                 errors.len(),
+                if elapsed > SWEEP_PATIENCE { " — would have published early" } else { "" },
             );
             for (id, err) in errors.iter().take(3) {
                 println!("           {id}: {err}");

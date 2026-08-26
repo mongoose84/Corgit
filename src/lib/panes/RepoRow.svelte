@@ -2,6 +2,7 @@
   import { isDirty, publishReason, repos, type Repo, type RepoStatus } from '../repos.svelte';
   import ContextMenu from '../ContextMenu.svelte';
   import { notices } from '../notices.svelte';
+  import { BusyIndicator } from '../busyIndicator';
 
   interface Props {
     repo: Repo;
@@ -56,7 +57,52 @@
   const canPullRow = $derived(status !== undefined && status.behind > 0 && status.conflicted === 0);
 
   let menuPos = $state<{ x: number; y: number } | null>(null);
+  let rowEl: HTMLButtonElement | undefined = $state();
+
+  /** This row's own Pull, from the moment it is clicked — a *synchronous*
+   *  guard against a second click, which `repos.isBusy` cannot be: that only
+   *  turns true once the backend's `write:begin` has crossed the IPC boundary
+   *  and come back, and a double-click beats it comfortably. It also drives
+   *  the chevron's own `…`, which is acknowledgement rather than narration and
+   *  so must be instant (§13). The gutter spinner below is the other half. */
   let pulling = $state(false);
+
+  /** Narration, not acknowledgement (§13): any write on this repo, from any
+   *  surface and — once §9.2 lands — any window, held back 150 ms so the
+   *  common fast write leaves the list perfectly still. */
+  let busyShown = $state(false);
+  const busyIndicator = new BusyIndicator((shown) => (busyShown = shown));
+
+  $effect(() => {
+    busyIndicator.set(repos.isBusy(repo.id));
+  });
+
+  // Reads nothing, so this runs once and its teardown is the component's: a
+  // pending reveal must not outlive the row, and the list rebuilds rows
+  // wholesale whenever pinning moves one between sections (§5.1).
+  $effect(() => () => busyIndicator.dispose());
+
+  const busyLabel = $derived(repos.busyOperation(repo.id) ?? 'Working');
+
+  /**
+   * Keep the selected row on screen. Pinning moves a repo between the two
+   * sections of the list (§5.1), which destroys this component and builds it
+   * again in the other one — at a scroll offset that, over a folder of 77
+   * repos, is usually nowhere near the viewport. Nothing about the selection
+   * changed, but the only thing showing it just left the screen, which reads
+   * exactly like the selection was cleared.
+   *
+   * The effect belongs on the row rather than on the list because the row is
+   * what remounts: a list-level effect would have to watch for a reorder it
+   * cannot see. It also covers the restored selection on startup (§9.5),
+   * which has the same problem for the same reason.
+   *
+   * `nearest` deliberately: a row already in view must not jump, and the
+   * common case — clicking a row you can see — has to be a no-op.
+   */
+  $effect(() => {
+    if (selected) rowEl?.scrollIntoView({ block: 'nearest' });
+  });
 
   function openMenu(event: MouseEvent) {
     event.preventDefault();
@@ -128,6 +174,7 @@
 </script>
 
 <button
+  bind:this={rowEl}
   type="button"
   class="row"
   class:selected
@@ -140,21 +187,38 @@
        click (§5.1), so the pin is on the row, not only in the context menu.
        The gutter is always reserved — revealing it on hover must not shuffle
        the names sideways. -->
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <span
-    role="button"
-    tabindex="-1"
-    class="pin"
-    class:pinned
-    aria-pressed={pinned}
-    title={pinned ? 'Unpin' : 'Pin to the top'}
-    aria-label={pinned ? `Unpin ${repo.name}` : `Pin ${repo.name}`}
-    onclick={togglePin}
-  >
-    <svg viewBox="0 0 12 12" aria-hidden="true" focusable="false">
-      <path d="M4 1h4v1l-1 1v2.5l2 1.5v1H6.5V11h-1V8H3V7l2-1.5V3L4 2z" />
-    </svg>
-  </span>
+  {#if busyShown}
+    <!-- The gutter is already reserved at a fixed width and already hides and
+         reveals its contents, so the spinner costs no layout and cannot
+         squeeze the badge strip on a narrow pane (§5.1, §13).
+
+         It takes the pin's place rather than sitting beside it: which repos
+         are pinned is not a question anyone is asking mid-write, and the pin
+         is back the moment the write lands. Deliberately *not* the mascot —
+         docs/mascot.md §2 puts repository rows out of bounds, and this is the
+         densest data in the app. -->
+    <span class="gutter-busy" title="{busyLabel} — in progress" aria-hidden="true">
+      <svg viewBox="0 0 12 12" focusable="false">
+        <circle cx="6" cy="6" r="5" />
+      </svg>
+    </span>
+  {:else}
+    <!-- svelte-ignore a11y_click_events_have_key_events -->
+    <span
+      role="button"
+      tabindex="-1"
+      class="pin"
+      class:pinned
+      aria-pressed={pinned}
+      title={pinned ? 'Unpin' : 'Pin to the top'}
+      aria-label={pinned ? `Unpin ${repo.name}` : `Pin ${repo.name}`}
+      onclick={togglePin}
+    >
+      <svg viewBox="0 0 12 12" aria-hidden="true" focusable="false">
+        <path d="M4 1h4v1l-1 1v2.5l2 1.5v1H6.5V11h-1V8H3V7l2-1.5V3L4 2z" />
+      </svg>
+    </span>
+  {/if}
 
   <span class="name">{repo.name}</span>
 
@@ -284,6 +348,53 @@
   .pin:hover {
     background: var(--bg-active);
     color: var(--text-primary);
+  }
+
+  /* Same box as .pin, so swapping one for the other moves nothing. */
+  .gutter-busy {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex: 0 0 auto;
+    width: 18px;
+    height: 18px;
+  }
+
+  .gutter-busy svg {
+    width: 11px;
+    height: 11px;
+  }
+
+  /* --text-muted, never --accent: this appears on rows the user has not
+     selected, and §11 reserves the accent for selection alone — an accent-hued
+     mark on an unselected row is exactly the confusion the rule exists to
+     prevent. The dash pattern leaves a ~40% gap, which is what makes the
+     rotation legible at 11px; a fuller ring reads as a static circle. */
+  .gutter-busy circle {
+    fill: none;
+    stroke: var(--text-muted);
+    stroke-width: 1.6;
+    stroke-linecap: round;
+    stroke-dasharray: 19 12;
+    transform-origin: 6px 6px;
+    animation: gutter-spin 900ms linear infinite;
+  }
+
+  @keyframes gutter-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  /* The one setting that exists to stop exactly this, and the spinner is not
+     load-bearing without it: the row is still visibly not showing its pin, and
+     the tooltip still names the operation. Matches Mascot.svelte's treatment
+     of the trotting pose. */
+  @media (prefers-reduced-motion: reduce) {
+    .gutter-busy circle {
+      animation: none;
+      stroke-dasharray: 3 3;
+    }
   }
 
   .name {

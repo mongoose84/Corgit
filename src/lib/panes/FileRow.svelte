@@ -193,9 +193,16 @@
     color: var(--status-ahead);
   }
 
-  .status-deleted,
-  .status-conflict {
+  .status-deleted {
     color: var(--status-error);
+  }
+
+  /* Split from --status-error now that the two are different reds: a `U` here
+     is the same condition the row's ⚠ and the blocking banner are reporting,
+     and the three saying it in two colours is the confusion the split exists
+     to remove. */
+  .status-conflict {
+    color: var(--status-conflict);
   }
 
   .status-untracked {

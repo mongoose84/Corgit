@@ -84,7 +84,7 @@
       {/if}
     {/if}
 
-    <p class="message selectable">{message}</p>
+    <p class="message selectable" title={message}>{message}</p>
 
     <div class="actions">
       <!-- Blocking's "exactly two buttons, never a third" (§13) — never a
@@ -158,9 +158,17 @@
     box-shadow: inset 3px 0 0 var(--status-conflict);
   }
 
+  /* Wraps, and only under duress. §13 wants the headline, the action and
+     *Details* on one line, and at any ordinary window width that is what this
+     is — but "one line" was being held by making the row *unable* to fit,
+     which under `body { overflow: hidden }` put the rightmost control (the
+     Dismiss cross) past the window edge with no scrollbar to reach it. A row
+     that breaks is the graceful end of that; a row that cannot be dismissed
+     is not. */
   .row {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     gap: var(--space-2);
   }
 
@@ -169,7 +177,12 @@
      back — the repo whose push failed is one click from being the selected
      one. */
   .repo {
-    flex: 0 0 auto;
+    /* Shrinkable, unlike the actions beside it: when the banner runs out of
+       room the name is the part that can lose characters and still do its job
+       — the ellipsis leaves enough of it to disambiguate a row, whereas half
+       a Dismiss button is nothing. */
+    flex: 0 1 auto;
+    min-width: 0;
     max-width: 220px;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -187,14 +200,28 @@
   }
 
   .message {
-    /* Takes the slack so the actions stay pinned right and the dog stays
-       tucked left, whatever the message's length. */
-    flex: 1 1 auto;
+    /* `1 1 0`, not `1 1 auto`. An `auto` basis is the message's max-content
+       width, and in a wrapping row that is a demand: an untranslated stderr
+       would throw itself onto a line of its own in a 1400px window. A zero
+       basis asks for nothing and takes the slack, so the row breaks only when
+       the parts that *cannot* shrink stop fitting. */
+    flex: 1 1 0;
     min-width: 0;
     margin: 0;
+    /* Three lines then an ellipsis, rather than one line then an ellipsis.
+       Truncating at one line was the wrong half of the trade: the messages
+       long enough to need it are the untranslated ones, where git's own
+       wording is all there is to go on. Three still bounds the banner — this
+       is chrome above a list whose rows are the point (§14.1) — and `title`
+       carries the rest, as does Recent Problems. */
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+    line-clamp: 3;
     overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    /* A remote URL in stderr is one unbreakable word and would otherwise set
+       the banner's floor width all by itself. */
+    overflow-wrap: anywhere;
     font-size: var(--text-sm);
     color: var(--status-error);
   }
@@ -207,6 +234,9 @@
     display: flex;
     align-items: center;
     flex: 0 0 auto;
+    /* Redundant while the message is taking the slack beside them, load-
+       bearing once the row has wrapped and they are alone on the second. */
+    margin-left: auto;
     gap: var(--space-2);
   }
 
