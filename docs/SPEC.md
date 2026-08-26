@@ -569,6 +569,16 @@ One file at a time, read-only, opened by clicking a file row in either §5.2 mod
   is what it is.
 - Switching repos closes the diff — the path it names may not exist in the new one. Esc
   closes it. A commit's diff is immutable and is never re-read.
+- **The tab lives as long as its row.** A live diff is a view of a middle-pane row (§5.2),
+  so discarding or committing the open file closes the tab, and staging or unstaging it
+  re-points the tab at the section the row moved to rather than closing it. Neither case is
+  covered by the re-read below: git compares the two sides of a file that is no longer
+  there, finds them identical, and correctly reports nothing — which leaves the tab
+  selected over an empty diff. Keeping the last content instead is worse, being a
+  working-tree diff that no longer describes the working tree with nothing on screen saying
+  so. **A truncated file list decides nothing**: the lists stop at 100 rows per section
+  (§5.2), a missing path there is not a missing file, and closing a tab someone is reading
+  on a guess is the worse of the two mistakes.
 - **An open working-tree diff is live.** Anything that moves the file re-reads it — our own
   writes (stage, unstage, commit), an editor saving over it, a terminal `git checkout`.
   This costs nothing extra to arrange: the diff re-reads on the per-repo status event, so

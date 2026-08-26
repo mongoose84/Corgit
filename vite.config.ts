@@ -34,11 +34,14 @@ export default defineConfig({
   },
 
   test: {
-    // Only the pure modules — lane layout, branch-name checking, error
-    // translation. Everything else in `src/` is either a Svelte component or a
-    // store whose whole job is talking to Tauri, and neither is worth a DOM or
-    // an IPC mock to assert: the logic that can be *silently wrong* lives in
-    // these three files, and none of it needs a browser to run.
+    // Only the pure logic — lane and diff layout, branch-name checking, error
+    // translation, the file-list predicates. Everything else in `src/` is
+    // either a Svelte component or a store whose whole job is talking to Tauri,
+    // and neither is worth a DOM or an IPC mock to assert: the logic that can
+    // be *silently wrong* lives in these files, and none of it needs a browser
+    // to run. A test may still import a `.svelte.ts` store, as
+    // `diffReconcile.test.ts` does, as long as what it calls is one of those
+    // pure exports — the store instance beside it is never touched.
     include: ['src/**/*.test.ts'],
   },
 });
