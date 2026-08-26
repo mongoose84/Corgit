@@ -132,6 +132,53 @@ export function laneCount(rows: RowLayout[]): number {
   return max + 1;
 }
 
+/** Rows kept in the DOM either side of the viewport. Enough to cover the gap
+ *  between a wheel event and the render it schedules, at a cost of 16 rows. */
+export const OVERSCAN = 8;
+
+export interface RowWindow {
+  /** Slice bounds into the full row list — `[start, end)`. */
+  start: number;
+  end: number;
+  /** Where the rendered slice is translated to inside the spacer. */
+  topOffset: number;
+  /** The spacer's height, i.e. what the scroll box scrolls over. */
+  totalHeight: number;
+}
+
+/** Which slice of the loaded rows the virtualized graph puts in the DOM
+ *  (§5.3). Pure and DOM-free so the invariant that matters can be tested:
+ *  the window never sits past the end of the content it is windowing.
+ *
+ *  `scrollTop` really can point past the end for a frame. A reload after a
+ *  commit replaces the page under a scrolled box, and the browser's own clamp
+ *  arrives as a scroll event *after* the render that shrank the content; a
+ *  freshly rebuilt scroll box starts at 0 and announces that with no event at
+ *  all. Both used to leave the window translated down a graph the user is
+ *  looking at the top of — blank, or the last few rows if the new history was
+ *  just long enough to reach. Clamping here makes the worst case "the bottom
+ *  of the history" rather than "nothing".
+ *
+ *  Clamping against `totalHeight` and not the scroll box's real
+ *  `scrollHeight` leaves out the "Load more" row, which lives in the same box
+ *  but outside the spacer. That undershoots the true maximum by one row
+ *  height, which can only widen the window — `start` falls, `end` is already
+ *  pinned to the end of the list by the overscan — so no row goes missing. */
+export function visibleWindow(
+  rowCount: number,
+  scrollTop: number,
+  viewportHeight: number,
+): RowWindow {
+  const totalHeight = rowCount * ROW_HEIGHT;
+  const maxScroll = Math.max(0, totalHeight - viewportHeight);
+  const offset = Math.min(Math.max(0, scrollTop), maxScroll);
+
+  const start = Math.max(0, Math.floor(offset / ROW_HEIGHT) - OVERSCAN);
+  const end = Math.min(rowCount, Math.ceil((offset + viewportHeight) / ROW_HEIGHT) + OVERSCAN);
+
+  return { start, end, topOffset: start * ROW_HEIGHT, totalHeight };
+}
+
 /** Cycled by lane index (§11) — never introduces a ninth hue, just repeats. */
 export function laneColorVar(lane: number): string {
   return `var(--lane-${(lane % 8) + 1})`;

@@ -13,7 +13,13 @@
   import { isUnmergedBranchRefusal } from '../gitErrors';
   import { notices } from '../notices.svelte';
   import { diff } from '../diff.svelte';
-  import { laneCount as computeLaneCount, laneColorVar, ROW_HEIGHT, LANE_WIDTH } from '../graphLayout';
+  import {
+    laneCount as computeLaneCount,
+    laneColorVar,
+    visibleWindow,
+    ROW_HEIGHT,
+    LANE_WIDTH,
+  } from '../graphLayout';
   import { BusyIndicator } from '../busyIndicator';
 
   // Commit selection drives the middle pane's Mode B in build step 7 (§5.2);
@@ -58,24 +64,34 @@
 
   // Virtualized rows (§5.3): only the rows within the scrolled viewport (plus
   // a small overscan) exist in the DOM. Lane layout runs once over the whole
-  // loaded set in graph.svelte.ts; this only slices the precomputed result.
-  const OVERSCAN = 8;
+  // loaded set in graph.svelte.ts, and the window arithmetic lives in
+  // `visibleWindow`; this only holds the two measurements they need.
   let scrollEl: HTMLElement | undefined = $state();
   let spacerEl: HTMLElement | undefined = $state();
   let scrollTop = $state(0);
   let viewportHeight = $state(0);
 
-  const startIndex = $derived(Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - OVERSCAN));
-  const endIndex = $derived(
-    Math.min(graph.rows.length, Math.ceil((scrollTop + viewportHeight) / ROW_HEIGHT) + OVERSCAN),
-  );
-  const visibleRows = $derived(graph.rows.slice(startIndex, endIndex));
-  const topOffset = $derived(startIndex * ROW_HEIGHT);
-  const totalHeight = $derived(graph.rows.length * ROW_HEIGHT);
+  const rowWindow = $derived(visibleWindow(graph.rows.length, scrollTop, viewportHeight));
+  const visibleRows = $derived(graph.rows.slice(rowWindow.start, rowWindow.end));
 
   function onScroll() {
     if (scrollEl) scrollTop = scrollEl.scrollTop;
   }
+
+  // Re-read the offset off the element whenever it is a *different* element,
+  // because the scroll box does not survive a repo change: selecting a repo
+  // empties `graph.rows` before the page lands, which swaps the whole
+  // `.graph-body` out for the "Reading history…" state and back. The rebuilt
+  // box starts at the top and fires no scroll event saying so, so `scrollTop`
+  // kept whatever the *previous* repo had been scrolled to and the window was
+  // translated that far down a graph the user is looking at the top of. The
+  // clamp in `visibleWindow` bounds the damage to "the last few rows" instead
+  // of blank, but only this stops it happening: nothing else corrects the
+  // reading, and a repo whose history is too short to scroll never produces
+  // the scroll event that would.
+  $effect(() => {
+    if (scrollEl) scrollTop = scrollEl.scrollTop;
+  });
 
   // Back to the working tree, which also shuts the info column (§5.2) — there
   // is no commit left for it to be about. Two ways in, because the
@@ -448,8 +464,8 @@
             onscroll={onScroll}
             onclick={onBackgroundClick}
           >
-            <div class="spacer" bind:this={spacerEl} style="height: {totalHeight}px">
-              <div class="window" style="transform: translateY({topOffset}px)">
+            <div class="spacer" bind:this={spacerEl} style="height: {rowWindow.totalHeight}px">
+              <div class="window" style="transform: translateY({rowWindow.topOffset}px)">
                 {#each visibleRows as row (row.commit.hash)}
                   <GraphRow
                     {row}
