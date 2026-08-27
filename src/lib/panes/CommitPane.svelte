@@ -4,7 +4,7 @@
   import EmptyState from '../EmptyState.svelte';
   import Mascot from '../Mascot.svelte';
   import Glyph from '../Glyph.svelte';
-  import DiscardDialog from '../DiscardDialog.svelte';
+  import DiscardDialog, { type DestructiveMode } from '../DiscardDialog.svelte';
   import ContextMenu from '../ContextMenu.svelte';
   import { hasConflict, needsPublish, repos, type FileEntry } from '../repos.svelte';
   import { diff, sourceForRow } from '../diff.svelte';
@@ -76,23 +76,32 @@
       files.unstagedTotal === 0,
   );
 
-  // Discard (§5.2) — the only thing in the pane that destroys work, so it is
-  // scoped as narrowly as it can honestly be and confirmed every time.
+  // The two acts in the pane that destroy work (§5.2), both *Changes* only,
+  // both confirmed every time, and deliberately never merged into one entry —
+  // they are not two labels for one thing and the row's status letter decides
+  // which applies:
   //
-  // *Changes* only, and only its tracked rows. A staged row's Discard could
-  // only mean "throw away the staged work as well", which is not what a button
-  // sitting beside − reads as; unstage first and the row appears here, where
-  // discarding it means one plain thing. Untracked files are excluded because
-  // git has nothing to restore them from: discarding one could only be `git
-  // clean` deleting it outright, and Corgit does not delete files.
+  // - **Discard**, on tracked rows: `git restore --worktree`, so a partly
+  //   staged file keeps its staged half. A staged row's Discard could only mean
+  //   "throw away the staged work as well", which is not what a button sitting
+  //   beside − reads as; unstage first and the row appears here, where
+  //   discarding it means one plain thing.
+  // - **Delete**, on untracked (`?`) rows: `git clean`. Git has nothing to
+  //   restore an untracked file *from*, so the only honest thing the pane can
+  //   offer is removing it — and the entry says "Delete" rather than "Discard"
+  //   for exactly that reason. It is the one act here git cannot undo at all.
+  //
+  // A selection spanning both gets both entries, each scoped to the rows it
+  // applies to, rather than one entry quietly doing two different irreversible
+  // things to different halves of the list.
   //
   // Still no tick column — that is what made *Changes* read as a form to be
   // filled in rather than a list of what changed. A batch is built by
   // ctrl/shift-clicking rows instead (§5.2), which costs the list nothing when
-  // nobody is using it, and reaches discard through the same dialog.
+  // nobody is using it, and reaches both through the same dialog.
   /** Non-null while the confirmation is up; the value is the exact list the
-   *  dialog is showing. */
-  let confirming = $state<FileEntry[] | null>(null);
+   *  dialog is showing, and the act it is about to perform on it. */
+  let confirming = $state<{ mode: DestructiveMode; entries: FileEntry[] } | null>(null);
 
   /** Ctrl/shift-click selection over one section's rows (§5.2). Lives here and
    *  not in `repos.svelte.ts`: it is about what is on screen, and the store
@@ -271,7 +280,20 @@
           tracked.length === entries.length
             ? `Discard changes to ${plural(tracked.length)}…`
             : `Discard changes to ${plural(tracked.length)} (skipping untracked)…`;
-        items.push({ label, onSelect: () => (confirming = tracked) });
+        items.push({ label, onSelect: () => (confirming = { mode: 'discard', entries: tracked }) });
+      }
+
+      // The other half of the same selection, and a separate entry rather than
+      // a broader Discard: this one removes the file from disk with nothing in
+      // git able to bring it back, so it must not share a word with the act
+      // above that git can undo. "(skipping tracked)" is never needed here —
+      // whatever it skipped, the Discard entry directly above is offering.
+      const untracked = entries.filter((entry) => entry.status === '?');
+      if (untracked.length > 0) {
+        items.push({
+          label: `Delete ${plural(untracked.length)}…`,
+          onSelect: () => (confirming = { mode: 'delete', entries: untracked }),
+        });
       }
     }
 
@@ -452,6 +474,22 @@
       busy = false;
     }
   }
+
+  /** Runs the delete the dialog confirmed. `remove`, not `delete` — the latter
+   *  is a reserved word — and the same shape as `discard` above right down to
+   *  needing no cleanup on failure: the rows come back from the write's status
+   *  publish (§7), so a file that could not be removed simply stays listed. */
+  async function remove(entries: readonly FileEntry[]) {
+    const paths = entries.map((entry) => entry.path);
+    if (paths.length === 0) return;
+
+    busy = true;
+    try {
+      await repos.deletePaths(paths);
+    } finally {
+      busy = false;
+    }
+  }
 </script>
 
 <Pane title="Changes" class="commit-pane">
@@ -597,7 +635,9 @@
                 onContextMenu={(event) => openMenu('unstaged', entry, event)}
                 selected={isSelected(selection, 'unstaged', entry.path)}
                 showingDiff={isOpen('unstaged', entry)}
-                onDiscard={entry.status === '?' ? undefined : () => (confirming = [entry])}
+                onDiscard={entry.status === '?'
+                  ? undefined
+                  : () => (confirming = { mode: 'discard', entries: [entry] })}
               />
             </li>
           {/each}
@@ -632,9 +672,15 @@
 {/if}
 
 {#if confirming}
+  <!-- `confirming` is read once into a local so the confirm handler cannot see
+       a different value than the list on screen: the dialog stays up across the
+       await, and a second menu action landing in between would otherwise send
+       the write at rows the user never looked at. -->
+  {@const pending = confirming}
   <DiscardDialog
-    entries={confirming}
-    onDiscard={() => discard(confirming ?? [])}
+    mode={pending.mode}
+    entries={pending.entries}
+    onConfirm={() => (pending.mode === 'discard' ? discard(pending.entries) : remove(pending.entries))}
     onClose={() => (confirming = null)}
   />
 {/if}

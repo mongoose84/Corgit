@@ -410,6 +410,22 @@ class RepoStore {
     return this.write('discard_paths', { paths }, 'Discard');
   }
 
+  /** Delete these untracked paths from disk (§5.2, §8.6) — `git clean`, and
+   *  the only thing in Corgit that git cannot undo at all. A discarded change
+   *  came from the index and an amended commit is still in the reflog; an
+   *  untracked file has never been in the index, so nothing git holds has a
+   *  copy. That is why this one is confirmed by a modal that says *deleted*
+   *  rather than *discarded*.
+   *
+   *  **Tracked paths must never reach here.** `git clean` would skip them
+   *  rather than delete them, which is deliberate belt-and-braces in
+   *  `commit::delete_untracked` — but a menu entry that silently did nothing
+   *  to half a selection is its own bug. `CommitPane` filters to `?` rows, the
+   *  exact mirror of what it does for `discardPaths`. */
+  async deletePaths(paths: string[]): Promise<boolean> {
+    return this.write('delete_paths', { paths }, 'Delete');
+  }
+
   /** Append lines to the selected repo's root `.gitignore` (§5.2) — the one
    *  write here that runs no git at all, and the only one whose argument is
    *  not a path list: `ignorePatterns.ts` turns the row into both the menu

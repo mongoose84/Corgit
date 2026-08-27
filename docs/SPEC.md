@@ -55,7 +55,8 @@ closes windows and exits the app: that work *is* the main thread's.
 - Repo discovery by scanning configured root folders
 - Per-repo status: branch, changed-files count, ahead/behind
 - Stage / unstage files (file-level)
-- Add untracked files to `.gitignore` from the file list's context menu (§5.2)
+- Add untracked files to `.gitignore`, or delete them from disk, from the file list's
+  context menu (§5.2)
 - Commit (staged files only)
 - Push, including "Publish branch" for a branch with no upstream
 - Pull (merge only) and fetch
@@ -396,7 +397,9 @@ Changes (14)                [+ stage all]
 - **The menu**, per section: *Stage N files* / *Unstage N files*; *Discard changes to N
   files…* in *Changes* only, dropping untracked rows and saying so when it does (git
   rejects a pathspec list wholesale, so one `?` row would take the whole discard down with
-  it); *Reveal in File Explorer* on a single row only, because `explorer /select,` takes
+  it); *Delete N files…* for whatever untracked rows the selection holds, as its own entry
+  under its own verb; *Reveal in File Explorer* on a single row only, because `explorer
+  /select,` takes
   one path and N files would mean N windows rather than one window with them all picked
   out. A file that no longer exists — a `D` row — reveals the nearest folder that does,
   never a silent jump to Documents. Then, below a separator, the **ignore** entries — see
@@ -419,13 +422,44 @@ Changes (14)                [+ stage all]
   - **Only in *Changes*.** A staged row keeps `−` alone. Discard there could only mean
     "throw away the staged work too", which is not what a button sitting beside `−` reads
     as; unstaging first moves the row here, where discard means one plain thing.
-  - **Never on an untracked (`?`) row** — no `↺`. Git has nothing to restore an untracked
-    file from, so discarding one could only be `git clean` deleting it. **Corgit does not
-    delete files.**
+  - **Never on an untracked (`?`) row** — no `↺`, and no *Discard* entry. Git has nothing to
+    restore an untracked file *from*, so there is no "discard" of one to offer. Removing it
+    is a different act under a different word — see *Deleting an untracked file* below.
   - **Always confirmed**, by a modal listing every path and saying what goes and what
     stays. §8.3 refuses force-checkout because it "silently discards work"; this is the
-    same act done loudly, and it is the only thing in the app that destroys work git cannot
-    give back. `git revert` and `git reset` stay out of v1 (§2) — this is neither.
+    same act done loudly. `git revert` and `git reset` stay out of v1 (§2) — this is
+    neither.
+
+**Deleting an untracked file.** A `?` row's context menu offers *Delete N files…*, which
+removes those files from disk. This is the only thing Corgit does that **git cannot undo at
+all**: a discarded change came out of the index and an abandoned commit is still in the
+reflog, but an untracked file has never been in the index, so no object git holds has a copy
+of it.
+
+Earlier revisions of this spec said flatly that *Corgit does not delete files*. That was
+reversed deliberately, not eroded: with `-uall` listing every untracked file individually,
+a pane that could stage and ignore them but never remove one sent the user to a terminal for
+the third of the three obvious verbs. The rules below are what the old blanket ban is
+traded for, and each of them is load-bearing:
+
+- **The word is *Delete*, never *Discard*.** They sit next to each other in the same menu on
+  a mixed selection, and one is reversible while the other is not. Sharing a verb would make
+  the safe one teach the wrong lesson about the dangerous one.
+- **Two entries, never one merged entry.** A selection spanning both kinds gets *Discard
+  changes to N files…* and *Delete N files…*, each scoped to the rows it applies to. One
+  entry doing two different irreversible things to two halves of a list cannot be confirmed
+  honestly, because the dialog would have to describe both.
+- **Untracked rows only**, which is also what keeps this away from tracked work entirely.
+- **`git clean`, never a filesystem unlink** (§8.6). Clean removes only what git considers
+  untracked, so a tracked path arriving through a bug is skipped rather than deleted — the
+  frontend filter is then the *second* guard rather than the only one.
+- **Confirmed by the same modal** as Discard, in its delete wording: every path listed,
+  Cancel focused, no scrim-click dismissal, and a sentence that says the file has never been
+  committed and nothing can bring it back.
+- **No row button.** `↺` stays absent on `?` rows and gains no `×` counterpart. Discard's
+  hover button is defensible because git can undo it; a one-click permanent delete on a row
+  the pointer merely passes over is not, and the menu is a deliberate enough act to carry
+  this on its own.
 
 **Ignoring a file.** A `?` row's context menu can append a pattern to the repo's root
 `.gitignore`, below a separator — the point at which the menu stops being about these files
@@ -437,6 +471,7 @@ Changes (312)
 
               ┌──────────────────────────────────┐
               │ Stage 1 file                     │
+              │ Delete 1 file…                   │
               │ Reveal in File Explorer          │
               │ ──────────────────────────────   │
               │ Ignore index.js                  │  → /node_modules/react/index.js
@@ -1002,8 +1037,21 @@ panel to its loading state and discards its scroll position.
 git add -- <paths>
 git restore --staged -- <paths>     # unstage: index ← HEAD, working tree untouched
 git restore --worktree -- <paths>   # discard: working tree ← index, index untouched
+git clean --force -- :(literal)<paths>   # delete untracked files, §5.2
 git commit -F -            # message via stdin, avoids arg-escaping pain
 ```
+
+`clean` carries **no `-d`, no `-x`, no `-X`**, and those absences are a named constant with
+a test on them in `commit.rs`, exactly as the two `restore`s are. `-d` would recurse into
+directories that the pane never shows a row for; `-x`/`-X` would reach ignored files, which
+turns a confirmed two-row delete into a sweep that takes `node_modules` and every build
+artefact on the disk with it. None of the three changes anything visible before it happens.
+
+**`:(literal)` on every path is the other half.** Git reads a pathspec as a glob, so a file
+honestly named `report[1].txt` or `draft*.md` is a *pattern* — and for a delete that is the
+difference between removing the row the user confirmed and removing everything beside it.
+The prefix disables pathspec magic for that entry, and incidentally stops a leading `:` in a
+filename from parsing as a directive.
 
 The two `restore`s are one flag apart and opposite in which half they keep, so the flags
 are a named constant in `commit.rs` with a test on them. `--staged --worktree` together

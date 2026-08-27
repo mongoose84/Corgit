@@ -39,6 +39,61 @@ pub async fn discard(repo: &Path, paths: &[String]) -> Result<(), String> {
 /// onto — the failure it guards against destroys work and reports success.
 const DISCARD_FLAGS: &[&str] = &["--worktree", "--"];
 
+/// Delete these *untracked* paths from the working tree (§5.2, §8.6).
+///
+/// `git clean`, never `std::fs::remove_file`, and that is this function's
+/// safety property rather than a stylistic preference: clean removes only what
+/// git considers untracked, so a tracked path arriving here through a frontend
+/// bug is skipped instead of unlinked. With `remove_file` the pane's filter
+/// would be the only thing that ever stood between a bug and someone's tracked
+/// work.
+///
+/// The flags are the rest of it, hence a named constant with a test on them,
+/// the same as [`DISCARD_FLAGS`]:
+///
+/// - `-d` is absent because Corgit never shows a folder row (§5.2), so there is
+///   never a directory here to recurse into.
+/// - `-x` and `-X` are absent because an ignored file is not what any row in
+///   this pane represents. Either one turns a two-row selection into a sweep
+///   that can take `node_modules`, `target` and every build artefact on the
+///   disk with it — the accident this list exists to make unreachable.
+///
+/// Unlike [`discard`], an unmatched pathspec is not fatal here: `git clean`
+/// skips what it cannot find rather than failing the whole invocation, so a
+/// file already gone by the time the user confirms is a no-op rather than an
+/// error on the rest of the batch.
+pub async fn delete_untracked(repo: &Path, paths: &[String]) -> Result<(), String> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+
+    let specs: Vec<String> = paths.iter().map(|path| literal_pathspec(path)).collect();
+    let mut args: Vec<&str> = Vec::with_capacity(1 + CLEAN_FLAGS.len() + specs.len());
+    args.push("clean");
+    args.extend_from_slice(CLEAN_FLAGS);
+    args.extend(specs.iter().map(String::as_str));
+    run(repo, &args).await
+}
+
+/// See [`delete_untracked`] for why each absent flag is absent. `--force`
+/// is required for `clean` to do anything at all unless the repo sets
+/// `clean.requireForce=false`, so it is not optional here.
+const CLEAN_FLAGS: &[&str] = &["--force", "--"];
+
+/// Git reads a pathspec as a **glob**, so a file honestly named `report[1].txt`
+/// or `draft*.md` is a *pattern* that can match files nobody picked. For a
+/// delete that is the difference between removing the one row the user
+/// confirmed and removing everything sitting beside it, so each path is wrapped
+/// in `:(literal)`, which switches off pathspec magic and globbing for that
+/// entry alone.
+///
+/// It also neutralises a leading `:`, which would otherwise make the path
+/// itself read as pathspec magic and fail — or worse, parse as some other
+/// directive entirely.
+fn literal_pathspec(path: &str) -> String {
+    format!(":(literal){path}")
+}
+
 /// "Stage all" must reach files hidden by the middle pane's 100-entry cap
 /// (§5.2), so it stages the whole tree rather than a path list the frontend
 /// gathered from what it could see.
@@ -118,5 +173,40 @@ mod tests {
         // No repo needed: the guard is hit before anything is spawned, so a
         // path that does not exist proves the early return rather than luck.
         assert!(discard(Path::new("\\\\?\\nonexistent"), &[]).await.is_ok());
+    }
+
+    /// The same guard on the delete path, and it matters more here: `git clean
+    /// --force --` with no pathspec at all is not an error, it is *clean the
+    /// entire working tree*. An empty selection reaching git would be the
+    /// worst single command this app could issue.
+    #[tokio::test]
+    async fn an_empty_path_list_never_reaches_clean() {
+        assert!(delete_untracked(Path::new("\\\\?\\nonexistent"), &[]).await.is_ok());
+    }
+
+    /// The delete counterpart of the [`DISCARD_FLAGS`] test above. Each of
+    /// these turns a confirmed two-file delete into something much larger, and
+    /// none of them changes anything the user can see before it happens.
+    #[test]
+    fn clean_never_recurses_into_directories_or_reaches_ignored_files() {
+        assert_eq!(CLEAN_FLAGS, ["--force", "--"]);
+        for flag in ["-d", "-x", "-X", "--directory"] {
+            assert!(
+                !CLEAN_FLAGS.contains(&flag),
+                "clean must stay file-scoped and never touch ignored files: {flag} would take \
+                 whole build directories off disk from a two-row selection"
+            );
+        }
+    }
+
+    /// Without `:(literal)` these are globs, and `git clean --force` would
+    /// delete every file they happen to match rather than the one row the user
+    /// confirmed. This is the single most dangerous line in the module.
+    #[test]
+    fn every_path_is_passed_as_a_literal_pathspec() {
+        assert_eq!(literal_pathspec("report[1].txt"), ":(literal)report[1].txt");
+        assert_eq!(literal_pathspec("draft*.md"), ":(literal)draft*.md");
+        // A leading colon would otherwise be read as pathspec magic itself.
+        assert_eq!(literal_pathspec(":weird.txt"), ":(literal):weird.txt");
     }
 }

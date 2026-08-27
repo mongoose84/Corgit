@@ -1,30 +1,43 @@
 <script lang="ts">
-  // Discard confirmation (§5.2). Modelled on CreateBranchDialog — a centred
-  // modal rather than an anchored popover, for a stronger reason here: this is
-  // the only thing in Corgit that destroys work no git command can bring back,
-  // so it must not be dismissible by the same stray outside click that closes
-  // a menu. Hence no scrim-click close either; Cancel and Escape only.
+  // Confirmation for the two acts in the pane that destroy work (§5.2).
+  // Modelled on CreateBranchDialog — a centred modal rather than an anchored
+  // popover, for a stronger reason here: these are the only things in Corgit
+  // that destroy work no git command can bring back, so it must not be
+  // dismissible by the same stray outside click that closes a menu. Hence no
+  // scrim-click close either; Cancel and Escape only.
   //
   // §8.3 refuses force-checkout because it "silently discards work". This is
   // the same act done *loudly*: every path is listed, and the sentence under
-  // the list says exactly which half of the file's changes goes and which
-  // stays. A count alone would not be enough to check the list against.
+  // the list says what happens to those exact bytes. A count alone would not
+  // be enough to check the list against.
+  //
+  // It serves both destructive acts in the pane, because the *modal* is the
+  // safety property — Cancel focused, no scrim close, every path listed — and
+  // two copies of that would be two places for it to rot. Only the words
+  // change with `mode`, and they change completely: "discard" and "delete" must
+  // never be able to read as each other.
   import type { FileEntry } from './repos.svelte';
 
+  /** `discard` restores tracked files from the index and git can bring the
+   *  result back. `delete` is `git clean` on untracked files and nothing can —
+   *  they have never been in the index, so no object git holds has a copy. */
+  export type DestructiveMode = 'discard' | 'delete';
+
   interface Props {
-    /** Exactly what will be discarded, captured when the dialog was opened —
+    mode: DestructiveMode;
+    /** Exactly what will be acted on, captured when the dialog was opened —
      *  never re-derived while it is up. A sweep, an FS watcher or a terminal
-     *  can change the file list underneath a modal, and confirming must
-     *  discard what the user was shown, not what the list says by then. */
+     *  can change the file list underneath a modal, and confirming must act on
+     *  what the user was shown, not on what the list says by then. */
     entries: readonly FileEntry[];
     /** Resolves once the write has settled; the dialog stays up until then so
      *  the button can say what is happening. Failures are reported by the
      *  pane, alongside every other git write's (§13). */
-    onDiscard: () => Promise<void>;
+    onConfirm: () => Promise<void>;
     onClose: () => void;
   }
 
-  let { entries, onDiscard, onClose }: Props = $props();
+  let { mode, entries, onConfirm, onClose }: Props = $props();
 
   let busy = $state(false);
   let cancelEl: HTMLButtonElement | undefined = $state();
@@ -36,15 +49,39 @@
     cancelEl?.focus();
   });
 
+  const one = $derived(entries.length === 1);
+
   const title = $derived(
-    entries.length === 1 ? 'Discard changes to this file?' : `Discard changes to ${entries.length} files?`,
+    mode === 'discard'
+      ? one
+        ? 'Discard changes to this file?'
+        : `Discard changes to ${entries.length} files?`
+      : one
+        ? 'Delete this file?'
+        : `Delete ${entries.length} files?`,
   );
+
+  // The sentence the user actually reads before pressing the red button, so it
+  // says what happens to the bytes rather than naming the git command. The
+  // delete wording leads with the irreversibility because that is the whole
+  // difference between the two modes: everywhere else in Corgit, "cannot be
+  // recovered" still means git has it and the UI does not.
+  const consequence = $derived(
+    mode === 'discard'
+      ? 'Their unstaged changes are thrown away and cannot be recovered. Anything already staged for these files is kept.'
+      : one
+        ? 'This file is deleted from disk. It has never been committed, so git has no copy and nothing can bring it back.'
+        : 'These files are deleted from disk. They have never been committed, so git has no copy and nothing can bring them back.',
+  );
+
+  const action = $derived(mode === 'discard' ? 'Discard changes' : 'Delete files');
+  const pending = $derived(mode === 'discard' ? 'Discarding…' : 'Deleting…');
 
   async function confirm() {
     if (busy) return;
     busy = true;
     try {
-      await onDiscard();
+      await onConfirm();
       onClose();
     } finally {
       busy = false;
@@ -66,7 +103,7 @@
     role="dialog"
     tabindex="-1"
     aria-modal="true"
-    aria-label="Discard changes"
+    aria-label={action}
     onkeydown={onKeydown}
   >
     <p class="title">{title}</p>
@@ -80,15 +117,12 @@
       {/each}
     </ul>
 
-    <p class="consequence">
-      Their unstaged changes are thrown away and cannot be recovered. Anything already staged for
-      these files is kept.
-    </p>
+    <p class="consequence">{consequence}</p>
 
     <div class="buttons">
       <button bind:this={cancelEl} type="button" disabled={busy} onclick={onClose}>Cancel</button>
       <button type="button" class="danger" disabled={busy} onclick={confirm}>
-        {busy ? 'Discarding…' : 'Discard changes'}
+        {busy ? pending : action}
       </button>
     </div>
   </div>

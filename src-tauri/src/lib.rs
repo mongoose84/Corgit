@@ -525,6 +525,23 @@ async fn discard_paths(repo_id: String, paths: Vec<String>, app: AppHandle) -> R
         .await
 }
 
+/// Delete these untracked paths from the working tree (§5.2, §8.6) — the only
+/// thing Corgit does that git cannot undo *at all*, since an untracked file has
+/// never been in the index and so exists in no object git holds. Everything
+/// that makes that survivable is elsewhere: `commit::delete_untracked`'s flags
+/// and literal pathspecs, the frontend's untracked-only filter, and a
+/// confirmation modal listing every path.
+///
+/// Same shape as every other write regardless, which is the point of §7 rule 1
+/// — the most dangerous command in the app gets no bespoke handling.
+#[tauri::command]
+async fn delete_paths(repo_id: String, paths: Vec<String>, app: AppHandle) -> Result<(), String> {
+    write_and_refresh(&app, repo_id, "Delete", |path| async move {
+        commit::delete_untracked(&path, &paths).await
+    })
+    .await
+}
+
 /// Right-click ▸ Ignore on an untracked file row (§5.2). Goes through
 /// `write_and_refresh` like every other mutation despite spawning no git at
 /// all: it holds the repo's write lock, which is what keeps a `.gitignore`
@@ -2187,6 +2204,7 @@ pub fn run() {
             stage_paths,
             unstage_paths,
             discard_paths,
+            delete_paths,
             append_gitignore,
             stage_all,
             unstage_all,
