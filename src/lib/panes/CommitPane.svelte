@@ -14,10 +14,12 @@
     prune,
     selectOne,
     selectedRows,
+    step,
     toggle,
     type FileSection,
     type FileSelection,
   } from '../fileSelection';
+  import { tick } from 'svelte';
 
   // Mode A (working tree) — SPEC.md §5.2. Commit details (Mode B) live in
   // their own panel (graph.svelte.ts + CommitInfoPanel.svelte) rather than
@@ -145,7 +147,86 @@
       return;
     }
     selection = selectOne(section, entry.path);
+    cancelPendingDiff();
     openDiff(section, entry);
+  }
+
+  /** The two `<ul>`s, so a step can put focus on the row it moved to. Either
+   *  can be undefined — an empty section draws a `<p>` instead of a list. */
+  let stagedList = $state<HTMLUListElement>();
+  let unstagedList = $state<HTMLUListElement>();
+
+  /** Trailing coalesce for a *held* arrow key. Each row's diff is a `git diff`
+   *  process, and on this platform the spawn alone costs more than the diff
+   *  (CLAUDE.md, §1) — holding ↓ through thirty files would queue thirty of
+   *  them through the global semaphore to show the user one. A deliberate press
+   *  is never delayed: `event.repeat` separates the two exactly, so this timer
+   *  only ever exists while the key is down. */
+  let pendingDiff: ReturnType<typeof setTimeout> | null = null;
+  /** Long enough to swallow Windows' default key-repeat interval (~50 ms) and
+   *  short enough to land the read as the key comes up. */
+  const HELD_ARROW_DIFF_MS = 80;
+
+  function cancelPendingDiff() {
+    if (pendingDiff !== null) clearTimeout(pendingDiff);
+    pendingDiff = null;
+  }
+
+  // A key held as the window closes, or as the pane is torn down by a repo with
+  // no files — the timer outlives the component otherwise.
+  $effect(() => cancelPendingDiff);
+
+  /** ↑/↓ walk the rows and bring each one's diff up as they go, so reviewing a
+   *  commit's worth of files is one key rather than a click per file (§5.2).
+   *
+   *  Bound to the lists rather than the window: the arrows belong to whatever
+   *  has focus, and the commit message textarea two elements up is a place
+   *  where they have to keep moving the caret. Clicking a row focuses its
+   *  button, so the ordinary path — click the first file, then arrow down —
+   *  arrives here by bubbling. */
+  async function onListKeydown(event: KeyboardEvent) {
+    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
+    // Modified arrows are left alone rather than claimed and ignored: shift-↓
+    // is a range in every file list that has one, and this pane does not have
+    // it yet. Taking the key now would make adding it later a regression.
+    if (event.shiftKey || event.ctrlKey || event.metaKey || event.altKey) return;
+
+    const target = step(
+      selection,
+      event.key === 'ArrowDown' ? 1 : -1,
+      files?.staged ?? [],
+      files?.unstaged ?? [],
+    );
+    // At either end. Unclaimed, so the pane scrolls the way it would have.
+    if (!target) return;
+    event.preventDefault();
+
+    selection = selectOne(target.section, target.row.path);
+    cancelPendingDiff();
+    if (event.repeat) {
+      const repoId = repos.selectedId;
+      pendingDiff = setTimeout(() => {
+        pendingDiff = null;
+        // The repo cannot change from the keyboard, but a click elsewhere
+        // during a held key can, and this diff would then be of a file in a
+        // repo nobody is looking at.
+        if (repos.selectedId === repoId) openDiff(target.section, target.row);
+      }, HELD_ARROW_DIFF_MS);
+    } else {
+      openDiff(target.section, target.row);
+    }
+
+    // Focus follows the highlight, which is also what scrolls the new row into
+    // view — doing it by hand would mean reimplementing "scroll the least
+    // possible" against `Pane`'s `.body`. After the flush, because the row may
+    // be in the other section's list and that list may have just been created.
+    await tick();
+    const list = target.section === 'staged' ? stagedList : unstagedList;
+    for (const row of list?.querySelectorAll<HTMLElement>('.file-row') ?? []) {
+      if (row.dataset.path !== target.row.path) continue;
+      row.querySelector<HTMLButtonElement>('button.open')?.focus();
+      break;
+    }
   }
 
   /** Right-click acts on the selection when the row is in it, and on that row
@@ -393,7 +474,8 @@
       {#if files.staged.length === 0}
         <p class="section-empty">Nothing staged</p>
       {:else}
-        <ul>
+        <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+        <ul bind:this={stagedList} onkeydown={onListKeydown}>
           {#each files.staged as entry (entry.path)}
             <li>
               <!-- The row's own − unstages that row and no other, even with
@@ -436,7 +518,8 @@
       {#if files.unstaged.length === 0}
         <p class="section-empty">No changes</p>
       {:else}
-        <ul>
+        <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+        <ul bind:this={unstagedList} onkeydown={onListKeydown}>
           {#each files.unstaged as entry (entry.path)}
             <li>
               <FileRow

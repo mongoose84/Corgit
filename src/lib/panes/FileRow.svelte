@@ -83,8 +83,18 @@
   const dir = $derived(entry.path.slice(0, Math.max(entry.path.lastIndexOf('/'), 0)));
 </script>
 
+<!-- `data-path` is how the commit pane finds this row again to focus it after an
+     arrow key moved the selection onto it (§5.2). By path rather than by index,
+     so a list rewritten by a watcher tick between the key and the flush focuses
+     nothing instead of the wrong file. -->
 <!-- svelte-ignore a11y_no_static_element_interactions -->
-<div class="file-row" class:selected class:showing={showingDiff} oncontextmenu={onContextMenu}>
+<div
+  class="file-row"
+  class:selected
+  class:showing={showingDiff}
+  data-path={entry.path}
+  oncontextmenu={onContextMenu}
+>
   <!-- The path is deliberately not `.selectable` here, unlike everywhere else
        readable in the app: `cursor: text` on something that opens a diff when
        clicked is a lie, and the full path is on the title attribute anyway. -->
@@ -162,6 +172,17 @@
   .file-row.showing {
     border-left: 2px solid var(--accent);
     padding-left: calc(var(--space-3) - 2px);
+  }
+
+  /* Arrow-key navigation (§5.2) focuses this button to move the highlight, and
+     the row it lands on is by construction both selected and the one showing —
+     so the global accent focus ring would be the third accent marker on the
+     same row, and the only one that does not span it: `.open` stops short of
+     the +/↺ buttons and the row's padding, so it draws a box visibly narrower
+     than the fill behind it. The fill and the bar already say everything the
+     ring would. A row reached by Tab is not selected and keeps its ring. */
+  .file-row.selected .open:focus-visible {
+    outline: none;
   }
 
   /* The row itself (§5.4). A button rather than a click handler on the div, so

@@ -12,6 +12,10 @@
  * other — so a set spanning both would leave the context menu with no honest
  * verb to offer. Ctrl-clicking across the divide starts a new selection rather
  * than growing the old one.
+ *
+ * `step` at the foot of the file is the keyboard's way of producing the same
+ * thing a plain click does, and is the one function here that reads *both*
+ * sections — see its own comment for why that does not break the rule above.
  */
 
 export type FileSection = 'staged' | 'unstaged';
@@ -121,4 +125,59 @@ export function selectedRows<T extends PathRow>(
 ): T[] {
   if (!current || current.section !== section) return [];
   return rows.filter((row) => current.paths.has(row.path));
+}
+
+/** Where the arrow keys land, as the row plus the section it was found in —
+ *  the section is not recoverable from the row, and the caller needs it to ask
+ *  for the right diff (`sourceForRow`). */
+export interface StepTarget<T extends PathRow> {
+  section: FileSection;
+  row: T;
+}
+
+/**
+ * One arrow-key step through the pane's rows (§5.2).
+ *
+ * **The two sections are walked as one list**, staged first, because that is
+ * the order they are drawn in and the user pressing ↓ is reading down the pane,
+ * not reasoning about which list a file is in. The "one section" rule above is
+ * untouched: what comes back is a single row, and `selectOne` on it belongs to
+ * exactly one section the same as any plain click.
+ *
+ * **The step is measured from the far edge of the selection in the direction of
+ * travel** — the last selected row for ↓, the first for ↑. For the ordinary
+ * case, one row picked by a plain click, that is just "the row you are on". For
+ * a shift-range or a scattered ctrl-selection it steps *past* the block rather
+ * than back into the middle of it, which is the only reading of ↓ that does not
+ * land on a row that is already highlighted. This is why there is no separate
+ * "lead" to track: the direction supplies it.
+ *
+ * `null` at either end — the ends clamp rather than wrap, and the caller leaves
+ * the key alone so the pane scrolls instead. Wrapping would make ↓ on the last
+ * file jump to the top of the pane, which reads as a scroll bug.
+ */
+export function step<T extends PathRow>(
+  current: FileSelection | null,
+  delta: 1 | -1,
+  staged: readonly T[],
+  unstaged: readonly T[],
+): StepTarget<T> | null {
+  const flat: StepTarget<T>[] = [
+    ...staged.map((row) => ({ section: 'staged' as const, row })),
+    ...unstaged.map((row) => ({ section: 'unstaged' as const, row })),
+  ];
+  if (flat.length === 0) return null;
+
+  const picked = flat
+    .map((target, index) => (isSelected(current, target.section, target.row.path) ? index : -1))
+    .filter((index) => index >= 0);
+
+  // Nothing picked — including a selection whose rows have all been staged away
+  // underneath us (§7). The near end, so a first key press gets into the list
+  // rather than doing nothing and looking broken.
+  if (picked.length === 0) return flat[delta > 0 ? 0 : flat.length - 1];
+
+  const from = delta > 0 ? picked[picked.length - 1] : picked[0];
+  const next = from + delta;
+  return next >= 0 && next < flat.length ? flat[next] : null;
 }

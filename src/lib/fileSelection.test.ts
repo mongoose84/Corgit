@@ -6,6 +6,7 @@ import {
   prune,
   selectOne,
   selectedRows,
+  step,
   toggle,
   type FileSelection,
 } from './fileSelection';
@@ -102,5 +103,53 @@ describe('reading a selection', () => {
       'a.txt',
       'd.txt',
     ]);
+  });
+});
+
+describe('step', () => {
+  const STAGED = [{ path: 's1.txt' }, { path: 's2.txt' }];
+
+  /** `section/path`, because a step that lands on the right filename in the
+   *  wrong section asks git for the wrong diff and looks correct doing it. */
+  function at(target: ReturnType<typeof step> | null): string | null {
+    return target && `${target.section}/${target.row.path}`;
+  }
+
+  it('walks the two sections as one list, in the order they are drawn', () => {
+    expect(at(step(selectOne('staged', 's2.txt'), 1, STAGED, ROWS))).toBe('unstaged/a.txt');
+    expect(at(step(selectOne('unstaged', 'a.txt'), -1, STAGED, ROWS))).toBe('staged/s2.txt');
+  });
+
+  it('clamps at both ends rather than wrapping', () => {
+    expect(step(selectOne('unstaged', 'd.txt'), 1, STAGED, ROWS)).toBeNull();
+    expect(step(selectOne('staged', 's1.txt'), -1, STAGED, ROWS)).toBeNull();
+  });
+
+  it('enters at the near end when nothing is picked', () => {
+    expect(at(step(null, 1, STAGED, ROWS))).toBe('staged/s1.txt');
+    expect(at(step(null, -1, STAGED, ROWS))).toBe('unstaged/d.txt');
+    expect(step(null, 1, [], [])).toBeNull();
+  });
+
+  it('enters at the near end when the selection has been staged away', () => {
+    const stale: FileSelection = { section: 'unstaged', paths: new Set(['x.txt']), anchor: 'x.txt' };
+    expect(at(step(stale, 1, STAGED, ROWS))).toBe('staged/s1.txt');
+  });
+
+  it('steps past a range rather than back into the middle of it', () => {
+    const range = extend(selectOne('unstaged', 'b.txt'), 'unstaged', 'c.txt', ROWS);
+    expect(at(step(range, 1, STAGED, ROWS))).toBe('unstaged/d.txt');
+    expect(at(step(range, -1, STAGED, ROWS))).toBe('unstaged/a.txt');
+  });
+
+  it('measures a scattered ctrl-selection from its outermost row', () => {
+    const scattered = toggle(selectOne('unstaged', 'a.txt'), 'unstaged', 'c.txt')!;
+    expect(at(step(scattered, 1, STAGED, ROWS))).toBe('unstaged/d.txt');
+    expect(at(step(scattered, -1, STAGED, ROWS))).toBe('staged/s2.txt');
+  });
+
+  it('ignores a same-named row in the other section', () => {
+    const both = [{ path: 'a.txt' }];
+    expect(at(step(selectOne('staged', 'a.txt'), 1, both, ROWS))).toBe('unstaged/a.txt');
   });
 });

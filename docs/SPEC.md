@@ -358,6 +358,21 @@ Changes (14)                [+ stage all]
 - **Click a file → its diff opens in the right pane** (§5.4). The section the row is in
   decides which two sides get compared, because that is the only thing that knows: a
   partly-staged file appears in both lists at once with a different diff on each.
+- **↑/↓ walk the rows and bring each one's diff up as they go.** Clicking the first file
+  and then arrowing down is how a change set gets read before it is committed, and a click
+  per file for that is the pane's second-most ordinary job. Three details:
+  - **Both sections are one list**, staged first, in the order they are drawn. The user
+    pressing ↓ is reading down the pane, not reasoning about which list a file is in. The
+    one-section rule below is untouched: a step lands on a single row and selects it
+    exactly as a plain click would.
+  - **The step is measured from the far edge of the selection in the direction of travel**,
+    so ↓ out of a shift-range steps past it rather than back into the middle of it. The
+    ends **clamp rather than wrap** — ↓ on the last file jumping to the top would read as a
+    scroll bug — and the key is then left unclaimed so the pane scrolls instead.
+  - **A held arrow does not spawn a `git diff` per row it flies past.** The highlight moves
+    with every repeat; the diff is read once the key settles. On this platform the spawn
+    costs more than the diff does (§1), and thirty reads to show the user one is the
+    ctrl-click-opens-a-diff mistake in a different key.
 - **Ctrl-click and shift-click build a selection; right-click acts on it.** Staging six of
   fourteen files is the pane's most ordinary job, and one `+` per file is six round trips
   through the write queue for what is one act. A modified click therefore selects instead
