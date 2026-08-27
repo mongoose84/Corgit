@@ -55,6 +55,7 @@ closes windows and exits the app: that work *is* the main thread's.
 - Repo discovery by scanning configured root folders
 - Per-repo status: branch, changed-files count, ahead/behind
 - Stage / unstage files (file-level)
+- Add untracked files to `.gitignore` from the file list's context menu (§5.2)
 - Commit (staged files only)
 - Push, including "Publish branch" for a branch with no upstream
 - Pull (merge only) and fetch
@@ -398,7 +399,8 @@ Changes (14)                [+ stage all]
   it); *Reveal in File Explorer* on a single row only, because `explorer /select,` takes
   one path and N files would mean N windows rather than one window with them all picked
   out. A file that no longer exists — a `D` row — reveals the nearest folder that does,
-  never a silent jump to Documents.
+  never a silent jump to Documents. Then, below a separator, the **ignore** entries — see
+  *Ignoring a file* below.
 - **The selected rows and the open diff are marked differently**: selection fills the row,
   the diff on screen gets an accent bar down its left edge. With six rows filled, a second
   fill that only differed in shade would lose the one row the right pane is actually
@@ -424,6 +426,64 @@ Changes (14)                [+ stage all]
     stays. §8.3 refuses force-checkout because it "silently discards work"; this is the
     same act done loudly, and it is the only thing in the app that destroys work git cannot
     give back. `git revert` and `git reset` stay out of v1 (§2) — this is neither.
+
+**Ignoring a file.** A `?` row's context menu can append a pattern to the repo's root
+`.gitignore`, below a separator — the point at which the menu stops being about these files
+and starts being about what git sees at all:
+
+```
+Changes (312)
+  ?  index.js   node_modules/react       [+]   ← right-clicked
+
+              ┌──────────────────────────────────┐
+              │ Stage 1 file                     │
+              │ Reveal in File Explorer          │
+              │ ──────────────────────────────   │
+              │ Ignore index.js                  │  → /node_modules/react/index.js
+              │ Ignore *.js                      │  → *.js
+              │ Ignore node_modules/react/       │  → /node_modules/react/
+              │ Ignore node_modules/             │  → /node_modules/
+              └──────────────────────────────────┘
+```
+
+- **Untracked rows only**, which also means *Changes* only. A `.gitignore` line for a
+  tracked file does nothing at all — git keeps tracking what it already tracks — so the row
+  would sit exactly where it was while the entry that produced it reported success. That is
+  the same class of lie as a Discard that silently ate staged work. A mixed selection drops
+  its tracked rows and says so, the way Discard does with untracked ones, with the filter
+  running the other way round.
+- **Four entries for one row, narrowest first**, so the broadest thing the menu can do is
+  never the first thing under the pointer. The two folder entries are the parent and the
+  top-level folder, and the second appears only when it is a different directory. Nothing
+  between them is offered: a line per path segment would be a folder picker, and the two
+  ends are the two questions anyone has.
+- **The top-level entry is the one that answers `-uall`.** "Never a folder row" above means
+  a wholly-untracked `node_modules` arrives as several hundred file rows, whose immediate
+  parents are `node_modules/react/`, `node_modules/lodash/` and so on — ignoring those one
+  at a time is not a feature. It is offered *as well as* the parent rather than instead of
+  it, because the same shape reaches `src/generated/out.js`, where the broad reading would
+  ignore the whole source tree. Both are on the menu, both state in full what they cover,
+  and the narrow one is on top.
+- **A selection of several rows collapses to one entry**, *Ignore N files*, writing one
+  exact path each. There is no honest single extension or folder for six files. The rich
+  form needs a selection that *is* one row, not one that merely has one untracked row left
+  in it — otherwise the menu would describe rows the user can see are picked and it is not
+  acting on.
+- **Every pattern is anchored** with a leading `/` except the extension one, which is
+  deliberately repo-wide. The anchor pays for itself twice: it means the row that was
+  clicked rather than any file of that name at any depth, and it keeps a file named
+  `#notes.txt` or `!notes.txt` from producing a line that is a comment or a negation.
+  Paths are escaped for git's matcher — `logs[1].txt` written verbatim is a character class
+  matching nothing — and the menu label and the appended line come from one function so
+  they cannot drift.
+- **Append only, and never staged.** The file is created if absent, a pattern already in it
+  is skipped rather than duplicated, and its existing comments, grouping and line endings
+  survive untouched: a `.gitignore` is written by hand and Corgit rewriting one is not
+  recoverable from the UI that did it. **No confirmation** — unlike Discard this destroys
+  nothing, the file stays on disk and merely stops being listed, and the `.gitignore` edit
+  lands in *Changes* as an ordinary row that can be read, discarded or committed. That row
+  is the confirmation, after the fact and reversible. Staging it automatically would be a
+  second act the entry never named, and `+` is right there on it.
 
 **Commit info panel** — a fourth column to the right of the graph, opened from a row's
 **right-click ▸ Info**:
@@ -949,6 +1009,14 @@ The two `restore`s are one flag apart and opposite in which half they keep, so t
 are a named constant in `commit.rs` with a test on them. `--staged --worktree` together
 would be a third thing again — it moves the source to HEAD and destroys both halves — and
 is what §5.2's Discard must never become.
+
+**Ignore has no command here, and that is not an oversight.** There is no `git ignore`;
+`git check-ignore` only asks. §5.2's ignore entries append to a text file, which makes
+`ignore.rs` the one write in the app that spawns nothing — and the one whose *existing*
+contents must be preserved rather than merged by git. It still takes the repo's write-queue
+lock (§7 rule 1): a read-modify-write of a file two windows can reach is the same race as
+two `git add`s, and it still publishes status afterwards, which is what makes the ignored
+rows leave the pane.
 
 ### 8.7 Remote operations
 

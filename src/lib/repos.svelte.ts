@@ -410,6 +410,21 @@ class RepoStore {
     return this.write('discard_paths', { paths }, 'Discard');
   }
 
+  /** Append lines to the selected repo's root `.gitignore` (§5.2) — the one
+   *  write here that runs no git at all, and the only one whose argument is
+   *  not a path list: `ignorePatterns.ts` turns the row into both the menu
+   *  label and the line, so the backend appends what it is given rather than
+   *  re-deriving a pattern the label never promised.
+   *
+   *  Tracked paths must never reach here. Git keeps tracking what it already
+   *  tracks, so a `.gitignore` line for one changes nothing at all — the row
+   *  stays exactly where it was, and the menu entry that produced it lied.
+   *  `CommitPane` is what keeps them out, the same way it keeps untracked
+   *  paths out of `discardPaths`. */
+  async ignorePatterns(patterns: string[]): Promise<boolean> {
+    return this.write('append_gitignore', { patterns }, 'Ignore');
+  }
+
   async stageAll(): Promise<boolean> {
     return this.write('stage_all', {}, 'Stage all');
   }

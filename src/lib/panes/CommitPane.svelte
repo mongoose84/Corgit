@@ -19,6 +19,7 @@
     type FileSection,
     type FileSelection,
   } from '../fileSelection';
+  import { exactPattern, ignoreCandidates } from '../ignorePatterns';
   import { tick } from 'svelte';
 
   // Mode A (working tree) — SPEC.md §5.2. Commit details (Mode B) live in
@@ -284,7 +285,51 @@
       });
     }
 
+    items.push(...ignoreItems(section, entries));
+
     return items;
+  }
+
+  /** The ignore entries (§5.2), on **untracked rows only**. A `.gitignore`
+   *  line for a tracked file does nothing whatsoever — git keeps tracking what
+   *  it already tracks — so the row would sit exactly where it was while the
+   *  entry that produced it reported success. That also rules the group out of
+   *  *Staged Changes* wholesale: a staged row is in the index by definition.
+   *
+   *  Behind a separator, because this is where the menu stops being about
+   *  these files and starts being about what git sees at all — the one entry
+   *  here that outlives the selection, the pane, and the session, since it
+   *  ends up committed and then applies to everyone on the repo.
+   *
+   *  The full file/extension/folder set is offered only for a selection that
+   *  *is* one row, not for one that merely has one untracked row left in it.
+   *  There is no honest single extension or folder for six files, and a rich
+   *  menu built from the survivor of a three-row selection would be describing
+   *  rows the user can see are picked and it is not acting on. */
+  function ignoreItems(section: FileSection, entries: FileEntry[]) {
+    if (section !== 'unstaged') return [];
+    const untracked = entries.filter((entry) => entry.status === '?');
+    if (untracked.length === 0) return [];
+
+    const items =
+      entries.length === 1
+        ? ignoreCandidates(untracked[0].path).map((candidate) => ({
+            label: `Ignore ${candidate.label}`,
+            onSelect: () => void ignore([candidate.pattern]),
+          }))
+        : [
+            {
+              // The same "say how many survive" rule Discard follows above,
+              // with the filter running the other way round.
+              label:
+                untracked.length === entries.length
+                  ? `Ignore ${plural(untracked.length)}`
+                  : `Ignore ${plural(untracked.length)} (skipping tracked)`,
+              onSelect: () => void ignore(untracked.map((entry) => exactPattern(entry.path))),
+            },
+          ];
+
+    return [{ separator: true as const }, ...items];
   }
 
   async function doCommit() {
@@ -367,6 +412,27 @@
     busy = true;
     try {
       await repos.unstageAll();
+    } finally {
+      busy = false;
+    }
+  }
+
+  /** Appends the lines the menu entry named. Unconfirmed, unlike discard: this
+   *  destroys nothing — the file stays on disk untouched, it only stops being
+   *  listed — and the `.gitignore` edit itself arrives in *Changes* as an
+   *  ordinary row the user can read, discard or commit. That row is the
+   *  confirmation, after the fact and reversible, which is the right shape for
+   *  an act this cheap.
+   *
+   *  Deliberately not staged afterwards. A write that both edits a file and
+   *  puts it in the index would be doing a second thing the menu entry never
+   *  said, and `+` is right there on the row it creates. */
+  async function ignore(patterns: string[]) {
+    if (patterns.length === 0) return;
+
+    busy = true;
+    try {
+      await repos.ignorePatterns(patterns);
     } finally {
       busy = false;
     }

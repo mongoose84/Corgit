@@ -3,10 +3,21 @@
   // switching in §8.3 — the first caller, not the last: any future row action
   // reuses this rather than growing its own popup).
 
-  interface ContextMenuItem {
+  interface ContextMenuAction {
     label: string;
     onSelect: () => void;
   }
+
+  /** A rule between two groups of entries. Only worth drawing when the groups
+   *  answer different questions — the commit pane's menu moves from "do
+   *  something with these files" to "change what git sees at all", and by the
+   *  fourth entry a flat list stops reading as two decisions. Entries that are
+   *  merely different verbs on the same rows do not get one. */
+  interface ContextMenuSeparator {
+    separator: true;
+  }
+
+  type ContextMenuItem = ContextMenuAction | ContextMenuSeparator;
 
   interface Props {
     /** Viewport coordinates of the click that opened this menu. */
@@ -32,7 +43,7 @@
     menuEl.style.top = `${Math.max(0, Math.min(y, innerHeight - rect.height))}px`;
   });
 
-  function select(item: ContextMenuItem) {
+  function select(item: ContextMenuAction) {
     item.onSelect();
     onClose();
   }
@@ -53,8 +64,16 @@
   style="left: {x}px; top: {y}px"
   onmousedown={(event) => event.stopPropagation()}
 >
-  {#each items as item (item.label)}
-    <button type="button" role="menuitem" onclick={() => select(item)}>{item.label}</button>
+  <!-- Keyed by index, not by label. The list is built once when the menu opens
+       and is fixed for as long as it is up — the commit pane snapshots the rows
+       it was opened on for exactly that reason (§7) — so there is nothing for a
+       stable key to protect, and separators have no label to key by. -->
+  {#each items as item, index (index)}
+    {#if 'separator' in item}
+      <hr />
+    {:else}
+      <button type="button" role="menuitem" onclick={() => select(item)}>{item.label}</button>
+    {/if}
   {/each}
 </div>
 
@@ -84,5 +103,13 @@
 
   button:hover {
     background: var(--bg-hover);
+  }
+
+  /* Inset by the menu's own padding so the rule stops short of the border
+     rather than running into it, which reads as the panel being cut in two. */
+  hr {
+    margin: var(--space-1) var(--space-2);
+    border: 0;
+    border-top: 1px solid var(--border);
   }
 </style>
