@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { isDirty, publishReason, repos, type Repo, type RepoStatus } from '../repos.svelte';
+  import { canPull, isDirty, publishReason, repos, type Repo, type RepoStatus } from '../repos.svelte';
   import ContextMenu from '../ContextMenu.svelte';
   import { notices } from '../notices.svelte';
   import { BusyIndicator } from '../busyIndicator';
@@ -54,7 +54,7 @@
   // a Dismiss on it would be undone within one interval — the button would be
   // broken by construction rather than merely unhelpful.
   const canDismissError = $derived(repos.rowErrors[repo.id] !== undefined);
-  const canPullRow = $derived(status !== undefined && status.behind > 0 && status.conflicted === 0);
+  const canPullRow = $derived(status !== undefined && canPull(status));
 
   let menuPos = $state<{ x: number; y: number } | null>(null);
   let rowEl: HTMLButtonElement | undefined = $state();

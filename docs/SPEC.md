@@ -927,6 +927,26 @@ required, not polish. Stale remote branches are handled by `--prune` on fetch (�
 On checkout failure with a dirty tree: show git's actual stderr plus **Open in VS Code**.
 **Never offer force-checkout** — it silently discards work.
 
+**A switch onto a behind branch offers the pull** (Git Graph's gesture). When a switch
+lands and the branch now checked out is behind its upstream, a small modal asks — *Pull
+`<branch>`?*, naming the count and the upstream, with **Pull** and **Not now**. A checkout
+is nearly always the start of working on that branch, and "3 behind `origin/main`" is
+knowable at exactly that moment and forgotten one second later; the alternative Corgit
+already had is switch, notice the ↓ badge, cross the window to Pull — the trip §5.1 exists
+to remove.
+
+The question is asked of the *status the switch itself produced*, never of the badge that
+was double-clicked: switching to a remote-tracking badge checks out a local branch of a
+different name, and one whose local counterpart already exists lands somewhere else again.
+So it waits for the post-switch status refresh and asks about whatever HEAD is on. A
+refused checkout asks nothing — HEAD did not move.
+
+This is an offer, not a failure, so §13's *Don't show this again* does not apply and there
+is no checkbox: it appears only in response to a gesture the user just made, and *Not now*
+is an answer rather than a dismissal. Pull is the ordinary `git pull --no-rebase` of §8.7,
+failing and reporting like any other write. The count comes from the last fetch and may be
+stale (§5.1) — the modal says so rather than pretending otherwise.
+
 **A switch that takes time has to say so.** Checking out a branch that differs by thousands
 of files is seconds of work, and the gesture that starts it — a double-click on a ref badge
 — leaves no trace of itself: nothing on screen changes until the checkout lands, so a silent

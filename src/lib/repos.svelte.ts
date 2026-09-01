@@ -190,6 +190,18 @@ export function needsPublish(status: RepoStatus): boolean {
   return publishReason(status) !== null;
 }
 
+/** A repo Pull can actually act on (§5.1, §8.7): behind its upstream, and not
+ *  mid-conflict — `git pull` refuses to start on an unresolved merge, so a
+ *  Pull offered there is a button that can only fail.
+ *
+ *  Shared for the same reason as `needsPublish`: the row's hover-revealed Pull
+ *  and the graph's "you are behind, pull now?" prompt after a branch switch
+ *  (§8.3) are the same question asked in two places, and they must not be able
+ *  to answer it differently. */
+export function canPull(status: RepoStatus): boolean {
+  return status.behind > 0 && status.conflicted === 0;
+}
+
 /** `origin/feature/x` → `feature/x`. Only the first segment is the remote, so
  *  a branch whose own name contains a `/` survives — the same rule, and the
  *  same assumption about remote names, as `branch.rs`'s `local_name`. */
