@@ -55,6 +55,8 @@ closes windows and exits the app: that work *is* the main thread's.
 - Repo discovery by scanning configured root folders
 - Per-repo status: branch, changed-files count, ahead/behind
 - Stage / unstage files (file-level)
+- Add untracked files to `.gitignore`, or delete them from disk, from the file list's
+  context menu (§5.2)
 - Commit (staged files only)
 - Push, including "Publish branch" for a branch with no upstream
 - Pull (merge only) and fetch
@@ -358,6 +360,21 @@ Changes (14)                [+ stage all]
 - **Click a file → its diff opens in the right pane** (§5.4). The section the row is in
   decides which two sides get compared, because that is the only thing that knows: a
   partly-staged file appears in both lists at once with a different diff on each.
+- **↑/↓ walk the rows and bring each one's diff up as they go.** Clicking the first file
+  and then arrowing down is how a change set gets read before it is committed, and a click
+  per file for that is the pane's second-most ordinary job. Three details:
+  - **Both sections are one list**, staged first, in the order they are drawn. The user
+    pressing ↓ is reading down the pane, not reasoning about which list a file is in. The
+    one-section rule below is untouched: a step lands on a single row and selects it
+    exactly as a plain click would.
+  - **The step is measured from the far edge of the selection in the direction of travel**,
+    so ↓ out of a shift-range steps past it rather than back into the middle of it. The
+    ends **clamp rather than wrap** — ↓ on the last file jumping to the top would read as a
+    scroll bug — and the key is then left unclaimed so the pane scrolls instead.
+  - **A held arrow does not spawn a `git diff` per row it flies past.** The highlight moves
+    with every repeat; the diff is read once the key settles. On this platform the spawn
+    costs more than the diff does (§1), and thirty reads to show the user one is the
+    ctrl-click-opens-a-diff mistake in a different key.
 - **Ctrl-click and shift-click build a selection; right-click acts on it.** Staging six of
   fourteen files is the pane's most ordinary job, and one `+` per file is six round trips
   through the write queue for what is one act. A modified click therefore selects instead
@@ -380,10 +397,13 @@ Changes (14)                [+ stage all]
 - **The menu**, per section: *Stage N files* / *Unstage N files*; *Discard changes to N
   files…* in *Changes* only, dropping untracked rows and saying so when it does (git
   rejects a pathspec list wholesale, so one `?` row would take the whole discard down with
-  it); *Reveal in File Explorer* on a single row only, because `explorer /select,` takes
+  it); *Delete N files…* for whatever untracked rows the selection holds, as its own entry
+  under its own verb; *Reveal in File Explorer* on a single row only, because `explorer
+  /select,` takes
   one path and N files would mean N windows rather than one window with them all picked
   out. A file that no longer exists — a `D` row — reveals the nearest folder that does,
-  never a silent jump to Documents.
+  never a silent jump to Documents. Then, below a separator, the **ignore** entries — see
+  *Ignoring a file* below.
 - **The selected rows and the open diff are marked differently**: selection fills the row,
   the diff on screen gets an accent bar down its left edge. With six rows filled, a second
   fill that only differed in shade would lose the one row the right pane is actually
@@ -402,13 +422,103 @@ Changes (14)                [+ stage all]
   - **Only in *Changes*.** A staged row keeps `−` alone. Discard there could only mean
     "throw away the staged work too", which is not what a button sitting beside `−` reads
     as; unstaging first moves the row here, where discard means one plain thing.
-  - **Never on an untracked (`?`) row** — no `↺`. Git has nothing to restore an untracked
-    file from, so discarding one could only be `git clean` deleting it. **Corgit does not
-    delete files.**
+  - **Never on an untracked (`?`) row** — no `↺`, and no *Discard* entry. Git has nothing to
+    restore an untracked file *from*, so there is no "discard" of one to offer. Removing it
+    is a different act under a different word — see *Deleting an untracked file* below.
   - **Always confirmed**, by a modal listing every path and saying what goes and what
     stays. §8.3 refuses force-checkout because it "silently discards work"; this is the
-    same act done loudly, and it is the only thing in the app that destroys work git cannot
-    give back. `git revert` and `git reset` stay out of v1 (§2) — this is neither.
+    same act done loudly. `git revert` and `git reset` stay out of v1 (§2) — this is
+    neither.
+
+**Deleting an untracked file.** A `?` row's context menu offers *Delete N files…*, which
+removes those files from disk. This is the only thing Corgit does that **git cannot undo at
+all**: a discarded change came out of the index and an abandoned commit is still in the
+reflog, but an untracked file has never been in the index, so no object git holds has a copy
+of it.
+
+Earlier revisions of this spec said flatly that *Corgit does not delete files*. That was
+reversed deliberately, not eroded: with `-uall` listing every untracked file individually,
+a pane that could stage and ignore them but never remove one sent the user to a terminal for
+the third of the three obvious verbs. The rules below are what the old blanket ban is
+traded for, and each of them is load-bearing:
+
+- **The word is *Delete*, never *Discard*.** They sit next to each other in the same menu on
+  a mixed selection, and one is reversible while the other is not. Sharing a verb would make
+  the safe one teach the wrong lesson about the dangerous one.
+- **Two entries, never one merged entry.** A selection spanning both kinds gets *Discard
+  changes to N files…* and *Delete N files…*, each scoped to the rows it applies to. One
+  entry doing two different irreversible things to two halves of a list cannot be confirmed
+  honestly, because the dialog would have to describe both.
+- **Untracked rows only**, which is also what keeps this away from tracked work entirely.
+- **`git clean`, never a filesystem unlink** (§8.6). Clean removes only what git considers
+  untracked, so a tracked path arriving through a bug is skipped rather than deleted — the
+  frontend filter is then the *second* guard rather than the only one.
+- **Confirmed by the same modal** as Discard, in its delete wording: every path listed,
+  Cancel focused, no scrim-click dismissal, and a sentence that says the file has never been
+  committed and nothing can bring it back.
+- **No row button.** `↺` stays absent on `?` rows and gains no `×` counterpart. Discard's
+  hover button is defensible because git can undo it; a one-click permanent delete on a row
+  the pointer merely passes over is not, and the menu is a deliberate enough act to carry
+  this on its own.
+
+**Ignoring a file.** A `?` row's context menu can append a pattern to the repo's root
+`.gitignore`, below a separator — the point at which the menu stops being about these files
+and starts being about what git sees at all:
+
+```
+Changes (312)
+  ?  index.js   node_modules/react       [+]   ← right-clicked
+
+              ┌──────────────────────────────────┐
+              │ Stage 1 file                     │
+              │ Delete 1 file…                   │
+              │ Reveal in File Explorer          │
+              │ ──────────────────────────────   │
+              │ Ignore index.js                  │  → /node_modules/react/index.js
+              │ Ignore *.js                      │  → *.js
+              │ Ignore node_modules/react/       │  → /node_modules/react/
+              │ Ignore node_modules/             │  → /node_modules/
+              └──────────────────────────────────┘
+```
+
+- **Untracked rows only**, which also means *Changes* only. A `.gitignore` line for a
+  tracked file does nothing at all — git keeps tracking what it already tracks — so the row
+  would sit exactly where it was while the entry that produced it reported success. That is
+  the same class of lie as a Discard that silently ate staged work. A mixed selection drops
+  its tracked rows and says so, the way Discard does with untracked ones, with the filter
+  running the other way round.
+- **Four entries for one row, narrowest first**, so the broadest thing the menu can do is
+  never the first thing under the pointer. The two folder entries are the parent and the
+  top-level folder, and the second appears only when it is a different directory. Nothing
+  between them is offered: a line per path segment would be a folder picker, and the two
+  ends are the two questions anyone has.
+- **The top-level entry is the one that answers `-uall`.** "Never a folder row" above means
+  a wholly-untracked `node_modules` arrives as several hundred file rows, whose immediate
+  parents are `node_modules/react/`, `node_modules/lodash/` and so on — ignoring those one
+  at a time is not a feature. It is offered *as well as* the parent rather than instead of
+  it, because the same shape reaches `src/generated/out.js`, where the broad reading would
+  ignore the whole source tree. Both are on the menu, both state in full what they cover,
+  and the narrow one is on top.
+- **A selection of several rows collapses to one entry**, *Ignore N files*, writing one
+  exact path each. There is no honest single extension or folder for six files. The rich
+  form needs a selection that *is* one row, not one that merely has one untracked row left
+  in it — otherwise the menu would describe rows the user can see are picked and it is not
+  acting on.
+- **Every pattern is anchored** with a leading `/` except the extension one, which is
+  deliberately repo-wide. The anchor pays for itself twice: it means the row that was
+  clicked rather than any file of that name at any depth, and it keeps a file named
+  `#notes.txt` or `!notes.txt` from producing a line that is a comment or a negation.
+  Paths are escaped for git's matcher — `logs[1].txt` written verbatim is a character class
+  matching nothing — and the menu label and the appended line come from one function so
+  they cannot drift.
+- **Append only, and never staged.** The file is created if absent, a pattern already in it
+  is skipped rather than duplicated, and its existing comments, grouping and line endings
+  survive untouched: a `.gitignore` is written by hand and Corgit rewriting one is not
+  recoverable from the UI that did it. **No confirmation** — unlike Discard this destroys
+  nothing, the file stays on disk and merely stops being listed, and the `.gitignore` edit
+  lands in *Changes* as an ordinary row that can be read, discarded or committed. That row
+  is the confirmation, after the fact and reversible. Staging it automatically would be a
+  second act the entry never named, and `+` is right there on it.
 
 **Commit info panel** — a fourth column to the right of the graph, opened from a row's
 **right-click ▸ Info**:
@@ -817,6 +927,26 @@ required, not polish. Stale remote branches are handled by `--prune` on fetch (�
 On checkout failure with a dirty tree: show git's actual stderr plus **Open in VS Code**.
 **Never offer force-checkout** — it silently discards work.
 
+**A switch onto a behind branch offers the pull** (Git Graph's gesture). When a switch
+lands and the branch now checked out is behind its upstream, a small modal asks — *Pull
+`<branch>`?*, naming the count and the upstream, with **Pull** and **Not now**. A checkout
+is nearly always the start of working on that branch, and "3 behind `origin/main`" is
+knowable at exactly that moment and forgotten one second later; the alternative Corgit
+already had is switch, notice the ↓ badge, cross the window to Pull — the trip §5.1 exists
+to remove.
+
+The question is asked of the *status the switch itself produced*, never of the badge that
+was double-clicked: switching to a remote-tracking badge checks out a local branch of a
+different name, and one whose local counterpart already exists lands somewhere else again.
+So it waits for the post-switch status refresh and asks about whatever HEAD is on. A
+refused checkout asks nothing — HEAD did not move.
+
+This is an offer, not a failure, so §13's *Don't show this again* does not apply and there
+is no checkbox: it appears only in response to a gesture the user just made, and *Not now*
+is an answer rather than a dismissal. Pull is the ordinary `git pull --no-rebase` of §8.7,
+failing and reporting like any other write. The count comes from the last fetch and may be
+stale (§5.1) — the modal says so rather than pretending otherwise.
+
 **A switch that takes time has to say so.** Checking out a branch that differs by thousands
 of files is seconds of work, and the gesture that starts it — a double-click on a ref badge
 — leaves no trace of itself: nothing on screen changes until the checkout lands, so a silent
@@ -927,13 +1057,34 @@ panel to its loading state and discards its scroll position.
 git add -- <paths>
 git restore --staged -- <paths>     # unstage: index ← HEAD, working tree untouched
 git restore --worktree -- <paths>   # discard: working tree ← index, index untouched
+git clean --force -- :(literal)<paths>   # delete untracked files, §5.2
 git commit -F -            # message via stdin, avoids arg-escaping pain
 ```
+
+`clean` carries **no `-d`, no `-x`, no `-X`**, and those absences are a named constant with
+a test on them in `commit.rs`, exactly as the two `restore`s are. `-d` would recurse into
+directories that the pane never shows a row for; `-x`/`-X` would reach ignored files, which
+turns a confirmed two-row delete into a sweep that takes `node_modules` and every build
+artefact on the disk with it. None of the three changes anything visible before it happens.
+
+**`:(literal)` on every path is the other half.** Git reads a pathspec as a glob, so a file
+honestly named `report[1].txt` or `draft*.md` is a *pattern* — and for a delete that is the
+difference between removing the row the user confirmed and removing everything beside it.
+The prefix disables pathspec magic for that entry, and incidentally stops a leading `:` in a
+filename from parsing as a directive.
 
 The two `restore`s are one flag apart and opposite in which half they keep, so the flags
 are a named constant in `commit.rs` with a test on them. `--staged --worktree` together
 would be a third thing again — it moves the source to HEAD and destroys both halves — and
 is what §5.2's Discard must never become.
+
+**Ignore has no command here, and that is not an oversight.** There is no `git ignore`;
+`git check-ignore` only asks. §5.2's ignore entries append to a text file, which makes
+`ignore.rs` the one write in the app that spawns nothing — and the one whose *existing*
+contents must be preserved rather than merged by git. It still takes the repo's write-queue
+lock (§7 rule 1): a read-modify-write of a file two windows can reach is the same race as
+two `git add`s, and it still publishes status afterwards, which is what makes the ignored
+rows leave the pane.
 
 ### 8.7 Remote operations
 

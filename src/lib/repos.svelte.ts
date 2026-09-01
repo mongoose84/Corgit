@@ -190,6 +190,18 @@ export function needsPublish(status: RepoStatus): boolean {
   return publishReason(status) !== null;
 }
 
+/** A repo Pull can actually act on (§5.1, §8.7): behind its upstream, and not
+ *  mid-conflict — `git pull` refuses to start on an unresolved merge, so a
+ *  Pull offered there is a button that can only fail.
+ *
+ *  Shared for the same reason as `needsPublish`: the row's hover-revealed Pull
+ *  and the graph's "you are behind, pull now?" prompt after a branch switch
+ *  (§8.3) are the same question asked in two places, and they must not be able
+ *  to answer it differently. */
+export function canPull(status: RepoStatus): boolean {
+  return status.behind > 0 && status.conflicted === 0;
+}
+
 /** `origin/feature/x` → `feature/x`. Only the first segment is the remote, so
  *  a branch whose own name contains a `/` survives — the same rule, and the
  *  same assumption about remote names, as `branch.rs`'s `local_name`. */
@@ -408,6 +420,37 @@ class RepoStore {
    *  keeps them out. */
   async discardPaths(paths: string[]): Promise<boolean> {
     return this.write('discard_paths', { paths }, 'Discard');
+  }
+
+  /** Delete these untracked paths from disk (§5.2, §8.6) — `git clean`, and
+   *  the only thing in Corgit that git cannot undo at all. A discarded change
+   *  came from the index and an amended commit is still in the reflog; an
+   *  untracked file has never been in the index, so nothing git holds has a
+   *  copy. That is why this one is confirmed by a modal that says *deleted*
+   *  rather than *discarded*.
+   *
+   *  **Tracked paths must never reach here.** `git clean` would skip them
+   *  rather than delete them, which is deliberate belt-and-braces in
+   *  `commit::delete_untracked` — but a menu entry that silently did nothing
+   *  to half a selection is its own bug. `CommitPane` filters to `?` rows, the
+   *  exact mirror of what it does for `discardPaths`. */
+  async deletePaths(paths: string[]): Promise<boolean> {
+    return this.write('delete_paths', { paths }, 'Delete');
+  }
+
+  /** Append lines to the selected repo's root `.gitignore` (§5.2) — the one
+   *  write here that runs no git at all, and the only one whose argument is
+   *  not a path list: `ignorePatterns.ts` turns the row into both the menu
+   *  label and the line, so the backend appends what it is given rather than
+   *  re-deriving a pattern the label never promised.
+   *
+   *  Tracked paths must never reach here. Git keeps tracking what it already
+   *  tracks, so a `.gitignore` line for one changes nothing at all — the row
+   *  stays exactly where it was, and the menu entry that produced it lied.
+   *  `CommitPane` is what keeps them out, the same way it keeps untracked
+   *  paths out of `discardPaths`. */
+  async ignorePatterns(patterns: string[]): Promise<boolean> {
+    return this.write('append_gitignore', { patterns }, 'Ignore');
   }
 
   async stageAll(): Promise<boolean> {

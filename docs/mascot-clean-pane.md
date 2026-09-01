@@ -1,12 +1,19 @@
 # Corgit — the dog in a clean commit pane
 
-**Status: implemented.** Design note for the mascot in `src/lib/panes/CommitPane.svelte`,
-kept as the decision record for it — §2.1 and §8 are the reasoning behind what the code
-does *not* do, which the code cannot carry on its own. Option A in §4 is what was built.
+**Status: built, then removed.** Option A in §4 was built and shipped; it has since been
+taken out of `src/lib/panes/CommitPane.svelte` — the pane's rest state is now the two grey
+`Nothing staged` / `No changes` lines and nothing else. The note is kept as the decision
+record: §2.1 and §8 are the reasoning behind placements that were rejected even while this
+one existed, and they still hold. Everything from §2 onwards is written in the present
+tense of the implementation and should be read as a description of what *was* there.
+
+If it is ever wanted back, §4's shrink audit is the part to re-read: `.body` has gone back
+to `Pane.svelte`'s plain block box and the `flex-shrink: 0` guards went with it.
 
 Governing rules: [SPEC.md](SPEC.md) §14.1 (where the mascot may appear) and
-[mascot.md](mascot.md) §2 and §5. This change needs no amendment to either — it fills a
-placement both already permit.
+[mascot.md](mascot.md) §2 and §5. Neither needed amending to add this placement — both
+permit it rather than require it — and removing it needs none either, beyond dropping its
+row from mascot.md §5's wiring table.
 
 ---
 

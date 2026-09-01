@@ -6,6 +6,7 @@ mod diff;
 mod discovery;
 mod git;
 mod graph;
+mod ignore;
 mod inflight;
 mod menu;
 mod problems;
@@ -522,6 +523,39 @@ async fn unstage_paths(repo_id: String, paths: Vec<String>, app: AppHandle) -> R
 async fn discard_paths(repo_id: String, paths: Vec<String>, app: AppHandle) -> Result<(), String> {
     write_and_refresh(&app, repo_id, "Discard", |path| async move { commit::discard(&path, &paths).await })
         .await
+}
+
+/// Delete these untracked paths from the working tree (§5.2, §8.6) — the only
+/// thing Corgit does that git cannot undo *at all*, since an untracked file has
+/// never been in the index and so exists in no object git holds. Everything
+/// that makes that survivable is elsewhere: `commit::delete_untracked`'s flags
+/// and literal pathspecs, the frontend's untracked-only filter, and a
+/// confirmation modal listing every path.
+///
+/// Same shape as every other write regardless, which is the point of §7 rule 1
+/// — the most dangerous command in the app gets no bespoke handling.
+#[tauri::command]
+async fn delete_paths(repo_id: String, paths: Vec<String>, app: AppHandle) -> Result<(), String> {
+    write_and_refresh(&app, repo_id, "Delete", |path| async move {
+        commit::delete_untracked(&path, &paths).await
+    })
+    .await
+}
+
+/// Right-click ▸ Ignore on an untracked file row (§5.2). Goes through
+/// `write_and_refresh` like every other mutation despite spawning no git at
+/// all: it holds the repo's write lock, which is what keeps a `.gitignore`
+/// read-modify-write from racing a second window (§7 rule 1), and it publishes
+/// the repo's status afterwards, which is what makes the newly-ignored rows
+/// leave the pane and the `.gitignore` change appear in it.
+///
+/// `patterns`, not paths. The frontend derives both the menu label and the
+/// line from one function (`ignorePatterns.ts`) so the two cannot say
+/// different things, and gitignore's escaping rules belong next to the label
+/// that promises what they do.
+#[tauri::command]
+async fn append_gitignore(repo_id: String, patterns: Vec<String>, app: AppHandle) -> Result<(), String> {
+    write_and_refresh(&app, repo_id, "Ignore", |path| async move { ignore::append(&path, &patterns) }).await
 }
 
 #[tauri::command]
@@ -2170,6 +2204,8 @@ pub fn run() {
             stage_paths,
             unstage_paths,
             discard_paths,
+            delete_paths,
+            append_gitignore,
             stage_all,
             unstage_all,
             commit_repo,

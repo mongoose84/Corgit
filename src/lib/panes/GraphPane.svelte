@@ -8,7 +8,8 @@
   import ContextMenu from '../ContextMenu.svelte';
   import CreateBranchDialog from '../CreateBranchDialog.svelte';
   import DeleteBranchDialog from '../DeleteBranchDialog.svelte';
-  import { repos, isDirty } from '../repos.svelte';
+  import PullAfterSwitchDialog from '../PullAfterSwitchDialog.svelte';
+  import { repos, isDirty, canPull } from '../repos.svelte';
   import { graph, type RefBadge } from '../graph.svelte';
   import { isUnmergedBranchRefusal } from '../gitErrors';
   import { notices } from '../notices.svelte';
@@ -53,6 +54,12 @@
       // The open diff names a file in the repo we just left; it may not even
       // exist in this one (§5.4).
       diff.close();
+      // Same reasoning for the pull question: it is about a switch in the repo
+      // being left, and `repos.pull()` writes to whichever repo is selected
+      // *now*. The modal makes this all but unreachable by mouse — this is the
+      // guard, not the mechanism.
+      pendingPullCheck = null;
+      pullPrompt = null;
     }
   });
 
@@ -128,6 +135,26 @@
    *  from the same menu. */
   let switchingTo = $state<string | null>(null);
 
+  /** The repo a *successful* switch is still owed a behind-check for (§8.3),
+   *  `null` when there is none. Git Graph's gesture: a checkout is nearly
+   *  always the start of working on that branch, so if the branch you have
+   *  landed on is behind its upstream, ask right there rather than leaving the
+   *  ↓ badge to be noticed later.
+   *
+   *  Deliberately not the branch name the badge carried. Switching to a
+   *  remote-tracking badge checks out a *local* branch of a different name
+   *  (`origin/x` → `x`), and one whose local counterpart already existed can
+   *  land somewhere else again (`branch.rs`'s "already exists" fallback). The
+   *  only honest answer to "which branch am I now on and is it behind?" is the
+   *  status read the switch itself triggered, so this holds only the repo the
+   *  answer has to be about. */
+  let pendingPullCheck = $state<string | null>(null);
+
+  /** Non-null while that question is on screen. Snapshotted rather than read
+   *  live from status: a sweep or an FS watcher can land while the modal is
+   *  up, and the sentence must keep saying what the user was asked about. */
+  let pullPrompt = $state<{ branch: string; upstream: string; behind: number } | null>(null);
+
   /** Cleared here rather than in `switchTo` because the wait does not end when
    *  the command returns. `write_and_refresh` emits `status:repo` before it
    *  does, `graph.svelte.ts` reloads the page and refs off that event, and
@@ -145,7 +172,33 @@
   $effect(() => {
     const id = repos.selectedId;
     const stillWriting = busy || (id !== undefined && repos.isBusy(id));
-    if (switchingTo !== null && !stillWriting && !graph.loading) switchingTo = null;
+    const settled = !stillWriting && !graph.loading;
+    if (switchingTo !== null && settled) switchingTo = null;
+
+    // The behind-check rides the same moment, and for the same reason: the
+    // question is about the branch that is now checked out, and until the
+    // status this write emitted has landed, `repos.status` still describes the
+    // branch we left — which would ask about the wrong branch's counts, or
+    // stay silent about a behind one. Asking here rather than after the
+    // `await` in `switchTo` is the whole correctness argument.
+    if (pendingPullCheck !== null && settled) {
+      const target = pendingPullCheck;
+      // Consumed either way: the check is a one-shot per switch, and a repo
+      // that turns out to be up to date must not be re-examined by the next
+      // unrelated write to settle.
+      pendingPullCheck = null;
+      // Only if it is still the repo on screen: `repos.pull()` writes to
+      // whichever repo is selected, so a question raised about another one
+      // would offer the right sentence over the wrong write.
+      const after = id === target ? repos.status(target) : undefined;
+      // The two null checks are the detached-HEAD case, not belt and braces:
+      // git emits `# branch.ab` only where an upstream exists, so `behind > 0`
+      // cannot happen without one — but nothing in the *type* says so, and the
+      // dialog names both.
+      if (after !== undefined && after.branch !== null && after.upstream !== null && canPull(after)) {
+        pullPrompt = { branch: after.branch, upstream: after.upstream, behind: after.behind };
+      }
+    }
   });
 
   /** Narration for anything else the repo is doing — a merge from the same
@@ -211,11 +264,16 @@
     // Set before the await, not after it: this is the acknowledgement, and it
     // has to be on screen in the same frame as the double-click (§13).
     switchingTo = ref.name;
+    const repoId = repos.selectedId;
     const ok = await repos.switchBranch(ref.name, ref.kind);
     // The banner is already up (§13); this only tells it something git's
     // stderr does not carry — that the tree was dirty when the checkout was
     // refused, which is what makes *Open in VS Code* the right way out.
     if (!ok && dirty) notices.overrideAction('open-vscode');
+    // Only a switch that landed earns the question. A refused checkout leaves
+    // HEAD where it was, and asking to pull the branch the user was already on
+    // would read as if the switch had worked.
+    if (ok && repoId !== undefined) pendingPullCheck = repoId;
     busy = false;
     // `switchingTo` is left standing — the effect above takes it down once the
     // graph reload triggered by this write has landed.
@@ -235,6 +293,19 @@
     if (busy) return;
     busy = true;
     await repos.mergeBranch(ref.name);
+    busy = false;
+  }
+
+  /** *Pull* from the after-switch question (§8.3, §8.7). Plain `repos.pull()`
+   *  — the same command the row's Pull and the middle pane's run, so a pull
+   *  started here fails, retries and reports identically (§13). No action
+   *  override: `git pull` on a dirty tree already says so in words
+   *  `translateGitError` answers with *Open in VS Code*, and a conflict raises
+   *  the blocking banner from the status refresh instead. */
+  async function pullAfterSwitch(): Promise<void> {
+    if (busy) return;
+    busy = true;
+    await repos.pull();
     busy = false;
   }
 
@@ -511,6 +582,16 @@
     existingLocal={localBranchNames}
     onCreate={createBranch}
     onClose={() => (createFrom = null)}
+  />
+{/if}
+
+{#if pullPrompt}
+  <PullAfterSwitchDialog
+    branch={pullPrompt.branch}
+    upstream={pullPrompt.upstream}
+    behind={pullPrompt.behind}
+    onPull={pullAfterSwitch}
+    onClose={() => (pullPrompt = null)}
   />
 {/if}
 

@@ -2,9 +2,8 @@
   import Pane from './Pane.svelte';
   import FileRow from './FileRow.svelte';
   import EmptyState from '../EmptyState.svelte';
-  import Mascot from '../Mascot.svelte';
   import Glyph from '../Glyph.svelte';
-  import DiscardDialog from '../DiscardDialog.svelte';
+  import DiscardDialog, { type DestructiveMode } from '../DiscardDialog.svelte';
   import ContextMenu from '../ContextMenu.svelte';
   import { hasConflict, needsPublish, repos, type FileEntry } from '../repos.svelte';
   import { diff, sourceForRow } from '../diff.svelte';
@@ -14,10 +13,13 @@
     prune,
     selectOne,
     selectedRows,
+    step,
     toggle,
     type FileSection,
     type FileSelection,
   } from '../fileSelection';
+  import { exactPattern, ignoreCandidates } from '../ignorePatterns';
+  import { tick } from 'svelte';
 
   // Mode A (working tree) — SPEC.md §5.2. Commit details (Mode B) live in
   // their own panel (graph.svelte.ts + CommitInfoPanel.svelte) rather than
@@ -52,44 +54,32 @@
     return shown === total ? `${total}` : `${shown} of ${total}`;
   }
 
-  // The payoff state (SPEC.md §14.1, docs/mascot-clean-pane.md): a selected
-  // repo with genuinely nothing to commit. `content` is wired to the herd-wide
-  // version of this in the graph pane, which is unreachable while you are
-  // actually working — select a clean repo and it goes away.
+  // The two acts in the pane that destroy work (§5.2), both *Changes* only,
+  // both confirmed every time, and deliberately never merged into one entry —
+  // they are not two labels for one thing and the row's status letter decides
+  // which applies:
   //
-  // Judged from `files`, never from `isDirty(status)`. `status` comes from the
-  // sweep cache and the cache is never truth (§5.1) — it can be a sweep behind
-  // the rows this pane just drew, and a dog lying down over changes that are
-  // on screen is the one way this state can lie. This is the rare place where
-  // *not* reusing the shared predicate is the correct call.
+  // - **Discard**, on tracked rows: `git restore --worktree`, so a partly
+  //   staged file keeps its staged half. A staged row's Discard could only mean
+  //   "throw away the staged work as well", which is not what a button sitting
+  //   beside − reads as; unstage first and the row appears here, where
+  //   discarding it means one plain thing.
+  // - **Delete**, on untracked (`?`) rows: `git clean`. Git has nothing to
+  //   restore an untracked file *from*, so the only honest thing the pane can
+  //   offer is removing it — and the entry says "Delete" rather than "Discard"
+  //   for exactly that reason. It is the one act here git cannot undo at all.
   //
-  // Totals, not `staged.length`/`unstaged.length`: those lists are capped, and
-  // that is what `sectionLabel` above exists for.
-  const atRest = $derived(
-    !conflicted &&
-      !repos.loadingFiles &&
-      files !== null &&
-      files.stagedTotal === 0 &&
-      files.unstagedTotal === 0,
-  );
-
-  // Discard (§5.2) — the only thing in the pane that destroys work, so it is
-  // scoped as narrowly as it can honestly be and confirmed every time.
-  //
-  // *Changes* only, and only its tracked rows. A staged row's Discard could
-  // only mean "throw away the staged work as well", which is not what a button
-  // sitting beside − reads as; unstage first and the row appears here, where
-  // discarding it means one plain thing. Untracked files are excluded because
-  // git has nothing to restore them from: discarding one could only be `git
-  // clean` deleting it outright, and Corgit does not delete files.
+  // A selection spanning both gets both entries, each scoped to the rows it
+  // applies to, rather than one entry quietly doing two different irreversible
+  // things to different halves of the list.
   //
   // Still no tick column — that is what made *Changes* read as a form to be
   // filled in rather than a list of what changed. A batch is built by
   // ctrl/shift-clicking rows instead (§5.2), which costs the list nothing when
-  // nobody is using it, and reaches discard through the same dialog.
+  // nobody is using it, and reaches both through the same dialog.
   /** Non-null while the confirmation is up; the value is the exact list the
-   *  dialog is showing. */
-  let confirming = $state<FileEntry[] | null>(null);
+   *  dialog is showing, and the act it is about to perform on it. */
+  let confirming = $state<{ mode: DestructiveMode; entries: FileEntry[] } | null>(null);
 
   /** Ctrl/shift-click selection over one section's rows (§5.2). Lives here and
    *  not in `repos.svelte.ts`: it is about what is on screen, and the store
@@ -145,7 +135,86 @@
       return;
     }
     selection = selectOne(section, entry.path);
+    cancelPendingDiff();
     openDiff(section, entry);
+  }
+
+  /** The two `<ul>`s, so a step can put focus on the row it moved to. Either
+   *  can be undefined — an empty section draws a `<p>` instead of a list. */
+  let stagedList = $state<HTMLUListElement>();
+  let unstagedList = $state<HTMLUListElement>();
+
+  /** Trailing coalesce for a *held* arrow key. Each row's diff is a `git diff`
+   *  process, and on this platform the spawn alone costs more than the diff
+   *  (CLAUDE.md, §1) — holding ↓ through thirty files would queue thirty of
+   *  them through the global semaphore to show the user one. A deliberate press
+   *  is never delayed: `event.repeat` separates the two exactly, so this timer
+   *  only ever exists while the key is down. */
+  let pendingDiff: ReturnType<typeof setTimeout> | null = null;
+  /** Long enough to swallow Windows' default key-repeat interval (~50 ms) and
+   *  short enough to land the read as the key comes up. */
+  const HELD_ARROW_DIFF_MS = 80;
+
+  function cancelPendingDiff() {
+    if (pendingDiff !== null) clearTimeout(pendingDiff);
+    pendingDiff = null;
+  }
+
+  // A key held as the window closes, or as the pane is torn down by a repo with
+  // no files — the timer outlives the component otherwise.
+  $effect(() => cancelPendingDiff);
+
+  /** ↑/↓ walk the rows and bring each one's diff up as they go, so reviewing a
+   *  commit's worth of files is one key rather than a click per file (§5.2).
+   *
+   *  Bound to the lists rather than the window: the arrows belong to whatever
+   *  has focus, and the commit message textarea two elements up is a place
+   *  where they have to keep moving the caret. Clicking a row focuses its
+   *  button, so the ordinary path — click the first file, then arrow down —
+   *  arrives here by bubbling. */
+  async function onListKeydown(event: KeyboardEvent) {
+    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
+    // Modified arrows are left alone rather than claimed and ignored: shift-↓
+    // is a range in every file list that has one, and this pane does not have
+    // it yet. Taking the key now would make adding it later a regression.
+    if (event.shiftKey || event.ctrlKey || event.metaKey || event.altKey) return;
+
+    const target = step(
+      selection,
+      event.key === 'ArrowDown' ? 1 : -1,
+      files?.staged ?? [],
+      files?.unstaged ?? [],
+    );
+    // At either end. Unclaimed, so the pane scrolls the way it would have.
+    if (!target) return;
+    event.preventDefault();
+
+    selection = selectOne(target.section, target.row.path);
+    cancelPendingDiff();
+    if (event.repeat) {
+      const repoId = repos.selectedId;
+      pendingDiff = setTimeout(() => {
+        pendingDiff = null;
+        // The repo cannot change from the keyboard, but a click elsewhere
+        // during a held key can, and this diff would then be of a file in a
+        // repo nobody is looking at.
+        if (repos.selectedId === repoId) openDiff(target.section, target.row);
+      }, HELD_ARROW_DIFF_MS);
+    } else {
+      openDiff(target.section, target.row);
+    }
+
+    // Focus follows the highlight, which is also what scrolls the new row into
+    // view — doing it by hand would mean reimplementing "scroll the least
+    // possible" against `Pane`'s `.body`. After the flush, because the row may
+    // be in the other section's list and that list may have just been created.
+    await tick();
+    const list = target.section === 'staged' ? stagedList : unstagedList;
+    for (const row of list?.querySelectorAll<HTMLElement>('.file-row') ?? []) {
+      if (row.dataset.path !== target.row.path) continue;
+      row.querySelector<HTMLButtonElement>('button.open')?.focus();
+      break;
+    }
   }
 
   /** Right-click acts on the selection when the row is in it, and on that row
@@ -189,7 +258,20 @@
           tracked.length === entries.length
             ? `Discard changes to ${plural(tracked.length)}…`
             : `Discard changes to ${plural(tracked.length)} (skipping untracked)…`;
-        items.push({ label, onSelect: () => (confirming = tracked) });
+        items.push({ label, onSelect: () => (confirming = { mode: 'discard', entries: tracked }) });
+      }
+
+      // The other half of the same selection, and a separate entry rather than
+      // a broader Discard: this one removes the file from disk with nothing in
+      // git able to bring it back, so it must not share a word with the act
+      // above that git can undo. "(skipping tracked)" is never needed here —
+      // whatever it skipped, the Discard entry directly above is offering.
+      const untracked = entries.filter((entry) => entry.status === '?');
+      if (untracked.length > 0) {
+        items.push({
+          label: `Delete ${plural(untracked.length)}…`,
+          onSelect: () => (confirming = { mode: 'delete', entries: untracked }),
+        });
       }
     }
 
@@ -203,7 +285,51 @@
       });
     }
 
+    items.push(...ignoreItems(section, entries));
+
     return items;
+  }
+
+  /** The ignore entries (§5.2), on **untracked rows only**. A `.gitignore`
+   *  line for a tracked file does nothing whatsoever — git keeps tracking what
+   *  it already tracks — so the row would sit exactly where it was while the
+   *  entry that produced it reported success. That also rules the group out of
+   *  *Staged Changes* wholesale: a staged row is in the index by definition.
+   *
+   *  Behind a separator, because this is where the menu stops being about
+   *  these files and starts being about what git sees at all — the one entry
+   *  here that outlives the selection, the pane, and the session, since it
+   *  ends up committed and then applies to everyone on the repo.
+   *
+   *  The full file/extension/folder set is offered only for a selection that
+   *  *is* one row, not for one that merely has one untracked row left in it.
+   *  There is no honest single extension or folder for six files, and a rich
+   *  menu built from the survivor of a three-row selection would be describing
+   *  rows the user can see are picked and it is not acting on. */
+  function ignoreItems(section: FileSection, entries: FileEntry[]) {
+    if (section !== 'unstaged') return [];
+    const untracked = entries.filter((entry) => entry.status === '?');
+    if (untracked.length === 0) return [];
+
+    const items =
+      entries.length === 1
+        ? ignoreCandidates(untracked[0].path).map((candidate) => ({
+            label: `Ignore ${candidate.label}`,
+            onSelect: () => void ignore([candidate.pattern]),
+          }))
+        : [
+            {
+              // The same "say how many survive" rule Discard follows above,
+              // with the filter running the other way round.
+              label:
+                untracked.length === entries.length
+                  ? `Ignore ${plural(untracked.length)}`
+                  : `Ignore ${plural(untracked.length)} (skipping tracked)`,
+              onSelect: () => void ignore(untracked.map((entry) => exactPattern(entry.path))),
+            },
+          ];
+
+    return [{ separator: true as const }, ...items];
   }
 
   async function doCommit() {
@@ -291,6 +417,27 @@
     }
   }
 
+  /** Appends the lines the menu entry named. Unconfirmed, unlike discard: this
+   *  destroys nothing — the file stays on disk untouched, it only stops being
+   *  listed — and the `.gitignore` edit itself arrives in *Changes* as an
+   *  ordinary row the user can read, discard or commit. That row is the
+   *  confirmation, after the fact and reversible, which is the right shape for
+   *  an act this cheap.
+   *
+   *  Deliberately not staged afterwards. A write that both edits a file and
+   *  puts it in the index would be doing a second thing the menu entry never
+   *  said, and `+` is right there on the row it creates. */
+  async function ignore(patterns: string[]) {
+    if (patterns.length === 0) return;
+
+    busy = true;
+    try {
+      await repos.ignorePatterns(patterns);
+    } finally {
+      busy = false;
+    }
+  }
+
   /** Runs what the dialog confirmed. The row list refreshes itself off the
    *  write's status publish (§7), so nothing here has to be cleaned up on
    *  either outcome — a failed discard simply leaves the row where it was. */
@@ -305,9 +452,25 @@
       busy = false;
     }
   }
+
+  /** Runs the delete the dialog confirmed. `remove`, not `delete` — the latter
+   *  is a reserved word — and the same shape as `discard` above right down to
+   *  needing no cleanup on failure: the rows come back from the write's status
+   *  publish (§7), so a file that could not be removed simply stays listed. */
+  async function remove(entries: readonly FileEntry[]) {
+    const paths = entries.map((entry) => entry.path);
+    if (paths.length === 0) return;
+
+    busy = true;
+    try {
+      await repos.deletePaths(paths);
+    } finally {
+      busy = false;
+    }
+  }
 </script>
 
-<Pane title="Changes" class="commit-pane">
+<Pane title="Changes">
   {#snippet actions()}
     <!-- Icon-only and hover-revealed per feedback, rather than a full button
          row, since they act on the selected repo the same way the menu bar's
@@ -393,7 +556,8 @@
       {#if files.staged.length === 0}
         <p class="section-empty">Nothing staged</p>
       {:else}
-        <ul>
+        <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+        <ul bind:this={stagedList} onkeydown={onListKeydown}>
           {#each files.staged as entry (entry.path)}
             <li>
               <!-- The row's own − unstages that row and no other, even with
@@ -436,7 +600,8 @@
       {#if files.unstaged.length === 0}
         <p class="section-empty">No changes</p>
       {:else}
-        <ul>
+        <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+        <ul bind:this={unstagedList} onkeydown={onListKeydown}>
           {#each files.unstaged as entry (entry.path)}
             <li>
               <FileRow
@@ -448,27 +613,18 @@
                 onContextMenu={(event) => openMenu('unstaged', entry, event)}
                 selected={isSelected(selection, 'unstaged', entry.path)}
                 showingDiff={isOpen('unstaged', entry)}
-                onDiscard={entry.status === '?' ? undefined : () => (confirming = [entry])}
+                onDiscard={entry.status === '?'
+                  ? undefined
+                  : () => (confirming = { mode: 'discard', entries: [entry] })}
               />
             </li>
           {/each}
         </ul>
       {/if}
-
-      {#if atRest}
-        <!-- A sibling of both sections rather than nested in either: he
-             reports on the pair of them. The two grey lines above stay — they
-             carry the meaning, and the dog is `aria-hidden` decoration
-             (Mascot.svelte), so removing them would put semantic weight on an
-             image.
-
-             Not `EmptyState`: that is `height: 100%` and centres against the
-             whole pane, which would fight the sections above it. -->
-        <div class="rest">
-          <Mascot pose="content" height={75} />
-          <p>Nothing to commit</p>
-        </div>
-      {/if}
+      <!-- No rest-state artwork here: the clean-repo mascot (docs/mascot-clean-pane.md)
+           was removed from this pane deliberately. The two grey lines above are what
+           report the state — they always carried the meaning, and the dog was
+           `aria-hidden` decoration, so nothing legible went with it. -->
     {/if}
   {/if}
 </Pane>
@@ -483,88 +639,25 @@
 {/if}
 
 {#if confirming}
+  <!-- `confirming` is read once into a local so the confirm handler cannot see
+       a different value than the list on screen: the dialog stays up across the
+       await, and a second menu action landing in between would otherwise send
+       the write at rows the user never looked at. -->
+  {@const pending = confirming}
   <DiscardDialog
-    entries={confirming}
-    onDiscard={() => discard(confirming ?? [])}
+    mode={pending.mode}
+    entries={pending.entries}
+    onConfirm={() => (pending.mode === 'discard' ? discard(pending.entries) : remove(pending.entries))}
     onClose={() => (confirming = null)}
   />
 {/if}
 
 <style>
-  /* `Pane`'s `.body` is a plain block box, so nothing in this pane knows how
-     tall the pane is: a mascot appended after the sections would land directly
-     under "No changes" with a void beneath it, which reads as a rendering bug
-     rather than a rest state. A flex column gives `.rest` below something to
-     claim the leftover space with.
-
-     `.body` is `Pane`'s markup, hence the `class` prop and the `:global()` —
-     that prop exists for exactly this. */
-  :global(.commit-pane .body) {
-    display: flex;
-    flex-direction: column;
-  }
-
-  /* The cost of the rule above: every child of `.body` is now a flex item, and
-     flex items shrink by default. In a scrolling container that lets the file
-     lists compress below their content height instead of letting `.body`
-     scroll. Every stacking child needs this, and missing one only shows up on
-     a repo with enough files to overflow — not the repo you test on.
-
-     `.rest` is deliberately absent: it is the one thing here that *should*
-     flex. `EmptyState` is too — it is never a sibling, only ever the sole
-     child of its own branch. */
-  .compose,
-  .section,
-  .section-empty,
-  ul {
-    flex-shrink: 0;
-  }
-
-  /* Claims whatever is left below the two sections and sits him at the foot of
-     it — `flex-end`, not `center`. Centring floated him in the middle of the
-     void on a tall window, which reads as "placed nowhere"; resting on the
-     floor of the pane is a position with a reason, and it holds still as the
-     file lists above grow.
-     No `min-height: 0`: on a short window he should push `.body` into a
-     scroll rather than be squashed. */
-  .rest {
-    display: flex;
-    flex: 1 1 auto;
-    flex-direction: column;
-    align-items: center;
-    justify-content: flex-end;
-    gap: var(--space-2);
-    /* Bottom padding is much smaller than the top: the artwork is drawn with
-       its own floor shadow, so a generous gap under it reads as him hovering
-       rather than as breathing room. `--space-1` is close to the floor of what
-       is available — the caption sits below the dog, so this is clearance for
-       a line of text, and taking it to zero would crowd its descenders against
-       the pane edge. If he needs to sit lower still, the gap to spend is the
-       `gap` above, not this. */
-    padding: var(--space-4) var(--space-3) var(--space-1);
-  }
-
-  /* `content` is the widest, shortest pose (1.57:1), so 75px tall is 118px
-     wide against a 240px `MIN_MIDDLE` (App.svelte) — the guard below is now
-     slack at every width the pane can reach, but it stays: it costs nothing
-     and the size is the kind of number that gets revisited.
-     `Mascot.svelte` sets a height with `width: auto` and cannot answer a
-     narrow pane on its own, so the guard lives here rather than there —
-     keeping it out is what keeps its height-only API, and with it the poses
-     looking like one set. */
-  .rest :global(img) {
-    max-width: 100%;
-    height: auto;
-  }
-
-  /* Muted rather than `--text-disabled`: it is the caption to the artwork, not
-     a third grey line like "No changes" above it. Same size, so it does not
-     compete with the pane's own section headings either. */
-  .rest p {
-    margin: 0;
-    font-size: var(--text-sm);
-    color: var(--text-muted);
-  }
+  /* `Pane`'s `.body` is left as the plain block box it ships as. It was a flex
+     column while the rest-state mascot lived here — that was the only thing in
+     the pane that needed to know how tall the pane is — and with it gone the
+     `flex-shrink: 0` guard every sibling needed goes too. Normal flow already
+     lets `.body` scroll, which is what that guard was protecting. */
 
   .compose {
     display: flex;

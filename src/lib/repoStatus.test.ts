@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest';
 
-import { hasConflict, isDirty, needsPublish, type RepoStatus } from './repos.svelte';
+import { canPull, hasConflict, isDirty, needsPublish, type RepoStatus } from './repos.svelte';
 
 function status(overrides: Partial<RepoStatus> = {}): RepoStatus {
   return {
@@ -117,5 +117,40 @@ describe('hasConflict (§13)', () => {
     // refuses to leave, so it must not raise a banner that cannot be
     // dismissed or block the two buttons.
     expect(hasConflict(status({ unstaged: 4, changedFiles: 4 }))).toBe(false);
+  });
+});
+
+describe('canPull (§5.1, §8.3)', () => {
+  /**
+   * One predicate behind two affordances: the row's hover-revealed Pull, and
+   * the question the graph asks after a switch lands on a behind branch. They
+   * are the same claim — "there is something to pull here" — and a row that
+   * offers it where the prompt stays silent is the disagreement this exists to
+   * make impossible.
+   */
+  test('a repo in sync has nothing to pull', () => {
+    expect(canPull(status())).toBe(false);
+  });
+
+  test('a behind repo can pull', () => {
+    expect(canPull(status({ behind: 3 }))).toBe(true);
+  });
+
+  test('ahead alone is a push, not a pull', () => {
+    expect(canPull(status({ ahead: 2 }))).toBe(false);
+  });
+
+  /** `git pull` refuses to start on an unresolved merge, so offering it there
+   *  is a button that can only fail — and the conflict banner (§13) is already
+   *  saying what to do instead. */
+  test('a conflicted repo cannot pull however far behind it is', () => {
+    expect(canPull(status({ behind: 5, conflicted: 2, changedFiles: 2 }))).toBe(false);
+  });
+
+  /** Dirty but unconflicted stays offered: git pulls fine when the incoming
+   *  commits do not touch the edited files, and when they do it fails in words
+   *  §13 already translates. Corgit does not guess in advance. */
+  test('an ordinarily dirty repo may still pull', () => {
+    expect(canPull(status({ behind: 1, unstaged: 3, changedFiles: 3 }))).toBe(true);
   });
 });
