@@ -11,6 +11,9 @@ import { buildMenus, recentLabel, type MenuItem, type MenuState } from './menuMo
 const BASE: MenuState = {
   recentRoots: [],
   repoSelected: false,
+  rootOpen: true,
+  behindCount: 0,
+  bulkRunning: false,
   publishing: false,
   repoListVisible: true,
   commitPaneVisible: true,
@@ -39,22 +42,71 @@ describe('menu bar', () => {
 });
 
 describe('Repository', () => {
+  const SELECTED_SCOPE = ['fetch', 'pull', 'push'];
+  const ROOT_SCOPE = ['fetch-all', 'pull-all', 'rescan'];
+
+  function enabled(state: Partial<MenuState>, ids: string[]): boolean[] {
+    return ids.map((id) => item(state, 'repository', id).enabled);
+  }
+
   // §4.1: "Disabled when no repo is selected". These three act on the
   // selection and have nothing to act on without one.
-  it('disables all three items with no repo selected', () => {
-    expect(items({ repoSelected: false }, 'repository').map((entry) => entry.enabled)).toEqual([
+  it('disables the selected-repo group with no repo selected', () => {
+    expect(enabled({ repoSelected: false }, SELECTED_SCOPE)).toEqual([false, false, false]);
+  });
+
+  it('enables the selected-repo group once a repo is selected', () => {
+    expect(enabled({ repoSelected: true }, SELECTED_SCOPE)).toEqual([true, true, true]);
+  });
+
+  /*
+   * The two scopes are independent, and this is the pair of cases that says
+   * so. A selection is not what makes Fetch All possible, and the absence of
+   * one must not disable a group that acts on all 77 repositories — that was
+   * the exact bug the separator exists to make visible.
+   */
+  it('leaves the root group enabled with no repo selected', () => {
+    expect(enabled({ repoSelected: false, behindCount: 3 }, ROOT_SCOPE)).toEqual([true, true, true]);
+  });
+
+  it('disables the root group with no folder open', () => {
+    expect(enabled({ rootOpen: false, repoSelected: true, behindCount: 3 }, ROOT_SCOPE)).toEqual([
       false,
       false,
       false,
     ]);
   });
 
-  it('enables all three once a repo is selected', () => {
-    expect(items({ repoSelected: true }, 'repository').map((entry) => entry.enabled)).toEqual([
-      true,
-      true,
-      true,
-    ]);
+  it('separates the two scopes, so position alone never has to carry it', () => {
+    const entries = menu({}, 'repository').entries;
+    const separator = entries.findIndex((entry) => entry.kind === 'separator');
+    expect(separator).toBeGreaterThan(0);
+    const after = entries.slice(separator + 1).filter((entry): entry is MenuItem => entry.kind === 'item');
+    expect(after.map((entry) => entry.id)).toEqual(SELECTED_SCOPE);
+  });
+
+  // §5.1: the strip prints this number and the menu is a second route to the
+  // same button. Naming a different set in the label is how a user ends up
+  // pressing one count and getting another amount of work.
+  it('carries the behind count in Pull All Behind', () => {
+    expect(item({ behindCount: 7 }, 'repository', 'pull-all').label).toBe('Pull All Behind (7)');
+  });
+
+  it('drops the count and disables Pull All Behind when nothing is behind', () => {
+    const entry = item({ behindCount: 0 }, 'repository', 'pull-all');
+    expect(entry.label).toBe('Pull All Behind');
+    expect(entry.enabled).toBe(false);
+  });
+
+  // The strip replaces itself with a progress line while a run is in flight;
+  // the menu has no such state to show, so it goes unavailable instead. Both
+  // routes to the same button, unavailable for the same reason.
+  it('disables the root group while a bulk run is in flight', () => {
+    expect(enabled({ behindCount: 3, bulkRunning: true }, ROOT_SCOPE)).toEqual([false, false, false]);
+  });
+
+  it('leaves the selected-repo group alone during a bulk run', () => {
+    expect(enabled({ repoSelected: true, bulkRunning: true }, SELECTED_SCOPE)).toEqual([true, true, true]);
   });
 
   // §8.7: the menu is a second route to the button in CommitPane, and the two

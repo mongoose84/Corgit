@@ -67,6 +67,20 @@ pub fn needs_publish(branch: &str, upstream: Option<&str>) -> bool {
     }
 }
 
+/// A repo Pull can actually act on: behind its upstream, and not mid-conflict
+/// — `git pull` refuses to start on an unresolved merge, so a pull queued
+/// there is a command that can only fail.
+///
+/// **This duplicates `canPull` in `repos.svelte.ts` for the same reason
+/// `needs_publish` duplicates `needsPublish`**, and it matters more here than
+/// it looks. The strip prints a count and the button pulls a set (§5.1), and
+/// the count *is* the consent — if the two predicates disagree, the user
+/// presses "7 behind" and gets a run over eight repos, one of which was always
+/// going to fail. Change one and change the other.
+pub fn can_pull(status: &RepoStatus) -> bool {
+    status.behind > 0 && status.conflicted == 0
+}
+
 /// `origin/feature/x` → `feature/x`. Only the first segment is the remote, so
 /// a branch whose own name contains a `/` survives — the same rule, and the
 /// same assumption about remote names, as `branch.rs`'s `local_name`.
@@ -321,6 +335,32 @@ mod tests {
     #[test]
     fn no_upstream_needs_publishing() {
         assert!(needs_publish("enhance-quality", None));
+    }
+
+    /*
+     * `can_pull`'s cases, mirroring `repoStatus.test.ts` the same way. This
+     * pair carries more weight than the `needs_publish` pair above: the strip
+     * prints a count from the frontend predicate and `pull_all_behind` picks a
+     * set from this one (§5.1), so a disagreement is a user pressing one
+     * number and getting a different amount of work.
+     */
+
+    #[test]
+    fn behind_and_clean_can_pull() {
+        assert!(can_pull(&RepoStatus { behind: 3, ..Default::default() }));
+    }
+
+    #[test]
+    fn up_to_date_cannot_pull() {
+        assert!(!can_pull(&RepoStatus::default()));
+    }
+
+    #[test]
+    fn behind_but_conflicted_cannot_pull() {
+        // `git pull` refuses to start on an unresolved merge, so including
+        // this repo in a bulk run would queue a command that can only fail —
+        // and then report it as a failure the user could have been spared.
+        assert!(!can_pull(&RepoStatus { behind: 3, conflicted: 1, ..Default::default() }));
     }
 
     #[test]

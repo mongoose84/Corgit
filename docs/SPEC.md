@@ -172,8 +172,20 @@ close. The window is `decorations: false`.
 | --- | --- |
 | **File** | Open Folder… `Ctrl+O` · Open Recent ▸ · Close Window `Ctrl+W` · Exit |
 | **View** | Toggle Repo List · Toggle Commit Pane · Reset Pane Sizes · Reload |
-| **Repository** | Fetch · Pull · Push — acting on the selected repo, mirroring the buttons for discoverability. Disabled when no repo is selected. Push reads *Publish Branch* on a branch with no upstream, matching §8.7's button. |
+| **Repository** | *Root scope:* Fetch All · Pull All Behind · Rescan Folder — then a separator — *selected repo:* Fetch · Pull · Push. See below. |
 | **Help** | About · Check for Updates · Recent Problems… · Open Log Folder · Reset Dismissed Warnings |
+
+**Repository carries two scopes, and the separator is what says so.** The lower group acts on
+the selected repo, mirroring *Changes*' two icons and its Push button for discoverability;
+disabled when no repo is selected, and Push reads *Publish Branch* on a branch with no upstream
+(§8.7). The upper group acts on the whole root, mirroring the repo list's header and strip
+(§5.1) — the same rule, applied to a pane whose subject happens to be all 77 repositories.
+
+*Pull All Behind* names its scope in the label rather than relying on the menu's position: it
+pulls the repos that are behind, not all 77, and carries the count the strip shows. *Rescan
+Folder* is the `⟳` that left the repo list's header, and it sits with the root group rather than
+under **File** because the group is now "acts on every repository" and rediscovery is exactly
+that — even though it is the one item here that runs no git at all.
 
 #### This reverses an earlier decision, and the earlier reasoning was not wrong
 
@@ -254,9 +266,84 @@ Two sections, each alphabetical:
   Right-click → Pin/Unpin stays as a second route.
 - **All** — everything else.
 
+**Root actions.** The pane header acts on the pane's subject, which here is the whole root —
+the same rule that puts the selected repo's Fetch and Pull in *Changes* (§5.2) and nowhere
+else. Two controls, and the split between them is by weight:
+
+- **Fetch all** is a hover-revealed icon in the header, beside the sweep-timing readout.
+  Fetch is safe, silent and idempotent, so it earns an icon and nothing more. It is the only
+  icon in this header — see *Rescan Folder* below for why.
+- **Pull all** is a strip **between the header and the filter box**, always reserved. Actions
+  on top, list manipulation below: everything under the filter is what the filter scopes, and
+  the strip is visibly outside it.
+
+The strip is **reserved, never inserted**, and this is the whole reason it is not conditional.
+An appearing strip would be inserted by the fetch sweep — on its own, unprompted — putting a
+button that writes to every behind working tree exactly where a repo row was a moment ago.
+Reserving it removes that at the source: nothing moves, so nothing can be mis-clicked, and no
+pointer-deferral rule is needed to make it safe. It is the same instinct as *the list never
+reorders itself* below.
+
+Its two states, and neither is dead chrome:
+
+| | Left | Right |
+| --- | --- | --- |
+| Something behind | `↓ 7 behind` | **Pull all**, accented |
+| Nothing behind | `All 77 in sync` | *Pull all*, disabled |
+
+**While a run is going** the strip becomes `Pulling… 4 of 10` and a **Stop**, and grows a
+**2px progress bar along its bottom edge** — over the 1px border it already draws, so the
+running state costs one pixel of height rather than a second row. Two segments, not a track
+and a fill: solid accent for repos that have **landed**, a dimmer `--accent-muted` segment
+ahead of it for the ones with a git process **running right now**.
+
+The dim segment is the point. A plain `done / total` bar sits at zero for the first several
+seconds of every run — four pulls are in flight and none has finished — which reads as a
+hang in the one moment the app is most obviously working. Showing what has started as well
+as what has finished says "work is happening" without claiming work is done, and the gap
+between the two segments is §7 rule 4's concurrency cap, made visible for nothing.
+
+Not an inline track beside the text, and not a fill of the strip's own background. The first
+takes 60–80px from a strip whose worst case is 190px wide, and the first thing it squeezes is
+the *Stop* — the one control there for when something has gone wrong. The second needs a tint
+dark enough to sit under text, which is `--accent-muted`, which is the selected-row colour
+(§11): a band filling with the selection colour directly above a list of selectable rows
+reads as a selection misbehaving.
+
+The disabled state needs no new styling: `button.primary:not(:disabled)` is what carries the
+accent (§5.2), so a disabled Pull all goes neutral by itself and the accent stays reserved for
+when there is something to do. The greyed line is a **root status readout** — "is the whole
+herd in sync?" is the question this app exists to answer, and answering it costs nothing extra
+once the row is reserved.
+
+**The strip ignores the filter.** The count is always the whole root, and *Pull all* always
+pulls every behind repo, whatever the box is showing. This deliberately does **not** follow
+*Unpin all* above, and the difference is disclosure rather than principle: *Unpin all* would
+silently unpin repos the user cannot see, whereas the strip prints its number before it is
+pressed. **The count is the consent.** It also keeps one stable answer to the sync question
+instead of one that changes as you type.
+
+It costs **34px permanently** — one repo row, in the pane whose whole job is fitting rows on
+screen (§14.1). Spent on purpose: the row carries live root state in both of its states, which
+is the bar §14.1 actually sets. If it is ever reclaimed, the fallback is the filter row, which
+costs no vertical pixels and squeezes the filter box instead.
+
+**Rescan Folder leaves the header** for `Repository ▸` (§4.1). Two circular arrows side by side
+— `↻` fetch and `⟳` refresh — cannot be told apart, and only one of them belongs in a header
+now. `⟳`'s unique job is *discovery*: finding a repo cloned or deleted since the folder was
+opened. Its other half, re-reading status, is already covered by the watchers, the focus-gain
+sweep and the every-fifth-tick full pass (§6), which makes a manual status refresh a button for
+a case that mostly no longer exists. Discovery is rare enough for a menu.
+
 A **filter box** sits between them. Typing filters both sections by substring on **repo name
 only** — not branch, not path. This is the primary navigation tool for 77 repos; it is not
 optional.
+
+A **comma-separated value matches any of its terms**: `billing-worker, identity` shows both
+rows. Still name-substring only — the rule above is unchanged, only made plural — and this
+is what lets §13's bulk-run banner hand the user its failures by writing them into a box
+they already understand (see *Root actions* above). It is independently the cheapest way to
+put two projects side by side.
 
 **The selected row is scrolled back into view whenever it moves.** Pinning and unpinning
 move a repo between the two sections, and over 77 rows the new position is usually outside
@@ -304,8 +391,14 @@ for a one-click operation undercuts it. Constraints that follow:
   banner — §13; the badge points at the error rather than rendering a second copy of it),
   and the merge-conflict state must be renderable **on a row**, not only in the middle pane.
 
-No row-level fetch — fetch is automatic (§6). No row-level commit or push in v1; those need
-a message or a diff review, which means the middle pane.
+No fetch *button* on the row — fetch is automatic (§6), and a second hover control beside
+Pull would undo the restraint above. It is on the row's **context menu**, and has to be: the
+fetch sweep skips a repo once its fetch fails on auth (§8.7), so a manual fetch is the only
+thing that clears an auth-needed badge, and the entry reads *Fetch now* on such a row because
+retrying the fetch and making the badge go away are the same act (§13).
+
+No row-level commit or push in v1; those need a message or a diff review, which means the
+middle pane.
 
 Rows are compact (single line). The list **never reorders itself** — no dirty-float, no MRU
 shuffle. Position stability matters more than sorting cleverness for a mouse-first UI.
@@ -867,7 +960,14 @@ window too.
    held. Never parse a repo mid-mutation.
 3. **Global semaphore of 8 in-flight git processes.** Without it the sweep spawns 77
    `git.exe` at once and Defender melts the machine.
-4. Never touch `index.lock` directly. If git reports a lock error, surface it — the user is
+4. **A bulk run takes at most 4 of those 8.** *Pull All Behind* and *Fetch All* (§5.1) are one
+   click that queues dozens of writes; uncapped they hold every slot and the app stops
+   answering — the status sweep, the graph, whatever the user clicks next, all behind a run
+   they cannot see the end of. Leaving half the global budget free is what keeps the window
+   usable while the herd comes down. The number is not new: the fetch sweep already runs at 4
+   (§6) for the same reason, and a pull is that work with a merge on the end, holding its slot
+   longer. Headroom rather than a priority queue — the simplest thing that keeps the promise.
+5. Never touch `index.lock` directly. If git reports a lock error, surface it — the user is
    probably in a terminal in the same repo.
 
 ---

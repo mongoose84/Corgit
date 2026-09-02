@@ -73,7 +73,10 @@ changed the index. New write commands go through it; they do not hand-roll the s
    a repo mid-mutation.
 3. A global semaphore of 8 in-flight git processes, static in `git.rs` rather than in app
    state, because the cap must hold across every window.
-4. Never touch `index.lock`. Surface the error — the user is probably in a terminal.
+4. A bulk run (Fetch All, Pull All Behind) takes at most 4 of those 8, so the sweep and
+   whatever the user clicks next are never stuck behind a run they cannot see the end of.
+   Headroom, not a priority queue — the fetch sweep already picked 4 for the same reason.
+5. Never touch `index.lock`. Surface the error — the user is probably in a terminal.
 
 **Two git binaries, deliberately (§3).** Git for Windows ships a launcher at
 `<install>\cmd\git.exe` that only execs the real binary; that hop costs ~75 ms, more than
