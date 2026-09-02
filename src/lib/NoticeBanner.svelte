@@ -29,6 +29,10 @@
      *  repeat the headline — an untranslated failure is already raw. */
     details?: string;
     action?: GitErrorAction;
+    /** A bulk run's failures, as *Show the N* (§5.1). Present only on a run
+     *  summary, where the banner is about several repos at once and the way to
+     *  them is the filter box rather than a selection. */
+    showRepos?: { count: number; onShow: () => void };
     /** Drawn only when the notice matched a rule; `null` ids cannot be
      *  suppressed and so must not appear suppressible (§13). */
     canSuppress?: boolean;
@@ -47,6 +51,7 @@
     repoName,
     details,
     action,
+    showRepos,
     canSuppress = false,
     onPull,
     onOpenVSCode,
@@ -101,6 +106,15 @@
       {/if}
       {#if (action === 'open-vscode' || blocking) && onOpenVSCode}
         <button type="button" onclick={onOpenVSCode}>Open in VS Code</button>
+      {/if}
+
+      <!-- Ahead of *Details* because it is the way forward rather than the way
+           deeper in: the run named its failures in the headline, and this puts
+           those rows in front of the user. -->
+      {#if showRepos}
+        <button type="button" class="primary" onclick={showRepos.onShow}>
+          Show the {showRepos.count}
+        </button>
       {/if}
 
       {#if details}

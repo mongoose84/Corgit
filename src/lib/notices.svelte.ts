@@ -48,6 +48,12 @@ export interface RaisedNotice {
    *  §13's own instruction, but the pane knows the tree was dirty at the
    *  moment it failed and can therefore still offer *Open in VS Code*. */
   forceAction?: GitErrorAction;
+  /** A bulk run's failed repo names, as the filter box would take them (§5.1).
+   *  Present only on a run summary, and what makes the banner offer *Show the
+   *  N* — carried as data rather than as a callback so the notice stays a
+   *  plain description of what happened, with the acting left to the chrome
+   *  that renders it. */
+  repoFilter?: string;
 }
 
 class NoticeStore {
@@ -85,6 +91,34 @@ class NoticeStore {
     if (translated.id !== null && settings.isSuppressed(translated.id)) return;
 
     this.raised = { repoId, operation, translated, retry };
+  }
+
+  /**
+   * A bulk run's summary (§5.1's *Pull all*). One banner for the run, not one
+   * per failed repo — §13's rule is that the banner holds the newest failure,
+   * and a run that fails in three repos would otherwise show the third and
+   * silently drop the other two.
+   *
+   * Deliberately **not** routed through `translateGitError`. Every other
+   * caller hands this store git's stderr and wants a headline picked out of
+   * it; this one has already written the sentence, and passing Corgit's own
+   * prose through rules aimed at git's would let a rule matching, say,
+   * "conflict" rewrite a summary that merely mentions one. `raw` carries the
+   * per-repo stderr for the *Details* disclosure, so nothing is truncated at
+   * the boundary — and each failed repo still has its own `!` badge and its
+   * own Problems record, which is where §13 actually keeps them.
+   *
+   * `id: null` because there is nothing here to suppress: "don't show this
+   * again" applies to a recurring condition, and this is a report on one run
+   * the user started.
+   */
+  raiseRunSummary(operation: string, message: string, raw: string, repoFilter: string): void {
+    this.raised = {
+      repoId: null,
+      operation,
+      translated: { id: null, message, action: null, tier: 'error', raw },
+      repoFilter,
+    };
   }
 
   dismiss(): void {

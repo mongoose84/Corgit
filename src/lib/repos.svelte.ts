@@ -4,6 +4,7 @@ import { listen } from '@tauri-apps/api/event';
 import { settings } from './settings.svelte';
 import { inTauri } from './tauri';
 import { notices } from './notices.svelte';
+import { filterForNames } from './repoFilter';
 
 /**
  * Repo state (SPEC.md §9.3).
@@ -190,6 +191,36 @@ export function needsPublish(status: RepoStatus): boolean {
   return publishReason(status) !== null;
 }
 
+/** A bulk run's result (§5.1). `succeeded + skipped + failed.length` always
+ *  equals `total` — the banner does arithmetic in front of the user, so the
+ *  three buckets have to add up. */
+interface BulkOutcome {
+  operation: string;
+  total: number;
+  succeeded: number;
+  /** Repos *Stop* reached before they started. Not failures: nothing ran. */
+  skipped: number;
+  failed: { repoId: string; name: string; message: string }[];
+}
+
+/** The strip's progress, one per completed repo (§5.1). */
+interface BulkProgressEvent {
+  operation: string;
+  done: number;
+  total: number;
+}
+
+/** "a", "a and b", "a, b and c" — then a count, because a banner is one line
+ *  above a list whose rows are the point (§14.1) and eleven repo names is a
+ *  paragraph. The names that fit are worth more than the ones that don't: the
+ *  full set is in the filter box behind *Show the N*, and every one of them
+ *  has its own row badge. */
+function listNames(names: string[]): string {
+  if (names.length <= 2) return names.join(' and ');
+  if (names.length === 3) return `${names[0]}, ${names[1]} and ${names[2]}`;
+  return `${names[0]}, ${names[1]} and ${names.length - 2} others`;
+}
+
 /** A repo Pull can actually act on (§5.1, §8.7): behind its upstream, and not
  *  mid-conflict — `git pull` refuses to start on an unresolved merge, so a
  *  Pull offered there is a button that can only fail.
@@ -279,6 +310,16 @@ class RepoStore {
   /** Set when opening a folder failed, e.g. a disconnected drive (§9.1). */
   openError = $state<string | null>(null);
   ready = $state(false);
+
+  /** A bulk run in flight (§5.1) — what the strip reads while it counts up.
+   *  `null` when nothing is running, which is also what puts the strip back
+   *  into its resting state. */
+  bulk = $state<{ operation: string; done: number; total: number } | null>(null);
+  /** *Stop* has been pressed and the run is winding down. Kept apart from
+   *  `bulk` because the strip must keep counting: the repos already in flight
+   *  still land, and pretending otherwise would be the dishonesty the Stop
+   *  wording exists to avoid. */
+  bulkStopping = $state(false);
 
   /**
    * Selection is a set with a v1 invariant of at most one member (§9.4). It
@@ -473,6 +514,124 @@ class RepoStore {
 
   async pull(): Promise<boolean> {
     return this.write('pull_repo', {}, 'Pull');
+  }
+
+  /**
+   * How many repos the strip's *Pull all* would act on (§5.1).
+   *
+   * Through `canPull`, which is the whole point: `pull_all_behind` picks its
+   * targets with `status::can_pull` on the Rust side, and the count the user
+   * presses has to be the amount of work that happens. A repo that is behind
+   * *and* conflicted is in neither — `git pull` refuses to start there, so
+   * counting it would promise a pull that could only fail.
+   *
+   * Blind to the filter box, deliberately (§5.1): the strip is a root-level
+   * readout sitting above the filter, not a control the filter scopes.
+   */
+  get behindCount(): number {
+    return this.repos.filter((repo) => {
+      const status = this.statuses[repo.id];
+      return status !== undefined && canPull(status);
+    }).length;
+  }
+
+  /** Every repo with a remote, fetched at [`BULK_CONCURRENCY`] at a time
+   *  (§5.1's *Fetch all*). Non-interactive on the backend — see `BulkOp` for
+   *  why seventy-seven credential prompts is not a fetch. */
+  async fetchAll(): Promise<void> {
+    await this.runBulk('fetch_all');
+  }
+
+  /** §5.1's *Pull all*. */
+  async pullAllBehind(): Promise<void> {
+    await this.runBulk('pull_all_behind');
+  }
+
+  /**
+   * Shared by both bulk commands. The `bulk` field is cleared in a `finally`
+   * rather than on the result, because the strip is the only thing telling the
+   * user a run is happening — an error thrown out of `invoke` would otherwise
+   * leave "Pulling… 4 of 7" on screen for the rest of the session.
+   */
+  private async runBulk(command: 'fetch_all' | 'pull_all_behind'): Promise<void> {
+    if (!inTauri || this.bulk !== null) return;
+    this.bulkStopping = false;
+    // Set before the first progress event rather than waiting for it: the
+    // click has to acknowledge itself immediately (§13), and the backend's
+    // 0-of-n event has an IPC round trip in front of it.
+    this.bulk = { operation: command === 'fetch_all' ? 'Fetch' : 'Pull', done: 0, total: 0 };
+
+    try {
+      const outcome = await invoke<BulkOutcome>(command);
+      this.reportBulk(outcome);
+    } catch (err) {
+      notices.raise(null, this.bulk?.operation ?? 'Fetch', String(err));
+    } finally {
+      this.bulk = null;
+      this.bulkStopping = false;
+    }
+  }
+
+  /** §5.1's *Stop*: stops the run starting anything further. The repos already
+   *  in flight finish — a `git pull` cannot be abandoned mid-merge without
+   *  leaving a tree to repair by hand — so this changes the label rather than
+   *  the count. */
+  stopBulk(): void {
+    if (this.bulk === null) return;
+    this.bulkStopping = true;
+    if (inTauri) void invoke('stop_bulk');
+  }
+
+  /**
+   * The run's one banner (§13). Silence on a clean run is deliberate: the
+   * badges are gone and the strip has fallen back to its resting line, which
+   * *is* the report — a success toast here would be chrome congratulating
+   * itself over the rows it is covering (§14.1).
+   */
+  private reportBulk(outcome: BulkOutcome): void {
+    if (outcome.failed.length === 0) return;
+
+    const names = outcome.failed.map((failure) => failure.name);
+    const verb = outcome.operation === 'Fetch' ? 'fetched' : 'pulled';
+    // "5 of 7 pulled" counts what succeeded against what was *attempted*, not
+    // against the total: after a Stop those are different numbers, and
+    // measuring against the total would report the repos the user chose to
+    // skip as though they had gone wrong.
+    const attempted = outcome.total - outcome.skipped;
+    const headline = `${outcome.succeeded} of ${attempted} ${verb}`;
+    const stopped = outcome.skipped > 0 ? `, ${outcome.skipped} not started` : '';
+
+    notices.raiseRunSummary(
+      outcome.operation,
+      `${headline}${stopped} — ${listNames(names)} failed`,
+      // Every failure's raw stderr, kept whole and labelled by repo: §13 does
+      // not truncate stderr at the boundary, and with several repos in one
+      // notice the name is the only thing that says which text is whose.
+      outcome.failed.map((failure) => `${failure.name}:\n${failure.message}`).join('\n\n'),
+      // The way in to the failures, and the reason the filter box learned to
+      // match a list (§5.1). Offered as a button rather than applied on the
+      // user's behalf: a run that failed must not also silently rearrange the
+      // list they were looking at. Writing the names into the box they already
+      // know means the way back is the one they already know too — clear it.
+      filterForNames(names),
+    );
+  }
+
+  /** Set when a bulk banner's *Show the N* is pressed, and consumed by
+   *  `RepoList` (§5.1). A one-shot signal rather than shared state: the list
+   *  owns the box's value, and a store that wrote it directly would fight the
+   *  user's next keystroke. */
+  filterRequest = $state<string | null>(null);
+
+  /** Puts a bulk run's failures in the filter box. */
+  requestFilter(value: string): void {
+    this.filterRequest = value;
+  }
+
+  /** Consumed by `RepoList` once applied, so re-selecting a repo or a later
+   *  sweep cannot re-apply a filter the user has since cleared. */
+  clearFilterRequest(): void {
+    this.filterRequest = null;
   }
 
   /** `git push`, or "Publish branch" (`push -u origin <branch>`) when the
@@ -704,6 +863,14 @@ class RepoStore {
       await listen<SweepEvent>('status:sweep', (event) => this.applySweep(event.payload));
       await listen<RepoStatusEvent>('status:repo', (event) => this.applyRepoStatus(event.payload));
       await listen<FetchSweepEvent>('fetch:sweep', (event) => this.applyFetchSweep(event.payload));
+      await listen<BulkProgressEvent>('bulk:progress', (event) => {
+        // Guarded on `bulk` still being set: the run's own `finally` clears it
+        // the moment `invoke` resolves, and a last progress event arriving
+        // behind that would otherwise put the strip back into a run that has
+        // already reported.
+        if (this.bulk === null) return;
+        this.bulk = event.payload;
+      });
       await listen<WriteBeginEvent>('write:begin', (event) => {
         const { repoId, operation } = event.payload;
         this.busyWrites = { ...this.busyWrites, [repoId]: operation };

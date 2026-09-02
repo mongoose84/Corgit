@@ -48,9 +48,22 @@ export interface Menu {
 
 export interface MenuState {
   recentRoots: string[];
-  /** Whether a repository is selected — the only thing Repository's three
-   *  items depend on (§4.1: "Disabled when no repo is selected"). */
+  /** Whether a repository is selected — the only thing Repository's *lower*
+   *  group depends on (§4.1: "Disabled when no repo is selected"). The root
+   *  group above the separator is not about a selection and must never be
+   *  disabled by one. */
   repoSelected: boolean;
+  /** Whether a folder is open with repositories in it — what the root group
+   *  needs instead. */
+  rootOpen: boolean;
+  /** How many repos *Pull All Behind* would act on, shown in its label. The
+   *  strip already prints this number (§5.1) and the menu is a second route to
+   *  the same button, so it must not quietly name a different set. Zero
+   *  disables the item, matching the strip's greyed Pull all. */
+  behindCount: number;
+  /** A bulk run is in flight — both root actions are unavailable until it
+   *  finishes, the same way the strip replaces itself with a progress line. */
+  bulkRunning: boolean;
   /** True when the selected repo's branch has no upstream, so Push must read
    *  *Publish Branch* — the same swap `CommitPane` makes (§8.7). The menu is
    *  a second route to the same button and must not describe it differently. */
@@ -120,6 +133,33 @@ export function buildMenus(state: MenuState): Menu[] {
       id: 'repository',
       label: 'Repository',
       entries: [
+        // Root scope above the separator, selected repo below (§4.1). The
+        // separator is the only thing saying which items act on what, which is
+        // why the labels carry "All" rather than relying on position alone.
+        {
+          kind: 'item',
+          id: 'fetch-all',
+          label: 'Fetch All',
+          enabled: state.rootOpen && !state.bulkRunning,
+        },
+        {
+          kind: 'item',
+          id: 'pull-all',
+          label:
+            state.behindCount > 0 ? `Pull All Behind (${state.behindCount})` : 'Pull All Behind',
+          enabled: state.rootOpen && state.behindCount > 0 && !state.bulkRunning,
+        },
+        // The ⟳ that left the repo list's header (§5.1). It sits with the root
+        // group because the group is "acts on every repository" and rediscovery
+        // is exactly that — even though it is the one item here that runs no
+        // git at all.
+        {
+          kind: 'item',
+          id: 'rescan',
+          label: 'Rescan Folder',
+          enabled: state.rootOpen && !state.bulkRunning,
+        },
+        { kind: 'separator' },
         { kind: 'item', id: 'fetch', label: 'Fetch', enabled: state.repoSelected },
         { kind: 'item', id: 'pull', label: 'Pull', enabled: state.repoSelected },
         {

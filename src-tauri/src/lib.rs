@@ -19,7 +19,7 @@ mod writequeue;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -90,6 +90,12 @@ struct AppState {
     /// and must not be conflated"), with its own interval, concurrency and
     /// focus gating.
     fetch_sweeping: AtomicBool,
+    /// Set by `stop_bulk` and cleared at the start of every run (§5.1's Stop).
+    /// A bulk run dispatches all of its tasks at once and they queue on the
+    /// bulk semaphore, so this is checked *after* a task takes its permit —
+    /// the last moment before the git process would be spawned, and the only
+    /// point at which "has not started yet" is still true.
+    bulk_cancelled: AtomicBool,
     fetch_ticker: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
     /// One write queue per repo, shared process-wide (§7, §9.2). First
     /// used in build step 4, where staging and commit are the first writes.
@@ -998,6 +1004,308 @@ async fn pull_repo(repo_id: String, app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 async fn push_repo(repo_id: String, app: AppHandle) -> Result<(), String> {
     write_and_refresh(&app, repo_id, "Push", |path| async move { remote::push(&path).await }).await
+}
+
+/// How many of the global eight (§7 rule 3) a bulk run may hold at once.
+///
+/// One click here queues dozens of writes, and left uncapped they take every
+/// slot: the status sweep, the graph read behind the next click, and the repo
+/// the user gives up and selects instead all end up queued behind a run whose
+/// end they cannot see. Keeping half the budget free is what leaves the window
+/// answering while the herd comes down (§7 rule 4).
+///
+/// Deliberately the same 4 as [`FETCH_CONCURRENCY`] rather than a second
+/// number to defend: the fetch sweep arrived at it by this exact argument, and
+/// a pull is that work with a merge on the end, holding its slot longer.
+const BULK_CONCURRENCY: usize = 4;
+
+const BULK_PROGRESS_EVENT: &str = "bulk:progress";
+
+/// The two bulk runs (§5.1's *Fetch all* and *Pull all*, §4.1's Repository ▸
+/// root group). An enum rather than a closure passed into the runner: the two
+/// differ only in which git call they make, and the interactivity decision
+/// below is the one thing about them worth reading in a single place.
+#[derive(Clone, Copy)]
+enum BulkOp {
+    Fetch,
+    Pull,
+}
+
+impl BulkOp {
+    /// The user's word for the operation, shared with `write_and_refresh` so
+    /// the busy row, the Problems record and the failure banner all name the
+    /// same act (§13).
+    fn label(self) -> &'static str {
+        match self {
+            Self::Fetch => "Fetch",
+            Self::Pull => "Pull",
+        }
+    }
+
+    async fn run(self, path: &Path) -> Result<(), String> {
+        match self {
+            // The one place §8.7's "the user is sitting right there, so let it
+            // prompt" stops holding. It is true of a fetch on one repo and
+            // false of a fetch on seventy-seven: a queue of credential dialogs
+            // is not a fetch, it is a hang with extra steps, and the user
+            // cannot tell which repo each one is even for. So a bulk fetch is
+            // the non-interactive one, and a repo whose auth fails takes the ⚿
+            // badge that already means exactly this — with the row's own
+            // *Fetch now* as the place a prompt is welcome (§13).
+            Self::Fetch => remote::fetch_background(path).await,
+            // Pull stays interactive. It only ever runs on repos we believe
+            // are behind, and believing that means a fetch reached their
+            // remote recently — so a prompt here is both rare and worth
+            // answering, unlike the fetch case above.
+            Self::Pull => remote::pull(path).await,
+        }
+    }
+}
+
+/// Progress for the repo-list strip's "Pulling… 4 of 7" (§5.1). Sent on every
+/// completion rather than batched: the count is the only thing on screen that
+/// moves during a run, and a run is seconds long per repo.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BulkProgress {
+    operation: String,
+    done: u32,
+    total: u32,
+}
+
+/// What the run is handed back with. §13's error model names one repo at a
+/// time, and a bulk run cannot — so the failures come back as a list and the
+/// frontend raises **one** notice for the run, with each repo still carrying
+/// its own `!` badge from `write_and_refresh`'s Problems record.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BulkOutcome {
+    operation: String,
+    total: u32,
+    succeeded: u32,
+    /// Repos *Stop* got to before they started. Reported separately from
+    /// failures because they are not one: nothing was attempted, nothing
+    /// changed, and the repo still carries whatever badge it had.
+    skipped: u32,
+    failed: Vec<BulkFailure>,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BulkFailure {
+    repo_id: String,
+    /// Carried rather than looked up by the frontend: the banner names these
+    /// repos and writes them into the filter box (§5.1), and by the time it
+    /// renders, a rescan may have removed the row it would have read.
+    name: String,
+    message: String,
+}
+
+/// Runs `op` across `targets`, at most [`BULK_CONCURRENCY`] at a time.
+///
+/// Every repo goes through `write_and_refresh` exactly as a single-repo
+/// command does — the per-repo write queue (§7 rule 1), the Problems record
+/// and the status republish are all things a bulk run needs, and the moment
+/// this hand-rolls that sequence is the moment the two drift apart.
+async fn run_bulk(app: &AppHandle, op: BulkOp, targets: Vec<Repo>) -> BulkOutcome {
+    let operation = op.label();
+    let total = targets.len() as u32;
+    app.state::<AppState>().bulk_cancelled.store(false, Ordering::SeqCst);
+    emit_bulk_progress(app, operation, 0, total);
+
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(BULK_CONCURRENCY));
+    let done = Arc::new(AtomicU32::new(0));
+
+    let tasks: Vec<_> = targets
+        .into_iter()
+        .map(|repo| {
+            let app = app.clone();
+            let semaphore = semaphore.clone();
+            let done = done.clone();
+            tauri::async_runtime::spawn(async move {
+                let Ok(_permit) = semaphore.acquire().await else {
+                    return BulkResult::Skipped;
+                };
+
+                // *Stop*, and the whole of what it can promise (§5.1). A
+                // `git pull` mid-merge cannot be cancelled — killing it is how
+                // you get a half-merged tree — so Stop is about the queue, and
+                // this is the queue's last honest moment: the permit is held
+                // but no process has been spawned.
+                if app.state::<AppState>().bulk_cancelled.load(Ordering::SeqCst) {
+                    return BulkResult::Skipped;
+                }
+
+                let result =
+                    write_and_refresh(&app, repo.id.clone(), operation, |path| async move { op.run(&path).await }).await;
+
+                // Progress counts *completions*, including failures: the strip
+                // is telling the user how much of the run is left, not how
+                // much of it worked. The banner at the end is where the
+                // difference is reported.
+                let finished = done.fetch_add(1, Ordering::SeqCst) + 1;
+                emit_bulk_progress(&app, operation, finished, total);
+
+                match result {
+                    Ok(()) => {
+                        if matches!(op, BulkOp::Fetch) {
+                            record_fetch_attempt(&app, &repo.id);
+                        }
+                        BulkResult::Ok
+                    }
+                    Err(message) => {
+                        if matches!(op, BulkOp::Fetch) {
+                            record_bulk_fetch_failure(&app, &repo.id, remote::looks_like_auth_failure(&message));
+                        }
+                        BulkResult::Failed(BulkFailure { repo_id: repo.id, name: repo.name, message })
+                    }
+                }
+            })
+        })
+        .collect();
+
+    let mut failed = Vec::new();
+    let mut succeeded = 0;
+    let mut skipped = 0;
+    for task in tasks {
+        // A task that panicked is counted as skipped rather than silently
+        // dropped: the three numbers have to add up to `total`, or the banner
+        // is arithmetic the user can see is wrong.
+        match task.await.unwrap_or(BulkResult::Skipped) {
+            BulkResult::Ok => succeeded += 1,
+            BulkResult::Skipped => skipped += 1,
+            BulkResult::Failed(failure) => failed.push(failure),
+        }
+    }
+
+    // A fetch moved `refs/remotes/*` for every repo it reached, which is what
+    // ahead/behind is read from (§8.2) — and the strip's own count is the
+    // first thing that has to be right afterwards.
+    if matches!(op, BulkOp::Fetch) {
+        publish_fetch_state(app);
+        trigger_sweep(app, Scope::All);
+    }
+
+    BulkOutcome { operation: operation.to_string(), total, succeeded, skipped, failed }
+}
+
+/// One repo's share of a bulk run. Three outcomes rather than a `Result`,
+/// because *skipped* is neither half of one: nothing ran, so there is no error
+/// to report and no success to count.
+enum BulkResult {
+    Ok,
+    Skipped,
+    Failed(BulkFailure),
+}
+
+/// §5.1's *Stop*. Stops the run from starting anything further; the repos
+/// already in flight finish, because there is no way to abandon a `git pull`
+/// part-way through that does not leave a tree someone has to repair by hand.
+#[tauri::command]
+fn stop_bulk(app: AppHandle) {
+    app.state::<AppState>().bulk_cancelled.store(true, Ordering::SeqCst);
+}
+
+fn emit_bulk_progress(app: &AppHandle, operation: &str, done: u32, total: u32) {
+    let event = BulkProgress { operation: operation.to_string(), done, total };
+    if let Err(err) = app.emit(BULK_PROGRESS_EVENT, event) {
+        log::warn!("could not publish bulk progress ({err})");
+    }
+}
+
+/// A bulk fetch's counterpart to [`record_fetch_attempt`] — same bookkeeping,
+/// the opposite decision about the badge.
+///
+/// The per-repo manual fetch clears "auth needed" whatever happens, because
+/// the user is watching that one repo and may have just typed a password into
+/// it. A bulk fetch never prompts (see [`BulkOp::run`]), so a repo that failed
+/// on auth has learned nothing new — clearing its badge there would hide the
+/// one thing the run actually discovered about it.
+fn record_bulk_fetch_failure(app: &AppHandle, repo_id: &str, auth_failed: bool) {
+    let state = app.state::<AppState>();
+    let mut current = state.root.lock().expect("root mutex poisoned");
+    let Some(root) = current.as_mut() else { return };
+    root.last_fetch_at.insert(repo_id.to_string(), now_unix());
+    if auth_failed {
+        root.auth_needed.insert(repo_id.to_string());
+    }
+}
+
+/// Publishes `last_fetch_at` and `auth_needed` the way the fetch sweep does,
+/// and saves the cache once for the whole run.
+///
+/// Deliberately reusing `FetchSweepEvent`: what changed is exactly what that
+/// event exists to carry, and a second event shape saying the same thing is
+/// how the row's ⚿ badge ends up with two ways to be set that disagree.
+/// `elapsed_ms` is zero — the run's own timing belongs to the strip, and the
+/// repo list's header readout is the *status* sweep's number (§1).
+fn publish_fetch_state(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    let published = {
+        let current = state.root.lock().expect("root mutex poisoned");
+        let Some(root) = current.as_ref() else { return };
+        (root.path.clone(), root.statuses.clone(), root.last_fetch_at.clone(), root.auth_needed.clone())
+    };
+    let (root_path, statuses, last_fetch_at, auth_needed) = published;
+    persist_cache(app, &root_path, statuses, last_fetch_at.clone());
+
+    let event = FetchSweepEvent { root: root_path, last_fetch_at, auth_needed, elapsed_ms: 0 };
+    if let Err(err) = app.emit(FETCH_SWEEP_EVENT, event) {
+        log::warn!("could not publish bulk fetch results ({err})");
+    }
+}
+
+/// Every repo in the open root that has a remote worth fetching (§5.1's
+/// *Fetch all*). A repo with no remote is dropped here rather than failing
+/// inside the run and landing in the banner as a failure it is not.
+#[tauri::command]
+async fn fetch_all(app: AppHandle) -> Result<BulkOutcome, String> {
+    let repos = open_repos(&app)?;
+
+    let mut targets = Vec::with_capacity(repos.len());
+    for repo in repos {
+        if remote::has_remote(&repo.path).await {
+            targets.push(repo);
+        }
+    }
+
+    Ok(run_bulk(&app, BulkOp::Fetch, targets).await)
+}
+
+/// The repos the *last* status read said were behind (§5.1's *Pull all*).
+///
+/// Reading the decision out of cached status is safe in both directions, which
+/// is the test CLAUDE.md sets for anything that decides from the cache: a repo
+/// that has since caught up gets a `git pull` that is a no-op, and one that has
+/// since fallen behind is picked up by the next run. Neither is a wrong answer
+/// the user pays for — unlike, say, pushing a cached branch name (§8.7).
+///
+/// Deliberately blind to the filter box (§5.1): the strip counts the whole
+/// root, so this must pull the whole root, or the number the user pressed and
+/// the work that happened are two different things.
+#[tauri::command]
+async fn pull_all_behind(app: AppHandle) -> Result<BulkOutcome, String> {
+    let targets = {
+        let state = app.state::<AppState>();
+        let current = state.root.lock().expect("root mutex poisoned");
+        let root = current.as_ref().ok_or_else(|| "No folder is open".to_string())?;
+        root.repos
+            .iter()
+            .filter(|repo| root.statuses.get(&repo.id).is_some_and(status::can_pull))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+
+    Ok(run_bulk(&app, BulkOp::Pull, targets).await)
+}
+
+/// The open root's repo list, cloned out from under the lock so the caller can
+/// await without holding it.
+fn open_repos(app: &AppHandle) -> Result<Vec<Repo>, String> {
+    let state = app.state::<AppState>();
+    let current = state.root.lock().expect("root mutex poisoned");
+    let root = current.as_ref().ok_or_else(|| "No folder is open".to_string())?;
+    Ok(root.repos.clone())
 }
 
 /// §13's merge-conflict banner: "Abort merge", one of its exactly two ways
@@ -2154,6 +2462,7 @@ pub fn run() {
                 sweeping: AtomicBool::new(false),
                 ticker: Mutex::new(None),
                 fetch_sweeping: AtomicBool::new(false),
+                bulk_cancelled: AtomicBool::new(false),
                 fetch_ticker: Mutex::new(None),
                 write_queues: Arc::new(WriteQueues::default()),
                 in_flight: Arc::new(inflight::InFlightWrites::default()),
@@ -2212,6 +2521,9 @@ pub fn run() {
             fetch_repo,
             pull_repo,
             push_repo,
+            fetch_all,
+            pull_all_behind,
+            stop_bulk,
             merge_abort,
             publish_branch,
             commit_and_push,
