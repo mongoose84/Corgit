@@ -213,6 +213,12 @@
           ? undefined
           : raised.translated.raw}
         action={raised.forceAction ?? raised.translated.action}
+        showRepos={raised.repoFilter === undefined
+          ? undefined
+          : {
+              count: raised.repoFilter.split(',').length,
+              onShow: () => repos.requestFilter(raised.repoFilter ?? ''),
+            }}
         canSuppress={raised.translated.id !== null}
         onPull={() => void pullNoticeRepo()}
         onOpenVSCode={() => void repos.openInVSCode(raised.repoId ?? undefined)}

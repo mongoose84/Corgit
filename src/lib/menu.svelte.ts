@@ -49,6 +49,12 @@ export function menus(): Menu[] {
   return buildMenus({
     recentRoots: settings.data.recentRoots,
     repoSelected: id !== undefined,
+    rootOpen: repos.root !== null && repos.repos.length > 0,
+    // The same getter the strip's count comes from (§5.1), not a second walk
+    // over the statuses: the menu is another route to the same button, and two
+    // counts derived separately are two counts that can disagree.
+    behindCount: repos.behindCount,
+    bulkRunning: repos.bulk !== null,
     publishing: status !== undefined && needsPublish(status),
     repoListVisible: paneVisibility.repoList,
     commitPaneVisible: paneVisibility.commitPane,
@@ -104,6 +110,17 @@ export function chooseMenuItem(id: string): void {
     // only part of it that was doing anything.
     case 'reload':
       location.reload();
+      break;
+    case 'fetch-all':
+      void repos.fetchAll();
+      break;
+    case 'pull-all':
+      void repos.pullAllBehind();
+      break;
+    // The repo list's old ⟳, unchanged behaviour and a label that finally says
+    // what it does: rediscovery first, status as a consequence (§5.1).
+    case 'rescan':
+      void repos.refresh();
       break;
     case 'fetch':
       void repos.fetch();
