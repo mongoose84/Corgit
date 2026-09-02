@@ -1069,7 +1069,16 @@ impl BulkOp {
 #[serde(rename_all = "camelCase")]
 struct BulkProgress {
     operation: String,
+    /// Repos that have landed, success or failure. The solid half of the
+    /// strip's bar.
     done: u32,
+    /// Repos with a git process running right now — never more than
+    /// [`BULK_CONCURRENCY`]. Drawn as a dimmer segment ahead of `done`, which
+    /// is what stops the bar sitting at zero for the first few seconds while
+    /// four pulls work invisibly: it shows work happening without claiming
+    /// work is finished. The gap between the two segments is the concurrency
+    /// cap, made visible for free.
+    running: u32,
     total: u32,
 }
 
@@ -1111,10 +1120,15 @@ async fn run_bulk(app: &AppHandle, op: BulkOp, targets: Vec<Repo>) -> BulkOutcom
     let operation = op.label();
     let total = targets.len() as u32;
     app.state::<AppState>().bulk_cancelled.store(false, Ordering::SeqCst);
-    emit_bulk_progress(app, operation, 0, total);
+    emit_bulk_progress(app, operation, 0, 0, total);
 
     let semaphore = Arc::new(tokio::sync::Semaphore::new(BULK_CONCURRENCY));
     let done = Arc::new(AtomicU32::new(0));
+    // Counted here rather than read back off the semaphore's available
+    // permits: a permit is taken slightly before the git process starts and
+    // released slightly after it ends, and this number is drawn on screen —
+    // it should count repos actually being worked on, not permits in hand.
+    let running = Arc::new(AtomicU32::new(0));
 
     let tasks: Vec<_> = targets
         .into_iter()
@@ -1122,6 +1136,7 @@ async fn run_bulk(app: &AppHandle, op: BulkOp, targets: Vec<Repo>) -> BulkOutcom
             let app = app.clone();
             let semaphore = semaphore.clone();
             let done = done.clone();
+            let running = running.clone();
             tauri::async_runtime::spawn(async move {
                 let Ok(_permit) = semaphore.acquire().await else {
                     return BulkResult::Skipped;
@@ -1136,6 +1151,12 @@ async fn run_bulk(app: &AppHandle, op: BulkOp, targets: Vec<Repo>) -> BulkOutcom
                     return BulkResult::Skipped;
                 }
 
+                // Emitted on the way in as well as on the way out, so the bar
+                // moves the moment the run starts rather than after the first
+                // repo lands.
+                let started = running.fetch_add(1, Ordering::SeqCst) + 1;
+                emit_bulk_progress(&app, operation, done.load(Ordering::SeqCst), started, total);
+
                 let result =
                     write_and_refresh(&app, repo.id.clone(), operation, |path| async move { op.run(&path).await }).await;
 
@@ -1144,7 +1165,8 @@ async fn run_bulk(app: &AppHandle, op: BulkOp, targets: Vec<Repo>) -> BulkOutcom
                 // much of it worked. The banner at the end is where the
                 // difference is reported.
                 let finished = done.fetch_add(1, Ordering::SeqCst) + 1;
-                emit_bulk_progress(&app, operation, finished, total);
+                let still_running = running.fetch_sub(1, Ordering::SeqCst) - 1;
+                emit_bulk_progress(&app, operation, finished, still_running, total);
 
                 match result {
                     Ok(()) => {
@@ -1206,8 +1228,8 @@ fn stop_bulk(app: AppHandle) {
     app.state::<AppState>().bulk_cancelled.store(true, Ordering::SeqCst);
 }
 
-fn emit_bulk_progress(app: &AppHandle, operation: &str, done: u32, total: u32) {
-    let event = BulkProgress { operation: operation.to_string(), done, total };
+fn emit_bulk_progress(app: &AppHandle, operation: &str, done: u32, running: u32, total: u32) {
+    let event = BulkProgress { operation: operation.to_string(), done, running, total };
     if let Err(err) = app.emit(BULK_PROGRESS_EVENT, event) {
         log::warn!("could not publish bulk progress ({err})");
     }

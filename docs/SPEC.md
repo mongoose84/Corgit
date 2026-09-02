@@ -291,6 +291,25 @@ Its two states, and neither is dead chrome:
 | Something behind | `↓ 7 behind` | **Pull all**, accented |
 | Nothing behind | `All 77 in sync` | *Pull all*, disabled |
 
+**While a run is going** the strip becomes `Pulling… 4 of 10` and a **Stop**, and grows a
+**2px progress bar along its bottom edge** — over the 1px border it already draws, so the
+running state costs one pixel of height rather than a second row. Two segments, not a track
+and a fill: solid accent for repos that have **landed**, a dimmer `--accent-muted` segment
+ahead of it for the ones with a git process **running right now**.
+
+The dim segment is the point. A plain `done / total` bar sits at zero for the first several
+seconds of every run — four pulls are in flight and none has finished — which reads as a
+hang in the one moment the app is most obviously working. Showing what has started as well
+as what has finished says "work is happening" without claiming work is done, and the gap
+between the two segments is §7 rule 4's concurrency cap, made visible for nothing.
+
+Not an inline track beside the text, and not a fill of the strip's own background. The first
+takes 60–80px from a strip whose worst case is 190px wide, and the first thing it squeezes is
+the *Stop* — the one control there for when something has gone wrong. The second needs a tint
+dark enough to sit under text, which is `--accent-muted`, which is the selected-row colour
+(§11): a band filling with the selection colour directly above a list of selectable rows
+reads as a selection misbehaving.
+
 The disabled state needs no new styling: `button.primary:not(:disabled)` is what carries the
 accent (§5.2), so a disabled Pull all goes neutral by itself and the accent stays reserved for
 when there is something to do. The greyed line is a **root status readout** — "is the whole

@@ -203,10 +203,15 @@ interface BulkOutcome {
   failed: { repoId: string; name: string; message: string }[];
 }
 
-/** The strip's progress, one per completed repo (§5.1). */
+/** The strip's progress (§5.1). Emitted when a repo starts *and* when it
+ *  lands, which is what lets the bar move before anything has finished. */
 interface BulkProgressEvent {
   operation: string;
+  /** Landed, success or failure — the solid segment. */
   done: number;
+  /** Git processes running right now, never more than the backend's bulk cap
+   *  of 4 — the dim segment drawn ahead of `done`. */
+  running: number;
   total: number;
 }
 
@@ -314,7 +319,7 @@ class RepoStore {
   /** A bulk run in flight (§5.1) — what the strip reads while it counts up.
    *  `null` when nothing is running, which is also what puts the strip back
    *  into its resting state. */
-  bulk = $state<{ operation: string; done: number; total: number } | null>(null);
+  bulk = $state<BulkProgressEvent | null>(null);
   /** *Stop* has been pressed and the run is winding down. Kept apart from
    *  `bulk` because the strip must keep counting: the repos already in flight
    *  still land, and pretending otherwise would be the dishonesty the Stop
@@ -559,7 +564,7 @@ class RepoStore {
     // Set before the first progress event rather than waiting for it: the
     // click has to acknowledge itself immediately (§13), and the backend's
     // 0-of-n event has an IPC round trip in front of it.
-    this.bulk = { operation: command === 'fetch_all' ? 'Fetch' : 'Pull', done: 0, total: 0 };
+    this.bulk = { operation: command === 'fetch_all' ? 'Fetch' : 'Pull', done: 0, running: 0, total: 0 };
 
     try {
       const outcome = await invoke<BulkOutcome>(command);

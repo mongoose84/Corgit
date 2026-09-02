@@ -30,6 +30,31 @@
   });
 
   const bulk = $derived(repos.bulk);
+
+  /**
+   * The strip's progress bar (§5.1), as two overlaid segments rather than a
+   * track and a fill: solid for repos that have landed, dim for the ones with
+   * a git process running right now.
+   *
+   * The dim segment is what makes the bar honest at the start of a run. With
+   * four pulls in flight and none finished, a plain `done / total` bar sits at
+   * zero for several seconds while the app is visibly busy — so it shows work
+   * happening without claiming work is done, and the gap between the two
+   * segments is the concurrency cap made visible.
+   *
+   * Percentages rather than pixels because the strip is the pane's width, and
+   * the pane is resizable down to 190px (§4).
+   */
+  const progress = $derived.by(() => {
+    if (bulk === null || bulk.total === 0) return { done: 0, reached: 0 };
+    return {
+      done: (bulk.done / bulk.total) * 100,
+      // Clamped for the one frame where a start and a finish can both be in
+      // flight across the IPC boundary: a segment wider than its own strip
+      // would paint over the pane's edge.
+      reached: Math.min(100, ((bulk.done + bulk.running) / bulk.total) * 100),
+    };
+  });
   const behind = $derived(repos.behindCount);
 
   // Two sections, each alphabetical (§5.1) — discovery already returns repos
@@ -106,6 +131,13 @@
         >
           {repos.bulkStopping ? 'Stopping…' : 'Stop'}
         </button>
+        <!-- Sits *on* the border the strip already draws, which is the only
+             reason it is affordable: a bar that took a row of its own would be
+             spending a second repo row on chrome (§14.1). Decorative — the
+             counter beside it is the accessible reading, and `aria-live` is
+             already on that. -->
+        <span class="bar reached" style="width: {progress.reached}%" aria-hidden="true"></span>
+        <span class="bar done" style="width: {progress.done}%" aria-hidden="true"></span>
       {:else}
         {#if behind > 0}
           <span class="badge behind" aria-hidden="true">↓</span>
@@ -260,6 +292,7 @@
      it reads as a band across the top of the list rather than as its first
      row — the distinction the whole placement rests on. */
   .root-strip {
+    position: relative;
     display: flex;
     align-items: center;
     gap: var(--space-2);
@@ -341,6 +374,28 @@
 
   .stop:disabled {
     color: var(--text-disabled);
+  }
+
+  /* `bottom: -1px` puts the bar over the strip's own 1px border rather than
+     above it, so the running state costs one pixel of height, not two. */
+  .bar {
+    position: absolute;
+    left: 0;
+    bottom: -1px;
+    height: 2px;
+    /* Only the width animates, and only while a run is going: the value
+       arrives in steps of one repo, which at ten repos is a 10% jump. */
+    transition: width 180ms ease;
+  }
+
+  /* Same accent as the Pull all button this replaced, so the bar reads as that
+     button running rather than as a new colour with a new meaning (§11). */
+  .bar.done {
+    background: var(--accent);
+  }
+
+  .bar.reached {
+    background: var(--accent-muted);
   }
 
   ul {
