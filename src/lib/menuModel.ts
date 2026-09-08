@@ -61,6 +61,10 @@ export interface MenuState {
    *  the same button, so it must not quietly name a different set. Zero
    *  disables the item, matching the strip's greyed Pull all. */
   behindCount: number;
+  /** How many repos are pinned — shown in *Create Branch in Pinned*'s label,
+   *  and zero disables it. The repo list's *Branch…* is the same dialog on the
+   *  same set (§5.1), so this must be the same count that header prints. */
+  pinnedCount: number;
   /** A bulk run is in flight — both root actions are unavailable until it
    *  finishes, the same way the strip replaces itself with a progress line. */
   bulkRunning: boolean;
@@ -148,6 +152,20 @@ export function buildMenus(state: MenuState): Menu[] {
           label:
             state.behindCount > 0 ? `Pull All Behind (${state.behindCount})` : 'Pull All Behind',
           enabled: state.rootOpen && state.behindCount > 0 && !state.bulkRunning,
+        },
+        // §5.1's *Branch…*, second route — the same pattern the pin itself
+        // uses: a row affordance first, a menu entry as the discoverable
+        // backup. The count names the set exactly as *Pull All Behind*'s does,
+        // and for the same reason: two routes to one dialog must not describe
+        // different work.
+        {
+          kind: 'item',
+          id: 'branch-pinned',
+          label:
+            state.pinnedCount > 0
+              ? `Create Branch in Pinned (${state.pinnedCount})…`
+              : 'Create Branch in Pinned…',
+          enabled: state.rootOpen && state.pinnedCount > 0 && !state.bulkRunning,
         },
         // The ⟳ that left the repo list's header (§5.1). It sits with the root
         // group because the group is "acts on every repository" and rediscovery

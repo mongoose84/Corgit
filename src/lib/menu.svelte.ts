@@ -3,6 +3,7 @@ import { listen } from '@tauri-apps/api/event';
 
 import { buildMenus, type Menu } from './menuModel';
 import { needsPublish, repos } from './repos.svelte';
+import { multiBranch } from './multiBranch.svelte';
 import { problems } from './problems.svelte';
 import { settings } from './settings.svelte';
 import { inTauri } from './tauri';
@@ -54,6 +55,10 @@ export function menus(): Menu[] {
     // over the statuses: the menu is another route to the same button, and two
     // counts derived separately are two counts that can disagree.
     behindCount: repos.behindCount,
+    // Same set the repo list's *Pinned* header counts (§5.1) — the header
+    // button and this menu item open the same dialog, so a second walk over
+    // the pins here is a second answer waiting to disagree.
+    pinnedCount: repos.pinnedRepos.length,
     bulkRunning: repos.bulk !== null,
     publishing: status !== undefined && needsPublish(status),
     repoListVisible: paneVisibility.repoList,
@@ -116,6 +121,11 @@ export function chooseMenuItem(id: string): void {
       break;
     case 'pull-all':
       void repos.pullAllBehind();
+      break;
+    // Neither Rust's nor a store method's — it opens a dialog the repo list
+    // owns, so it goes through the same flag that pane's own *Branch…* sets.
+    case 'branch-pinned':
+      multiBranch.show();
       break;
     // The repo list's old ⟳, unchanged behaviour and a label that finally says
     // what it does: rediscovery first, status as a consequence (§5.1).

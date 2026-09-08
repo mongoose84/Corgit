@@ -13,6 +13,7 @@ const BASE: MenuState = {
   repoSelected: false,
   rootOpen: true,
   behindCount: 0,
+  pinnedCount: 0,
   bulkRunning: false,
   publishing: false,
   repoListVisible: true,
@@ -43,7 +44,7 @@ describe('menu bar', () => {
 
 describe('Repository', () => {
   const SELECTED_SCOPE = ['fetch', 'pull', 'push'];
-  const ROOT_SCOPE = ['fetch-all', 'pull-all', 'rescan'];
+  const ROOT_SCOPE = ['fetch-all', 'pull-all', 'branch-pinned', 'rescan'];
 
   function enabled(state: Partial<MenuState>, ids: string[]): boolean[] {
     return ids.map((id) => item(state, 'repository', id).enabled);
@@ -66,15 +67,18 @@ describe('Repository', () => {
    * the exact bug the separator exists to make visible.
    */
   it('leaves the root group enabled with no repo selected', () => {
-    expect(enabled({ repoSelected: false, behindCount: 3 }, ROOT_SCOPE)).toEqual([true, true, true]);
+    expect(enabled({ repoSelected: false, behindCount: 3, pinnedCount: 2 }, ROOT_SCOPE)).toEqual([
+      true,
+      true,
+      true,
+      true,
+    ]);
   });
 
   it('disables the root group with no folder open', () => {
-    expect(enabled({ rootOpen: false, repoSelected: true, behindCount: 3 }, ROOT_SCOPE)).toEqual([
-      false,
-      false,
-      false,
-    ]);
+    expect(
+      enabled({ rootOpen: false, repoSelected: true, behindCount: 3, pinnedCount: 2 }, ROOT_SCOPE),
+    ).toEqual([false, false, false, false]);
   });
 
   it('separates the two scopes, so position alone never has to carry it', () => {
@@ -101,8 +105,29 @@ describe('Repository', () => {
   // The strip replaces itself with a progress line while a run is in flight;
   // the menu has no such state to show, so it goes unavailable instead. Both
   // routes to the same button, unavailable for the same reason.
+  // §5.1: the *Pinned* header's Branch… and this item are one dialog on one
+  // set, so the count in the label has to be that set and nothing else.
+  it('carries the pinned count in Create Branch in Pinned', () => {
+    expect(item({ pinnedCount: 5 }, 'repository', 'branch-pinned').label).toBe(
+      'Create Branch in Pinned (5)…',
+    );
+  });
+
+  // Nothing pinned is not an empty run, it is no run at all — the dialog would
+  // open on a list with no rows in it.
+  it('drops the count and disables Create Branch in Pinned when nothing is pinned', () => {
+    const entry = item({ pinnedCount: 0 }, 'repository', 'branch-pinned');
+    expect(entry.label).toBe('Create Branch in Pinned…');
+    expect(entry.enabled).toBe(false);
+  });
+
   it('disables the root group while a bulk run is in flight', () => {
-    expect(enabled({ behindCount: 3, bulkRunning: true }, ROOT_SCOPE)).toEqual([false, false, false]);
+    expect(enabled({ behindCount: 3, pinnedCount: 2, bulkRunning: true }, ROOT_SCOPE)).toEqual([
+      false,
+      false,
+      false,
+      false,
+    ]);
   });
 
   it('leaves the selected-repo group alone during a bulk run', () => {
