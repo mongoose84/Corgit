@@ -111,6 +111,44 @@ fn create_message(stderr: &str) -> String {
     if trimmed.is_empty() { "could not create the branch".to_string() } else { trimmed.to_string() }
 }
 
+/// Every local branch name in `repo` — what the multi-repo Create Branch
+/// dialog (§5.1) checks a typed name against.
+///
+/// Fetched once, when the dialog opens, for every repo it lists. The check
+/// itself then happens in the frontend on each keystroke, exactly as
+/// `validateBranchName` already does it for the single-repo dialog: a git call
+/// per keystroke per repo would be five processes a character, which on the
+/// spawn-bound Windows path (§1) is the one thing this codebase will not spend.
+///
+/// `refs/heads` only, deliberately. A name that exists on the remote but not
+/// here is one this repo can still create, and refusing it would be Corgit
+/// inventing a rule git does not have.
+pub async fn local_names(repo: &Path) -> Result<Vec<String>, String> {
+    let output = git::read(repo, &names_args()).await?;
+    if !output.ok {
+        return Err(names_message(&output.stderr));
+    }
+    Ok(parse_names(&output.stdout))
+}
+
+/// `for-each-ref`, not `git branch --list`: the porcelain marks the current
+/// branch with a leading `* ` and can be reshaped by user config, and this
+/// list is compared against typed text character for character.
+fn names_args() -> Vec<&'static str> {
+    vec!["for-each-ref", "--format=%(refname:short)", "refs/heads"]
+}
+
+fn parse_names(stdout: &str) -> Vec<String> {
+    stdout.lines().map(str::trim).filter(|name| !name.is_empty()).map(str::to_string).collect()
+}
+
+/// Same whole-stderr rule again (§13). This one reaches the user only through
+/// the dialog's own "could not read" row, but the raw text still travels.
+fn names_message(stderr: &str) -> String {
+    let trimmed = stderr.trim();
+    if trimmed.is_empty() { "could not list branches".to_string() } else { trimmed.to_string() }
+}
+
 /// Deleting a local branch (§8.3, the same menu). Only local ones: a
 /// remote-tracking badge names a branch on the server, and removing that is a
 /// `push --delete` — a network write with a different blast radius, not this.
@@ -242,6 +280,42 @@ mod tests {
             let args = create_args("feature-x", "origin/feature-x", checkout);
             assert!(args.contains(&"--no-track"), "{args:?} would inherit origin/feature-x as upstream");
         }
+    }
+
+    /// The multi-repo dialog (§5.1) cuts every branch from `HEAD` rather than
+    /// from the branch name its row printed — that name can be a sweep old, and
+    /// git resolving HEAD in the repo is the only reading that cannot be stale.
+    #[test]
+    fn creating_from_head_names_no_branch() {
+        assert_eq!(
+            create_args("fix/auth", "HEAD", true),
+            ["switch", "--no-track", "-c", "fix/auth", "HEAD"]
+        );
+        assert_eq!(create_args("fix/auth", "HEAD", false), ["branch", "--no-track", "fix/auth", "HEAD"]);
+    }
+
+    /// The porcelain would mark the checked-out branch with `* `, and this
+    /// list is compared against typed text character for character.
+    #[test]
+    fn branch_names_are_read_from_plumbing() {
+        assert_eq!(names_args(), ["for-each-ref", "--format=%(refname:short)", "refs/heads"]);
+    }
+
+    #[test]
+    fn branch_names_drop_blank_lines_and_surrounding_space() {
+        assert_eq!(parse_names("main\nfeature/x\n\n  release/3.2  \n"), ["main", "feature/x", "release/3.2"]);
+    }
+
+    /// A repo with no commits has no branches, and that is not an error — the
+    /// dialog must read it as "nothing to collide with", not as a failure.
+    #[test]
+    fn a_repo_with_no_branches_parses_to_an_empty_list() {
+        assert!(parse_names("").is_empty());
+    }
+
+    #[test]
+    fn a_silent_branch_listing_failure_still_says_something() {
+        assert_eq!(names_message("  \n"), "could not list branches");
     }
 
     #[test]
