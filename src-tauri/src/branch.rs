@@ -54,6 +54,35 @@ pub async fn switch_remote_tracking(repo: &Path, remote_ref: &str) -> Result<(),
     Ok(())
 }
 
+/// Switch to `name` wherever it lives — §5.1's *Switch & pull*, run across a
+/// whole section at once.
+///
+/// One command for both of the cases that dialog draws, a local branch and one
+/// that exists only on a remote, because *which* it is has to be resolved in
+/// the repo at the moment of the switch and never from the answer the dialog
+/// printed, which is read from cached status and can be a sweep old (§5.1).
+/// `--guess` is git's own resolution of exactly that: a local branch is checked
+/// out, and a name matching exactly one remote gets the
+/// `-c <name> --track <remote>/<name>` that `switch_remote_tracking` above
+/// spells out by hand.
+///
+/// Passed explicitly rather than left to the default. `checkout.guess = false`
+/// is a real setting, and a repo carrying it would fail every remote-only row
+/// in a run the dialog had just said would work — the failure mode being one
+/// repo in sixty behaving differently from the other fifty-nine for a reason
+/// nothing on screen can show.
+pub async fn switch_to(repo: &Path, name: &str) -> Result<(), String> {
+    let output = git::write(repo, &switch_args(name)).await?;
+    if !output.ok {
+        return Err(full_message(&output.stderr));
+    }
+    Ok(())
+}
+
+fn switch_args(name: &str) -> Vec<&str> {
+    vec!["switch", "--guess", name]
+}
+
 /// New branch at `start_point` (a ref name or commit hash — whatever the graph
 /// badge or row that was right-clicked names).
 ///
@@ -111,19 +140,15 @@ fn create_message(stderr: &str) -> String {
     if trimmed.is_empty() { "could not create the branch".to_string() } else { trimmed.to_string() }
 }
 
-/// Every local branch name in `repo` — what the multi-repo Create Branch
-/// dialog (§5.1) checks a typed name against.
+/// One repo's branch names, for both multi-repo dialogs (§5.1).
 ///
-/// Fetched once, when the dialog opens, for every repo it lists. The check
-/// itself then happens in the frontend on each keystroke, exactly as
-/// `validateBranchName` already does it for the single-repo dialog: a git call
-/// per keystroke per repo would be five processes a character, which on the
+/// Fetched once, when a dialog opens, for every repo it lists. The checks then
+/// happen in the frontend against this — Create Branch's duplicate check on
+/// each keystroke, exactly as `validateBranchName` does it for the single-repo
+/// dialog, and Switch & pull's per-row resolution on each pick. A git call per
+/// keystroke per repo would be five processes a character, which on the
 /// spawn-bound Windows path (§1) is the one thing this codebase will not spend.
-///
-/// `refs/heads` only, deliberately. A name that exists on the remote but not
-/// here is one this repo can still create, and refusing it would be Corgit
-/// inventing a rule git does not have.
-pub async fn local_names(repo: &Path) -> Result<Vec<String>, String> {
+pub async fn name_sets(repo: &Path) -> Result<BranchSets, String> {
     let output = git::read(repo, &names_args()).await?;
     if !output.ok {
         return Err(names_message(&output.stderr));
@@ -131,15 +156,62 @@ pub async fn local_names(repo: &Path) -> Result<Vec<String>, String> {
     Ok(parse_names(&output.stdout))
 }
 
+/// Split the way the two dialogs need it. Create Branch reads `local` alone —
+/// a name that exists on the remote but not here is one that repo can still
+/// create, and refusing it would be Corgit inventing a rule git does not have.
+/// Switch & pull needs both: a name that exists only on the remote is still a
+/// branch you can switch onto, it is just a `switch --guess` that creates the
+/// local side on the way (see `switch_to`).
+///
+/// Both come out of **one** `for-each-ref`, which is why this replaced a
+/// locals-only read rather than sitting beside one. The path is spawn-bound
+/// (§1): a second ref namespace is free next to the ~85 ms the process itself
+/// costs, and a second command would have doubled the cost of opening a dialog
+/// over seventy-seven repos to avoid listing refs one of them does not want.
+#[derive(Clone, Default, PartialEq, Eq, Debug)]
+pub struct BranchSets {
+    pub local: Vec<String>,
+    /// Short names with the remote stripped — `origin/develop` arrives here as
+    /// `develop`, deduplicated across remotes, because that is the name the
+    /// picker shows and the name `switch --guess` takes.
+    pub remote: Vec<String>,
+}
+
 /// `for-each-ref`, not `git branch --list`: the porcelain marks the current
 /// branch with a leading `* ` and can be reshaped by user config, and this
 /// list is compared against typed text character for character.
+///
+/// `%(refname)` rather than `%(refname:short)`, which this used to be. The
+/// short form of `refs/remotes/origin/develop` is `origin/develop`, separable
+/// from a local `develop` by looking for a slash — except that a local branch
+/// *called* `origin/develop` is perfectly legal, so the cheap test is wrong on
+/// exactly the repo where being wrong matters. The full ref name says which
+/// namespace a line came from without anything having to guess.
 fn names_args() -> Vec<&'static str> {
-    vec!["for-each-ref", "--format=%(refname:short)", "refs/heads"]
+    vec!["for-each-ref", "--format=%(refname)", "refs/heads", "refs/remotes"]
 }
 
-fn parse_names(stdout: &str) -> Vec<String> {
-    stdout.lines().map(str::trim).filter(|name| !name.is_empty()).map(str::to_string).collect()
+fn parse_names(stdout: &str) -> BranchSets {
+    let mut sets = BranchSets::default();
+    for line in stdout.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        if let Some(name) = line.strip_prefix("refs/heads/") {
+            sets.local.push(name.to_string());
+        } else if let Some(rest) = line.strip_prefix("refs/remotes/") {
+            // `refs/remotes/origin/HEAD` is a symbolic pointer at the remote's
+            // default branch, not a branch of its own. Left in, the picker
+            // would offer a branch named `HEAD` that is really a second copy
+            // of `main`, and switching onto it would detach every repo it
+            // reached.
+            let Some((_remote, name)) = rest.split_once('/') else { continue };
+            if name == "HEAD" {
+                continue;
+            }
+            if !sets.remote.iter().any(|existing| existing == name) {
+                sets.remote.push(name.to_string());
+            }
+        }
+    }
+    sets
 }
 
 /// Same whole-stderr rule again (§13). This one reaches the user only through
@@ -298,19 +370,58 @@ mod tests {
     /// list is compared against typed text character for character.
     #[test]
     fn branch_names_are_read_from_plumbing() {
-        assert_eq!(names_args(), ["for-each-ref", "--format=%(refname:short)", "refs/heads"]);
+        assert_eq!(names_args(), ["for-each-ref", "--format=%(refname)", "refs/heads", "refs/remotes"]);
+    }
+
+    /// The two namespaces are told apart by their full ref name, never by
+    /// looking for a slash in the short one — a local branch called
+    /// `origin/develop` is legal, and it must not be read as a remote.
+    #[test]
+    fn a_local_branch_named_like_a_remote_one_stays_local() {
+        let sets = parse_names("refs/heads/origin/develop\nrefs/remotes/origin/develop\n");
+        assert_eq!(sets.local, ["origin/develop"]);
+        assert_eq!(sets.remote, ["develop"]);
+    }
+
+    /// The picker names a branch once however many remotes carry it: it offers
+    /// a name to switch to, not a ref to check out.
+    #[test]
+    fn a_branch_on_two_remotes_is_named_once() {
+        assert_eq!(
+            parse_names("refs/remotes/origin/develop\nrefs/remotes/upstream/develop\n").remote,
+            ["develop"]
+        );
+    }
+
+    /// `refs/remotes/origin/HEAD` is a symbolic pointer at the remote's default
+    /// branch. Offered as a branch, switching onto it would detach HEAD in
+    /// every repo the run reached.
+    #[test]
+    fn the_remotes_head_pointer_is_not_a_branch() {
+        assert_eq!(parse_names("refs/remotes/origin/HEAD\nrefs/remotes/origin/main\n").remote, ["main"]);
+    }
+
+    /// Remote-only is the case `switch_to` exists for, and `--guess` is what
+    /// resolves it in the repo rather than from the dialog's cached answer —
+    /// explicitly, because `checkout.guess = false` would otherwise turn every
+    /// remote-only row in a run into a failure the dialog said would not happen.
+    #[test]
+    fn switching_asks_git_to_resolve_the_name() {
+        assert_eq!(switch_args("develop"), ["switch", "--guess", "develop"]);
     }
 
     #[test]
     fn branch_names_drop_blank_lines_and_surrounding_space() {
-        assert_eq!(parse_names("main\nfeature/x\n\n  release/3.2  \n"), ["main", "feature/x", "release/3.2"]);
+        let sets = parse_names("refs/heads/main\nrefs/heads/feature/x\n\n  refs/heads/release/3.2  \n");
+        assert_eq!(sets.local, ["main", "feature/x", "release/3.2"]);
+        assert!(sets.remote.is_empty());
     }
 
     /// A repo with no commits has no branches, and that is not an error — the
     /// dialog must read it as "nothing to collide with", not as a failure.
     #[test]
     fn a_repo_with_no_branches_parses_to_an_empty_list() {
-        assert!(parse_names("").is_empty());
+        assert_eq!(parse_names(""), BranchSets::default());
     }
 
     #[test]

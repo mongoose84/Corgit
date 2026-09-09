@@ -215,13 +215,19 @@ interface BulkProgressEvent {
   total: number;
 }
 
-/** One repo's local branch names, for the multi-repo dialog's duplicate check
- *  (§8.3). `names` and `error` are exclusive, and both are needed: a repo whose
- *  refs could not be read must render as unknown rather than as a repo with no
- *  branches, which would wave through a name that is already there. */
+/** One repo's branch names, for both multi-repo dialogs — Create Branch's
+ *  duplicate check (§8.3) and Switch & pull's picker (§5.1). The two lists move
+ *  together and are exclusive with `error`, and every part is needed: a repo
+ *  whose refs could not be read must render as unknown rather than as a repo
+ *  with no branches, which would wave through a name that is already there, and
+ *  would exclude a row from a switch onto a branch it may well have. */
 export interface RepoBranches {
   repoId: string;
-  names: string[] | null;
+  local: string[] | null;
+  /** Remote-only membership is a real answer rather than a footnote: it is what
+   *  makes a row read `main → develop` with a *new* marker instead of being
+   *  excluded for not having the branch. */
+  remote: string[] | null;
   error: string | null;
 }
 
@@ -232,6 +238,10 @@ const BULK_VERBS: Record<string, string> = {
   Fetch: 'fetched',
   Pull: 'pulled',
   Branch: 'created',
+  // Both spellings of the one run (§5.1). *Pull after switching* decides which,
+  // and a run that never pulled must not report itself as having done so.
+  'Switch & pull': 'switched and pulled',
+  Switch: 'switched',
 };
 
 /** The strip's present participle — "Pulling… 4 of 7" (§5.1). Kept next to
@@ -242,6 +252,8 @@ const BULK_PROGRESS_VERBS: Record<string, string> = {
   Fetch: 'Fetching',
   Pull: 'Pulling',
   Branch: 'Branching',
+  'Switch & pull': 'Switching & pulling',
+  Switch: 'Switching',
 };
 
 export function bulkProgressLabel(operation: string): string {
@@ -418,6 +430,20 @@ class RepoStore {
    *  the moment one of them forgets the filter box exists. */
   get pinnedRepos(): Repo[] {
     return this.repos.filter((repo) => this.pins.has(repo.id));
+  }
+
+  /** The *All* section, in the list's own order (§5.1) — everything not pinned.
+   *
+   *  Blind to the filter box, like `pinnedRepos` above and for the same reason:
+   *  the band's dialog lists every repository it would touch with a checkbox on
+   *  each, so it is the whole section that is offered and the ticked set that
+   *  is the consent. A dialog that quietly shrank to match a filter typed a
+   *  minute ago is how a run misses the twelve repos it was meant to cover.
+   *
+   *  When nothing is pinned this is every repo in the root, which is exactly
+   *  what the band then says it is. */
+  get unpinnedRepos(): Repo[] {
+    return this.repos.filter((repo) => !this.pins.has(repo.id));
   }
 
   /** Empty the hot set (§5.1) — one backend call rather than a loop of
@@ -615,6 +641,26 @@ class RepoStore {
   }
 
   /**
+   * §5.1's *Switch & pull* — one existing branch, checked out across the repos
+   * the dialog listed and then brought up to date.
+   *
+   * The operation word swings on `pull` because it is what the busy row, the
+   * strip and the banner all print, and the backend's `BulkOp::label` makes
+   * the same swing on the same bool: a run that was never going to pull must
+   * not narrate itself as "Switching & pulling…" or report a repo as having
+   * failed to switch *and pull*.
+   *
+   * Closes-on-click like `branchAll`, for the same reason (§14.1).
+   */
+  async switchPullAll(repoIds: string[], name: string, pull: boolean): Promise<void> {
+    await this.runBulk('switch_pull_all', pull ? 'Switch & pull' : 'Switch', {
+      repoIds,
+      name,
+      pull,
+    });
+  }
+
+  /**
    * Shared by every bulk command. The `bulk` field is cleared in a `finally`
    * rather than on the result, because the strip is the only thing telling the
    * user a run is happening — an error thrown out of `invoke` would otherwise
@@ -626,7 +672,7 @@ class RepoStore {
    * for the two to drift.
    */
   private async runBulk(
-    command: 'fetch_all' | 'pull_all_behind' | 'branch_all',
+    command: 'fetch_all' | 'pull_all_behind' | 'branch_all' | 'switch_pull_all',
     operation: string,
     args?: Record<string, unknown>,
   ): Promise<void> {
@@ -653,16 +699,16 @@ class RepoStore {
    * check (§8.3). Read once when the dialog opens — the check itself then runs
    * on every keystroke against this, never against git.
    */
-  async localBranches(repoIds: string[]): Promise<RepoBranches[]> {
+  async repoBranches(repoIds: string[]): Promise<RepoBranches[]> {
     if (!inTauri || repoIds.length === 0) return [];
     try {
-      return await invoke<RepoBranches[]>('local_branches', { repoIds });
+      return await invoke<RepoBranches[]>('repo_branches', { repoIds });
     } catch (err) {
       // Every repo carries the failure rather than the call returning nothing:
       // a dialog that could not read any branch names must not conclude that
       // no name collides, which is the one wrong answer that costs the user a
       // failed run.
-      return repoIds.map((repoId) => ({ repoId, names: null, error: String(err) }));
+      return repoIds.map((repoId) => ({ repoId, local: null, remote: null, error: String(err) }));
     }
   }
 

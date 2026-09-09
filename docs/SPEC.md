@@ -172,7 +172,7 @@ close. The window is `decorations: false`.
 | --- | --- |
 | **File** | Open Folder… `Ctrl+O` · Open Recent ▸ · Close Window `Ctrl+W` · Exit |
 | **View** | Toggle Repo List · Toggle Commit Pane · Reset Pane Sizes · Reload |
-| **Repository** | *Root scope:* Fetch All · Pull All Behind · Rescan Folder — then a separator — *selected repo:* Fetch · Pull · Push. See below. |
+| **Repository** | *Root scope:* Fetch All · Pull All Behind · Create Branch in Pinned… · Switch & Pull in All… · Rescan Folder — then a separator — *selected repo:* Fetch · Pull · Push. See below. |
 | **Help** | About · Check for Updates · Recent Problems… · Open Log Folder · Reset Dismissed Warnings |
 
 **Repository carries two scopes, and the separator is what says so.** The lower group acts on
@@ -266,7 +266,10 @@ Two sections, each alphabetical:
   always-drawn **Branch…** button — the header is a band rather than a plain label for that
   reason, see *Branching the pinned set* below.
   Right-click → Pin/Unpin stays as a second route.
-- **All** — everything else.
+- **All** — everything else. Its header is a band too, carrying an always-drawn **Switch &
+  pull…** — see *Switching the All set onto one branch* below. Unlike *Pinned* it is drawn
+  even when the section is the entire root, which is what happens when nothing is pinned at
+  all; the reasoning is with that section.
 
 **Root actions.** The pane header acts on the pane's subject, which here is the whole root —
 the same rule that puts the selected repo's Fetch and Pull in *Changes* (§5.2) and nowhere
@@ -354,10 +357,14 @@ curated set look like siblings when one is what happens to be open and the other
 being worked on. It is also where §2's bulk-across-the-pinned-set candidates go when they
 arrive, which is what earns a band its three pixels over a plain label.
 
-**The *All* header stays a plain label, and the asymmetry is the point.** One section carries
-controls and the other is a divider; making them match would mean either an empty band under
-*All* or no home for these buttons. Both keep the same uppercase micro-label type, which is
-what holds them together as a pair.
+**Both section headers are bands, and the symmetry is the point.** This reverses an earlier
+decision. *All* used to stay a plain label on the grounds that one section carries controls
+and the other is a divider — making them match would have meant an empty band under *All*,
+which is chrome with nothing in it. That reasoning was sound while *All* had nothing to
+carry, and it stopped being sound the moment it did (*Switching the All set onto one branch*
+below). A band exists because it holds a control; the asymmetry was never the goal, it was
+the consequence of only one section having one. Both keep the same uppercase micro-label
+type, which is what holds them together as a pair either way.
 
 The button wears the ordinary box (§11.1) — 22px, `--bg-raised` on the band, a 1px border,
 `--radius-sm` — the same one *Pull all* has, and **neutral, never `.primary`**: §11.1 allows
@@ -416,6 +423,74 @@ cover the rows whose new branch names are the result (§14.1). Failures land in 
 banner with *Show the N*, unchanged. A created branch has no upstream (§8.3), so every row it
 touched comes back wearing the dashed underline the list already uses for unpublished — the
 result is legible without opening anything.
+
+**Switching the All set onto one branch.** The other half of the multi-repo week: everything
+is scattered across `main`, `develop` and last sprint's release branch, and the job is to put
+the whole herd on `develop` and bring it up to date. That is two git commands and it is one
+intent, so **the *All* band carries a single *Switch & pull…***, in the ordinary box, at its
+right where *Branch…* sits in the band above — **neutral, never `.primary`**, since *Pull all*
+is already wearing the surface's one accent (§11.1). Repository ▸ *Switch & Pull in All (N)…*
+is the second route, the same pattern *Branch…* uses — and it is worded *in All* rather than
+*All* for the reason §11.1 gives about that menu: a dropdown has no container to read, so the
+label has to name the set, and here *All* is a section and not a synonym for the root.
+
+**The band is drawn whenever there are repositories, pinned or not.** Today's *All* header
+only renders when the pinned section is non-empty; that guard goes. With nothing pinned the
+band reads `All (72)` directly under a root strip covering the same 72 repositories, and two
+bands stacked over one population is fine here: §11.1's sibling problem is two containers
+claiming the *same act*, not two acts sharing a population. The strip pulls each repo's
+**current** branch; the band moves every repo onto **one named** branch. Hiding it until
+something is pinned was rejected for the reason the root strip is reserved rather than
+inserted — a control that has to be summoned by a gesture nobody has to make is a control
+most people never find.
+
+The dialog is `MultiBranchDialog`'s shape reused rather than its code: same 400px, same
+framed list, same checkbox per repo, same *excluded before anything runs* column. Four
+differences, each earning itself:
+
+- **The branch is picked, not typed.** You can only switch to a branch that exists, so the
+  field is a picker over every branch name in the root — local or on a remote — each with the
+  count of repositories that have it, and a type-to-filter box inside it (§8.3's rule for the
+  row-level switcher, for the same reason: some roots have a hundred branches). Under the
+  field, the split that decides what each repo's checkout will actually be: *local in 52 · on
+  the remote only in 9 · absent in 7*.
+- **The per-repo column says what will happen**, not where it starts from: `main → develop`,
+  `develop ↓1`, `develop · up to date`, or `new  main → develop` where the branch exists only
+  on the remote and the switch is `git switch -c develop --track origin/develop` (§8.3). The
+  count is only ever printed for a repo **already on** the branch — cached status carries
+  ahead/behind for the checked-out branch and nothing else (§8.2), so promising a number for
+  a branch the repo is not on would be inventing one.
+- **A dirty working tree is a caution, not an exclusion.** Git switches through uncommitted
+  changes unless they collide with what differs between the branches, and *which* is not
+  knowable without trying it. §8.3 forbids force-checkout, so the honest move is to mark the
+  row in `--status-dirty`, leave it ticked, and let git refuse with its own stderr if it
+  refuses. Only two things exclude, both knowable locally: no branch of that name in the repo
+  at all, and a merge in progress, which git will not switch through.
+- **A check-all heads the checkbox column**, in the section row, aligned with the checkboxes
+  it toggles rather than sitting as a button in the header — the container rule again, one
+  level down: it is where the checkboxes are, so nothing has to say what it toggles.
+  Tri-state, and it can never reach the section's own count: the excluded rows are not
+  selectable, so its full state means *all 61 it can take*.
+
+*Pull after switching* is a checkbox, defaulted on, and it is the same control as
+`CreateBranchDialog`'s *Check out after creating* — the second half of the intent, made
+refusable. Unticked, the button reads *Switch 61* and the run stops at the checkout. Left on,
+each repo is switched and then pulled as **one operation behind that repo's single write-queue
+lock** (§7 rule 1), never two queued writes: another window's fetch landing between the
+checkout and the pull is exactly the interleaving the queue exists to prevent.
+
+**The dialog is always the whole *All* section, whatever the filter box is showing.** The band
+label counts what is on screen — it can read `All (2)` — and the dialog counts what it would
+touch. They are allowed to disagree by a number, because the dialog prints its own before
+anything runs, with a checkbox on every row: **the count is the consent**, the same rule that
+lets the root strip's *Pull all* ignore the filter. The alternative — a dialog that silently
+shrinks to match a filter typed a minute ago — is how a run misses the twelve repositories it
+was meant to cover.
+
+**The run is the bulk run**, unchanged: `Switching & pulling… 23 of 61`, the same *Stop*, the
+same two-segment bar, the same cap of 4 (§7 rule 4), failures in the one banner with *Show the
+N*. The dialog closes on the click, for the same reason *Branch…*'s does — the rows changing
+branch are the result, and a modal would be sitting on them.
 
 A **filter box** sits between them. Typing filters both sections by substring on **repo name
 only** — not branch, not path. This is the primary navigation tool for 77 repos; it is not
@@ -1042,8 +1117,8 @@ window too.
    held. Never parse a repo mid-mutation.
 3. **Global semaphore of 8 in-flight git processes.** Without it the sweep spawns 77
    `git.exe` at once and Defender melts the machine.
-4. **A bulk run takes at most 4 of those 8.** *Pull All Behind* and *Fetch All* (§5.1) are one
-   click that queues dozens of writes; uncapped they hold every slot and the app stops
+4. **A bulk run takes at most 4 of those 8.** *Pull All Behind*, *Fetch All* and *Switch &
+   pull* (§5.1) are one click that queues dozens of writes; uncapped they hold every slot and the app stops
    answering — the status sweep, the graph, whatever the user clicks next, all behind a run
    they cannot see the end of. Leaving half the global budget free is what keeps the window
    usable while the herd comes down. The number is not new: the fetch sweep already runs at 4
@@ -1558,7 +1633,8 @@ root is what happens to be open, the pinned set is what is being curated. A subs
 needs a container of its own at that scope.
 
 **The menu is the deliberate exception.** §4.1's Repository menu carries its scope in the
-labels — *Fetch All*, *Pull All Behind (7)*, *Create Branch in Pinned (5)…* — and says so:
+labels — *Fetch All*, *Pull All Behind (7)*, *Create Branch in Pinned (5)…*, *Switch & Pull in
+All (68)…* — and says so:
 "the labels carry *All* rather than relying on position alone". A dropdown has no columns
 and no bands, so there is no container to read and the label has to do the work. A label
 that names its set is right where nothing else can say it, and redundant everywhere else.

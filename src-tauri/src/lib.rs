@@ -1035,6 +1035,9 @@ enum BulkOp {
     Fetch,
     Pull,
     Branch { name: Arc<str>, checkout: bool },
+    /// §5.1's *Switch & pull* — one existing branch, checked out in every repo
+    /// the dialog listed, and pulled unless the user unticked it.
+    SwitchPull { name: Arc<str>, pull: bool },
 }
 
 impl BulkOp {
@@ -1046,6 +1049,18 @@ impl BulkOp {
             Self::Fetch => "Fetch",
             Self::Pull => "Pull",
             Self::Branch { .. } => "Branch",
+            // Two labels for one variant, because the checkbox changes what the
+            // run actually does and this word is what the busy row, the
+            // Problems record and the failure banner all print (§13). A repo
+            // that failed to switch, in a run that was never going to pull,
+            // must not be recorded as having failed to "Switch & pull".
+            Self::SwitchPull { pull, .. } => {
+                if *pull {
+                    "Switch & pull"
+                } else {
+                    "Switch"
+                }
+            }
         }
     }
 
@@ -1076,6 +1091,28 @@ impl BulkOp {
             // it writes to `.git`, which makes it a write (§7 rule 1), but it
             // needs no credential helper.
             Self::Branch { name, checkout } => branch::create(path, &name, "HEAD", checkout).await,
+            // Two git commands, one operation — and deliberately not two
+            // queued writes. `write_and_refresh` holds this repo's write lock
+            // around the whole closure (§7 rule 1), so nothing can land between
+            // the checkout and the pull: another window's fetch, the row's own
+            // Pull, or a second bulk run would each be a merge starting from a
+            // tree that is no longer the one that was just checked out.
+            //
+            // The pull is skipped rather than the switch on `!pull`, because
+            // the checkbox is *Pull after switching* — the switch is the part
+            // the user always asked for.
+            Self::SwitchPull { name, pull } => {
+                branch::switch_to(path, &name).await?;
+                if pull {
+                    // Interactive, like every other pull that is not the fetch
+                    // sweep: this ran because the user pressed a button and is
+                    // watching the strip count, so a credential prompt is
+                    // worth answering (§8.7). The cap of four keeps it to four
+                    // prompts at worst rather than sixty.
+                    remote::pull(path).await?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -1366,16 +1403,44 @@ async fn branch_all(
     Ok(run_bulk(&app, BulkOp::Branch { name: name.into(), checkout }, targets).await)
 }
 
-/// Local branch names per repo, for the multi-repo dialog's duplicate check
-/// (§8.3). Read concurrently, and each behind that repo's read guard like
-/// every other one-off read (§7 rule 2) — a branch list read mid-`switch` would
-/// describe refs that have already moved.
+/// §5.1's *Switch & pull* — one existing branch, checked out across the *All*
+/// section and then brought up to date.
+///
+/// Same contract as `branch_all` above and for the same reason: the dialog has
+/// already dropped the repos that cannot take it (no branch of that name, or a
+/// merge in progress), and re-deciding that here from cached status would add
+/// nothing but a way for the two halves to disagree. Ids in, branches switched.
+///
+/// A dirty tree is deliberately *not* filtered here either, on either side of
+/// the boundary. Git switches through uncommitted changes unless they collide
+/// with what differs between the branches, and which of the two it is cannot be
+/// known without trying — §8.3 forbids force-checkout, so the honest thing is
+/// to let git refuse and surface its own stderr in the run's banner (§13).
+#[tauri::command]
+async fn switch_pull_all(
+    app: AppHandle,
+    repo_ids: Vec<String>,
+    name: String,
+    pull: bool,
+) -> Result<BulkOutcome, String> {
+    let targets = repos_by_id(&app, &repo_ids)?;
+    if targets.is_empty() {
+        return Err("None of those repositories are open any more".to_string());
+    }
+    Ok(run_bulk(&app, BulkOp::SwitchPull { name: name.into(), pull }, targets).await)
+}
+
+/// Branch names per repo, for both multi-repo dialogs — Create Branch's
+/// duplicate check (§8.3) and Switch & pull's picker (§5.1). Read concurrently,
+/// and each behind that repo's read guard like every other one-off read (§7
+/// rule 2) — a branch list read mid-`switch` would describe refs that have
+/// already moved.
 ///
 /// Uncapped on purpose, unlike the sweep: this runs over the repos in one
 /// dialog, not the root, and the global semaphore of eight is still the ceiling
 /// (§7 rule 3).
 #[tauri::command]
-async fn local_branches(app: AppHandle, repo_ids: Vec<String>) -> Vec<RepoBranches> {
+async fn repo_branches(app: AppHandle, repo_ids: Vec<String>) -> Vec<RepoBranches> {
     let tasks: Vec<_> = repo_ids
         .into_iter()
         .map(|repo_id| {
@@ -1384,13 +1449,20 @@ async fn local_branches(app: AppHandle, repo_ids: Vec<String>) -> Vec<RepoBranch
                 let read = match repo_path(&app, &repo_id) {
                     Ok(path) => {
                         let _read_guard = app.state::<AppState>().write_queues.read(&repo_id).await;
-                        branch::local_names(&path).await
+                        branch::name_sets(&path).await
                     }
                     Err(message) => Err(message),
                 };
                 match read {
-                    Ok(names) => RepoBranches { repo_id, names: Some(names), error: None },
-                    Err(message) => RepoBranches { repo_id, names: None, error: Some(message) },
+                    Ok(sets) => RepoBranches {
+                        repo_id,
+                        local: Some(sets.local),
+                        remote: Some(sets.remote),
+                        error: None,
+                    },
+                    Err(message) => {
+                        RepoBranches { repo_id, local: None, remote: None, error: Some(message) }
+                    }
                 }
             })
         })
@@ -1405,15 +1477,19 @@ async fn local_branches(app: AppHandle, repo_ids: Vec<String>) -> Vec<RepoBranch
     out
 }
 
-/// One repo's branch names. `names` and `error` are exclusive, and the dialog
-/// needs both: a repo whose refs could not be read must not silently render as
-/// a repo with no branches, which would be a green light to create a name that
-/// is already there.
+/// One repo's branch names. The two lists move together and are exclusive with
+/// `error`, and the dialogs need both halves: a repo whose refs could not be
+/// read must not silently render as a repo with no branches, which would be a
+/// green light to create a name that is already there — and, in Switch & pull,
+/// a row excluded for lacking a branch it may well have.
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RepoBranches {
     repo_id: String,
-    names: Option<Vec<String>>,
+    local: Option<Vec<String>>,
+    /// Remote-only membership is a real answer rather than a footnote: it is
+    /// what makes a row read `new  main → develop` instead of being excluded.
+    remote: Option<Vec<String>>,
     error: Option<String>,
 }
 
@@ -2657,7 +2733,8 @@ pub fn run() {
             fetch_all,
             pull_all_behind,
             branch_all,
-            local_branches,
+            switch_pull_all,
+            repo_branches,
             stop_bulk,
             merge_abort,
             publish_branch,

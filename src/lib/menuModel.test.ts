@@ -14,6 +14,7 @@ const BASE: MenuState = {
   rootOpen: true,
   behindCount: 0,
   pinnedCount: 0,
+  unpinnedCount: 0,
   bulkRunning: false,
   publishing: false,
   repoListVisible: true,
@@ -44,7 +45,7 @@ describe('menu bar', () => {
 
 describe('Repository', () => {
   const SELECTED_SCOPE = ['fetch', 'pull', 'push'];
-  const ROOT_SCOPE = ['fetch-all', 'pull-all', 'branch-pinned', 'rescan'];
+  const ROOT_SCOPE = ['fetch-all', 'pull-all', 'branch-pinned', 'switch-pull-all', 'rescan'];
 
   function enabled(state: Partial<MenuState>, ids: string[]): boolean[] {
     return ids.map((id) => item(state, 'repository', id).enabled);
@@ -67,18 +68,21 @@ describe('Repository', () => {
    * the exact bug the separator exists to make visible.
    */
   it('leaves the root group enabled with no repo selected', () => {
-    expect(enabled({ repoSelected: false, behindCount: 3, pinnedCount: 2 }, ROOT_SCOPE)).toEqual([
-      true,
-      true,
-      true,
-      true,
-    ]);
+    expect(
+      enabled(
+        { repoSelected: false, behindCount: 3, pinnedCount: 2, unpinnedCount: 5 },
+        ROOT_SCOPE,
+      ),
+    ).toEqual([true, true, true, true, true]);
   });
 
   it('disables the root group with no folder open', () => {
     expect(
-      enabled({ rootOpen: false, repoSelected: true, behindCount: 3, pinnedCount: 2 }, ROOT_SCOPE),
-    ).toEqual([false, false, false, false]);
+      enabled(
+        { rootOpen: false, repoSelected: true, behindCount: 3, pinnedCount: 2, unpinnedCount: 5 },
+        ROOT_SCOPE,
+      ),
+    ).toEqual([false, false, false, false, false]);
   });
 
   it('separates the two scopes, so position alone never has to carry it', () => {
@@ -121,13 +125,36 @@ describe('Repository', () => {
     expect(entry.enabled).toBe(false);
   });
 
+  // §5.1 again, one section over: the *All* band prints this number and this
+  // item opens the same dialog on the same section.
+  it('carries the All count in Switch & Pull in All', () => {
+    expect(item({ unpinnedCount: 68 }, 'repository', 'switch-pull-all').label).toBe(
+      'Switch & Pull in All (68)…',
+    );
+  });
+
+  // Worded *in All* rather than *All*: §11.1 lets the menu name its scope in
+  // the label precisely because a dropdown has no container to read, and here
+  // *All* is a section rather than a synonym for the root — which *Fetch All*
+  // one line above genuinely is.
+  it('says in All, so the label cannot be read as the whole root', () => {
+    expect(item({ unpinnedCount: 68 }, 'repository', 'switch-pull-all').label).toContain('in All');
+  });
+
+  // An empty section is no run at all, the same call the pinned item makes.
+  it('drops the count and disables Switch & Pull in All when the section is empty', () => {
+    const entry = item({ unpinnedCount: 0 }, 'repository', 'switch-pull-all');
+    expect(entry.label).toBe('Switch & Pull in All…');
+    expect(entry.enabled).toBe(false);
+  });
+
   it('disables the root group while a bulk run is in flight', () => {
-    expect(enabled({ behindCount: 3, pinnedCount: 2, bulkRunning: true }, ROOT_SCOPE)).toEqual([
-      false,
-      false,
-      false,
-      false,
-    ]);
+    expect(
+      enabled(
+        { behindCount: 3, pinnedCount: 2, unpinnedCount: 5, bulkRunning: true },
+        ROOT_SCOPE,
+      ),
+    ).toEqual([false, false, false, false, false]);
   });
 
   it('leaves the selected-repo group alone during a bulk run', () => {

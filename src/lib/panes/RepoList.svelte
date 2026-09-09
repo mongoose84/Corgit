@@ -4,9 +4,11 @@
   import EmptyState from '../EmptyState.svelte';
   import Mascot from '../Mascot.svelte';
   import MultiBranchDialog from '../MultiBranchDialog.svelte';
+  import SwitchPullDialog from '../SwitchPullDialog.svelte';
   import { bulkProgressLabel, repos } from '../repos.svelte';
   import { filterTerms, matchesFilter } from '../repoFilter';
   import { multiBranch } from '../multiBranch.svelte';
+  import { switchPull } from '../switchPull.svelte';
 
   let filter = $state('');
 
@@ -246,9 +248,41 @@
       </ul>
     {/if}
 
-    {#if pinned.length > 0}
-      <div class="section-header">All ({unpinned.length})</div>
-    {/if}
+    <!-- The *All* band (§5.1). Built the same way the pinned band above is,
+         because it is the same object one section over: the same --bg-app fill,
+         the same 4px padding around a 22px control, the same micro-label type.
+         The asymmetry this replaced was never the goal — a band exists because
+         it holds a control, and until *Switch & pull…* there was nothing to
+         hold.
+
+         Drawn whenever there are repositories, pinned or not, which is the one
+         way it differs from the band above. With nothing pinned it sits
+         directly under a root strip covering the same repos, and that is fine:
+         §11.1's sibling problem is two containers claiming the same act, and
+         these are two acts — the strip pulls each repo's *current* branch, this
+         moves every repo onto *one named* branch. Hiding it until something is
+         pinned would put the feature behind a gesture nobody has to make. -->
+    <div class="section-band">
+      <span class="band-label">All ({unpinned.length})</span>
+      <span class="band-actions">
+        <!-- Neutral, never `.primary`: §11.1 allows one accent per surface and
+             *Pull all* is already wearing it in the strip above. Same rule that
+             keeps *Branch…* neutral.
+
+             Stays put while filtering, like *Branch…* and unlike *Unpin all*:
+             that rule is about acting silently on rows the user cannot see, and
+             this acts on nothing — it opens a dialog listing every repository
+             it would touch, with a checkbox on each. -->
+        <button
+          type="button"
+          class="branch"
+          disabled={bulk !== null}
+          onclick={() => switchPull.show()}
+        >
+          Switch &amp; pull…
+        </button>
+      </span>
+    </div>
     <ul>
       {#each unpinned as repo (repo.id)}
         <li>
@@ -266,6 +300,16 @@
   <MultiBranchDialog
     onCreate={(repoIds, name, checkout) => void repos.branchAll(repoIds, name, checkout)}
     onClose={() => multiBranch.close()}
+  />
+{/if}
+
+<!-- Hosted here for the same reason, and separately: the two dialogs are two
+     components over two sections, and nothing about opening one bears on the
+     other. -->
+{#if switchPull.open}
+  <SwitchPullDialog
+    onSwitch={(repoIds, name, pull) => void repos.switchPullAll(repoIds, name, pull)}
+    onClose={() => switchPull.close()}
   />
 {/if}
 
@@ -452,29 +496,22 @@
     list-style: none;
   }
 
-  .section-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: var(--space-2);
-    padding: var(--space-2) var(--space-3) var(--space-1);
-    font-size: var(--text-xs);
-    font-weight: 600;
-    letter-spacing: 0.06em;
-    text-transform: uppercase;
-    color: var(--text-muted);
-  }
-
   /* Built the way `.root-strip` is built, rather than to a matching height:
      the same --bg-app fill and the same 4px padding around a 22px control, so
-     the two bands are the same object at two scopes and stay that way if the
-     button height ever moves.
+     all three bands are the same object at three scopes and stay that way if
+     the button height ever moves.
+
+     One rule for both section bands rather than two that happen to match. They
+     are the same object one section apart — the moment they are two rules is
+     the moment they stop looking alike, which is the mistake `.icon-action`
+     records having made once already.
 
      No border-top. The band is darker than the filter row above it, so the
      value change already draws the edge — and a border there would sit on top
      of the filter's own border-bottom as a 2px line. `.root-strip` omits it
      for the same reason. */
-  .pinned-band {
+  .pinned-band,
+  .section-band {
     display: flex;
     align-items: center;
     gap: var(--space-2);

@@ -4,6 +4,7 @@ import { listen } from '@tauri-apps/api/event';
 import { buildMenus, type Menu } from './menuModel';
 import { needsPublish, repos } from './repos.svelte';
 import { multiBranch } from './multiBranch.svelte';
+import { switchPull } from './switchPull.svelte';
 import { problems } from './problems.svelte';
 import { settings } from './settings.svelte';
 import { inTauri } from './tauri';
@@ -59,6 +60,9 @@ export function menus(): Menu[] {
     // button and this menu item open the same dialog, so a second walk over
     // the pins here is a second answer waiting to disagree.
     pinnedCount: repos.pinnedRepos.length,
+    // And the set the *All* band counts — the same getter its dialog lists, so
+    // the label, the band and the dialog cannot name three different sections.
+    unpinnedCount: repos.unpinnedRepos.length,
     bulkRunning: repos.bulk !== null,
     publishing: status !== undefined && needsPublish(status),
     repoListVisible: paneVisibility.repoList,
@@ -126,6 +130,12 @@ export function chooseMenuItem(id: string): void {
     // owns, so it goes through the same flag that pane's own *Branch…* sets.
     case 'branch-pinned':
       multiBranch.show();
+      break;
+    // The *All* band's own button, second route (§5.1) — same split as
+    // *Branch…* above: a dialog the repo list owns, opened through the flag
+    // that pane's own control sets.
+    case 'switch-pull-all':
+      switchPull.show();
       break;
     // The repo list's old ⟳, unchanged behaviour and a label that finally says
     // what it does: rediscovery first, status as a consequence (§5.1).

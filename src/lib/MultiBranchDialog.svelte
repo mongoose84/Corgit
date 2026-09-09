@@ -81,13 +81,17 @@
     // back up for that read, so *Create* cannot fire against a half-known set.
     let cancelled = false;
     loading = true;
-    void repos.localBranches(ids).then((entries) => {
+    void repos.repoBranches(ids).then((entries) => {
       if (cancelled) return;
       // Rebuilt rather than merged: this is the whole answer for the current
       // list, and a merge would keep names for a repo that has since been
       // unpinned out from under the dialog.
       const next = new Map<string, string[] | null>();
-      for (const entry of entries) next.set(entry.repoId, entry.names);
+      // `local` only: a name that exists on the remote but not here is one
+      // this repo can still create, and refusing it would be Corgit inventing
+      // a rule git does not have. The remote half of the read belongs to
+      // *Switch & pull*, which shares the command (§5.1).
+      for (const entry of entries) next.set(entry.repoId, entry.local);
       branchNames = next;
       loading = false;
     });
