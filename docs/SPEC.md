@@ -66,17 +66,32 @@ closes windows and exits the app: that work *is* the main thread's.
 - Commit graph for the selected repo, with commit details on click
 - Read-only side-by-side diff for one file at a time, working tree or commit (§5.4)
 - Pinning repos
+- Four bulk actions over the open root (§5.1): *Fetch all*, *Pull all behind*, one new
+  branch across the pinned set, and switching the *All* set onto one existing branch and
+  pulling it
 
 ### Out (v1)
 
 Hunk staging · rebase · conflict resolution · stash · amend · force-push · commit signing ·
-tags · cherry-pick · revert · reset · submodules · LFS-specific UI · multi-repo bulk actions
+tags · cherry-pick · revert · reset · submodules · LFS-specific UI · multi-repo commit ·
+multi-repo push
+
+*Multi-repo bulk actions* sat on that line until the four in §5.1 shipped, and what replaced
+it is narrower on purpose. Each of those four is one existing per-repo action repeated over a
+set the user can see, with the run's failures handed back per repo (§13) — they add a scope,
+not a verb. The two still out are the ones that would add a verb. A commit needs a message
+and a staging decision *per repo*, which is candidate 1 below and deferred on its own merits.
+A bulk push has an unanswered target question: §8.7 pushes `HEAD` rather than a cached branch
+name, deliberately, so a bulk push publishes whatever each repo happens to have checked out —
+which is not obviously what someone pressing one button over 77 repos means. That is a
+decision to take before building it, not during.
 
 ### v2 candidates
 
 1. **Commit one message across N selected repos** — the highest-value feature, deliberately
    deferred. See §9: selection is modelled as a set from day one so this stays cheap.
-2. Bulk push / bulk pull across the pinned set
+2. **Bulk push** — the half of the old *bulk push / bulk pull* pair that did not ship with
+   §5.1's root actions. See *Out (v1)* above for the question it has to answer first.
 3. Linux support (§10)
 4. Stash, if branch-switch friction proves annoying in practice
 5. **Multiple windows, one per root** (§9.2) — v1 is one window on one root. The single

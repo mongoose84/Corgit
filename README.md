@@ -18,11 +18,19 @@ losing track"* — that is the dog's entire job.
 
 - **Every repo on one screen.** Each row carries its branch, a count of changed files and
   an ahead/behind badge. Pin the ones you are living in to the top.
-- **Four verbs, no ceremony.** Fetch, pull, commit, push — plus staging and branch
-  switching. That is the set. Corgit is a dashboard over many repositories, not a general
-  git client, and it does not try to be one.
-- **Your working tree, live.** Staged and unstaged files for the selected repo, with a
-  side-by-side diff of whichever file you last clicked behind the other tab.
+- **Four verbs, no ceremony.** Fetch, pull, commit, push — plus staging, branch switching,
+  and the short list that keeps you from having to leave: create or delete a branch, merge
+  one from the graph, discard changes, and `.gitignore` or delete an untracked file from the
+  context menu. No hunk staging, no rebase, no conflict resolution. Corgit is a dashboard
+  over many repositories, not a general git client, and it does not try to be one.
+- **One click for the whole root.** *Fetch all* and *Pull all behind* run across every repo
+  at once, narrated by a progress strip with a *Stop* that means it. The pinned set takes a
+  new branch in one go; the *All* section can switch to a branch and pull it in every repo
+  that has one. Whatever failed lands in a single banner that will filter the list down to
+  exactly those repos.
+- **Your working tree, live.** Staged and unstaged files for the selected repo — arrow keys
+  to move, a modifier click to act on a set — with a side-by-side diff of whichever file you
+  last clicked behind the other tab.
 - **A graph you can read.** Uncommitted changes on top, the HEAD commit marked with a larger
   dot and a tint of its own lane colour, ref badges where they belong.
 - **It keeps up with your terminal.** Every repo gets a filesystem watcher, so a commit you
@@ -30,15 +38,20 @@ losing track"* — that is the dog's entire job.
 - **Errors in plain language.** A rejected push says it was rejected and offers the one
   action that resolves it — with the raw git stderr one click away, because you are a
   developer and you will want it.
+- **Nothing happens silently.** A repo with a write running says so on its row, and every
+  failure that was shown to you stays in *Help ▸ Recent Problems* — including the ones you
+  dismissed, the ones you told it not to warn about again, and the ones that happened in a
+  background sweep while you were looking elsewhere.
 - **Your git, not a reimplementation.** Corgit shells out to the git you already have, so
   your credential helpers, hooks and LFS keep working exactly as they do in the terminal.
 
 Windows-only for v1. The full design lives in **[docs/SPEC.md](docs/SPEC.md)**.
 
-**Status: build step 9 of 10.** Everything through branch switching and conflict detection
-works; the polish pass is landing (pins, filter, per-repo watchers, context menus, error
-translation, the combined title bar and menu), and the read-only diff viewer (§5.4) is in.
-Multi-window, and shipping with auto-update, are what remain.
+**Status: build step 9 of 10, plus what came after it.** Everything through branch switching
+and conflict detection works; the polish pass has landed (pins, filter, per-repo watchers,
+context menus, error translation, the combined title bar and menu, Recent Problems), and so
+have the read-only diff viewer (§5.4) and the four multi-repo bulk runs (§5.1). What remains
+is step 10, shipping with auto-update, and multi-window.
 
 ## Fast is the feature
 
@@ -120,9 +133,16 @@ Start Menu install instead of a loose exe.
 
 ```sh
 npm run check          # svelte-check + TypeScript
+npm test               # vitest
 npm run build          # check, then production bundle
 cargo test --manifest-path src-tauri/Cargo.toml
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 ```
+
+These are exactly the two required CI checks: **Frontend** on Linux, **Backend** on Windows
+with clippy warnings denied. Windows because that is what v1 ships and what the code is
+written against. `cargo fmt` is deliberately not among them — the Rust is hand-formatted and
+the reasoning is recorded in `.github/workflows/ci.yml`.
 
 ## Measuring
 
@@ -153,8 +173,20 @@ src/
     repos.svelte.ts          repo/status mirror; fed by the sweep event
     graph.svelte.ts          loaded commits, refs, graph selection
     graphLayout.ts           lane assignment — in-house, never `log --graph`
+    diff.svelte.ts           the open file's diff; reconciled as the tree changes (§5.4)
+    diffLayout.ts            unified hunks → two aligned columns, the graphLayout of §5.4
+    fileSelection.ts         multi-select — what a modifier click does to a set (§5.2)
+    ignorePatterns.ts        a file row → a `.gitignore` line; paths are not patterns
+    repoFilter.ts            the filter box: substring on name, comma-separated for several
+    switchTargets.ts         what Switch & pull does to each repo, decided before it runs
+    branchName.ts            branch-name checking while you type (SPEC §8.3)
+    busyIndicator.ts         when a spinner may be drawn — reveal delay, minimum hold
     gitErrors.ts             stderr → plain language (SPEC §13)
     dateFormat.ts            fixed dd-MM-yyyy HH:mm:ss, never a locale format
+    notices.svelte.ts        the error banner's state — §13's middle tier
+    problems.svelte.ts       Recent Problems, mirroring problems.rs
+    multiBranch.svelte.ts    is the multi-repo Create Branch dialog open (two doors to it)
+    switchPull.svelte.ts     the same three lines for Switch & pull
     menuModel.ts             the menu bar's contents as data (SPEC §4.1)
     menu.svelte.ts           menu model from live state; routes a chosen item
     windowFrame.svelte.ts    is the window maximized? (undecorated, so we ask)
@@ -167,35 +199,50 @@ src/
     Divider.svelte           draggable pane separator
     ContextMenu.svelte       right-click menus
     Popover.svelte           anchored overlay, used by row error badges
-    GitErrorNotice.svelte    a failure plus the one action that resolves it
+    NoticeBanner.svelte      a failure plus the one action that resolves it (SPEC §13)
+    RecentProblems.svelte    Help ▸ Recent Problems… — what §13 lets the UI throw away
+    CreateBranchDialog.svelte    new branch here, from a ref badge or a commit row
+    DeleteBranchDialog.svelte    delete a local branch, from its ref badge
+    MultiBranchDialog.svelte     one branch name, cut across the pinned set (§5.1)
+    SwitchPullDialog.svelte      one existing branch, checked out across All and pulled
+    PullAfterSwitchDialog.svelte you landed on a branch that is behind — pull it?
+    DiscardDialog.svelte     the two acts in the pane that destroy work (§5.2)
+    AbortMergeDialog.svelte  abort a conflicted merge; same category, same modal
+    Glyph.svelte             a drawn + − × — the font's are on the math axis, not centred
     EmptyState.svelte
     Mascot.svelte            the dog — one pose per state (docs/mascot.md)
     mascot/                  the poses the app imports, cut from the sheet
     panes/
       Pane.svelte            shared header + scrolling body
-      RepoList.svelte        left    — filter, pinned/all sections, sweep timing
-      RepoRow.svelte         pin · name · branch · changed files · ahead/behind
-      CommitPane.svelte      middle  — message, staging, the four verbs
+      RepoList.svelte        left    — filter, bulk strip, pinned/all bands, sweep timing
+      RepoRow.svelte         pin · name · branch · changed files · ahead/behind · busy
+      CommitPane.svelte      middle  — message, staging, the four verbs, file context menu
       FileRow.svelte         status letter · path · stage/unstage on hover
       GraphPane.svelte       right   — virtualization, branch switching
       GraphRow.svelte        lanes · hash · subject · refs · author · date
       CommitInfoPanel.svelte commit details for the selected commit
+      DiffView.svelte        right pane's second view — read-only, always (SPEC §5.4)
 src-tauri/
   src/
     main.rs                  desktop entry point
-    lib.rs                   app state, Tauri commands, the sweeps
+    lib.rs                   app state, Tauri commands, the sweeps, the bulk runs
     settings.rs              versioned, atomically-written global settings
     roots.rs                 per-root pins and last selection
+    atomicfile.rs            the one way a JSON file is written — temp, fsync, rename (§9.5)
     cache.rs                 per-root status cache — a cache, never truth
     git.rs                   git resolution + the global 8-process semaphore
     writequeue.rs            one write queue per repo (SPEC §7)
+    inflight.rs              which repos have a write running — display only, never §7
     discovery.rs             depth-1 scan of a root
     status.rs                porcelain=v2 parser
     commit.rs                staging and commit
+    ignore.rs                appending to `.gitignore` — the one write that is not git
     remote.rs                fetch, pull, push, publish
-    branch.rs                switching to a local or remote-tracking branch
+    branch.rs                switching, creating, deleting, merging (SPEC §8.3)
     graph.rs                 `git log` paging and the ref badges
+    diff.rs                  one file's diff, parsed; read path only (SPEC §8.8)
     watch.rs                 one FS watcher per repo, tree included
+    problems.rs              the Recent Problems ring (SPEC §13)
     menu.rs                  the native Windows menu bar
 scripts/
   extract-mascot.py          contact sheet → poses, app assets, icon source
@@ -230,6 +277,10 @@ scripts/
   and the status sweep fills the rows in afterwards, over one batched event.
 - **Concurrency is capped globally at 8 git processes**, by a static semaphore in `git.rs`
   rather than by app state — the cap has to hold across every window (SPEC §7.3).
+- **A bulk run takes at most 4 of those 8** (SPEC §7.4). Headroom rather than a priority
+  queue: *Fetch all*, *Pull all behind* and *Switch & pull* can each run for a long time over
+  a large root, and whatever you click while one is running must not be stuck behind a queue
+  whose end you cannot see. The fetch sweep already picked 4 for the same reason.
 - **Read and write commands use different git binaries.** Git for Windows ships a launcher
   at `<install>\cmd\git.exe` that only execs the real binary under `mingw64\bin`; measured
   here that hop costs ~75 ms per call, more than `git status` spends working. Read-only
