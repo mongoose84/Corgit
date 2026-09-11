@@ -61,6 +61,16 @@ export interface MenuState {
    *  the same button, so it must not quietly name a different set. Zero
    *  disables the item, matching the strip's greyed Pull all. */
   behindCount: number;
+  /** How many repos are pinned — shown in *Create Branch in Pinned*'s label,
+   *  and zero disables it. The repo list's *Branch…* is the same dialog on the
+   *  same set (§5.1), so this must be the same count that header prints. */
+  pinnedCount: number;
+  /** How many repos are in the *All* section — everything not pinned. Shown in
+   *  *Switch & Pull in All*'s label for the same reason the two counts above
+   *  are shown in theirs: a menu has no container to read, so the label has to
+   *  name the set (§11.1). With nothing pinned it is the whole root, which is
+   *  exactly what the band says too. */
+  unpinnedCount: number;
   /** A bulk run is in flight — both root actions are unavailable until it
    *  finishes, the same way the strip replaces itself with a progress line. */
   bulkRunning: boolean;
@@ -148,6 +158,34 @@ export function buildMenus(state: MenuState): Menu[] {
           label:
             state.behindCount > 0 ? `Pull All Behind (${state.behindCount})` : 'Pull All Behind',
           enabled: state.rootOpen && state.behindCount > 0 && !state.bulkRunning,
+        },
+        // §5.1's *Branch…*, second route — the same pattern the pin itself
+        // uses: a row affordance first, a menu entry as the discoverable
+        // backup. The count names the set exactly as *Pull All Behind*'s does,
+        // and for the same reason: two routes to one dialog must not describe
+        // different work.
+        {
+          kind: 'item',
+          id: 'branch-pinned',
+          label:
+            state.pinnedCount > 0
+              ? `Create Branch in Pinned (${state.pinnedCount})…`
+              : 'Create Branch in Pinned…',
+          enabled: state.rootOpen && state.pinnedCount > 0 && !state.bulkRunning,
+        },
+        // §5.1's *Switch & pull…*, second route — the same pattern *Branch…*
+        // above uses. Worded *in All* rather than *All* because §11.1's
+        // exception for the menu cuts both ways: a dropdown has no container to
+        // read, so the label has to name the set, and here *All* is a section
+        // and not a synonym for the root.
+        {
+          kind: 'item',
+          id: 'switch-pull-all',
+          label:
+            state.unpinnedCount > 0
+              ? `Switch & Pull in All (${state.unpinnedCount})…`
+              : 'Switch & Pull in All…',
+          enabled: state.rootOpen && state.unpinnedCount > 0 && !state.bulkRunning,
         },
         // The ⟳ that left the repo list's header (§5.1). It sits with the root
         // group because the group is "acts on every repository" and rediscovery

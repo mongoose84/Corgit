@@ -3,8 +3,12 @@
   import RepoRow from './RepoRow.svelte';
   import EmptyState from '../EmptyState.svelte';
   import Mascot from '../Mascot.svelte';
-  import { repos } from '../repos.svelte';
+  import MultiBranchDialog from '../MultiBranchDialog.svelte';
+  import SwitchPullDialog from '../SwitchPullDialog.svelte';
+  import { bulkProgressLabel, repos } from '../repos.svelte';
   import { filterTerms, matchesFilter } from '../repoFilter';
+  import { multiBranch } from '../multiBranch.svelte';
+  import { switchPull } from '../switchPull.svelte';
 
   let filter = $state('');
 
@@ -117,7 +121,7 @@
     <div class="root-strip">
       {#if bulk}
         <span class="summary" aria-live="polite">
-          {bulk.operation === 'Pull' ? 'Pulling' : 'Fetching'}… {bulk.done} of {bulk.total}
+          {bulkProgressLabel(bulk.operation)}… {bulk.done} of {bulk.total}
         </span>
         <!-- Honest about what it can do (§5.1): a `git pull` cannot be
              abandoned mid-merge without leaving a tree to repair by hand, so
@@ -186,18 +190,54 @@
     <EmptyState message="No matches" hint="Filter matches repository names only" />
   {:else}
     {#if pinned.length > 0}
-      <div class="section-header">
-        <span>Pinned ({pinned.length})</span>
-        <!-- Emptying the hot set in one click matters as much as filling it:
-             the set is meant to track what you are working on this week, and
-             a set that is tedious to clear stops tracking anything. -->
-        {#if filter.trim() === ''}
-          <!-- Hidden while filtering: the section then shows a subset, and a
-               button that quietly unpins repos the user cannot see is a trap. -->
-          <button type="button" class="clear" onclick={() => void repos.clearPins()}>
-            Unpin all
+      <!-- The pinned band (§5.1, §11.1). Not a section header with a button
+           dropped into it — §11.1 puts buttons in a strip or a pane header and
+           nowhere else, and one sitting loose in a micro-label row belongs to
+           no family in this app. So the header becomes the root strip's own
+           shape one level down: the same --bg-app band, the same 4px padding
+           around a 22px button, at the scope the pins actually have.
+
+           That scope is the whole reason it is not simply added to the root
+           strip above, where it would fit perfectly well. §11.1: the container
+           declares the scope, and the strip's container means the folder. Two
+           buttons there would make the folder and the user's curated set look
+           like siblings, which they are not.
+
+           It is also where the §2 bulk-across-the-pinned-set actions go when
+           they arrive, which is what makes a band worth its two pixels over a
+           label. -->
+      <div class="pinned-band">
+        <span class="band-label">Pinned ({pinned.length})</span>
+        <span class="band-actions">
+          <!-- Emptying the hot set in one click matters as much as filling it:
+               the set is meant to track what you are working on this week, and
+               a set that is tedious to clear stops tracking anything. -->
+          {#if filter.trim() === ''}
+            <!-- Hidden while filtering: the section then shows a subset, and a
+                 button that quietly unpins repos the user cannot see is a trap. -->
+            <button type="button" class="clear" onclick={() => void repos.clearPins()}>
+              Unpin all
+            </button>
+          {/if}
+          <!-- Rightmost, where *Pull all* sits in the strip above: the band's
+               own primary, and the reason the band exists.
+
+               Drawn at all times, unlike *Unpin all* beside it, and the split
+               is §11.1's weight rule — branching the set is what the pins were
+               *for*, unpinning is housekeeping. It also stays put while
+               filtering, because the rule that hides *Unpin all* is about
+               acting silently on rows the user cannot see, and this acts on
+               nothing: it opens a dialog listing every repo it would touch,
+               with a checkbox on each. -->
+          <button
+            type="button"
+            class="branch"
+            disabled={bulk !== null}
+            onclick={() => multiBranch.show()}
+          >
+            Branch…
           </button>
-        {/if}
+        </span>
       </div>
       <ul>
         {#each pinned as repo (repo.id)}
@@ -208,9 +248,41 @@
       </ul>
     {/if}
 
-    {#if pinned.length > 0}
-      <div class="section-header">All ({unpinned.length})</div>
-    {/if}
+    <!-- The *All* band (§5.1). Built the same way the pinned band above is,
+         because it is the same object one section over: the same --bg-app fill,
+         the same 4px padding around a 22px control, the same micro-label type.
+         The asymmetry this replaced was never the goal — a band exists because
+         it holds a control, and until *Switch & pull…* there was nothing to
+         hold.
+
+         Drawn whenever there are repositories, pinned or not, which is the one
+         way it differs from the band above. With nothing pinned it sits
+         directly under a root strip covering the same repos, and that is fine:
+         §11.1's sibling problem is two containers claiming the same act, and
+         these are two acts — the strip pulls each repo's *current* branch, this
+         moves every repo onto *one named* branch. Hiding it until something is
+         pinned would put the feature behind a gesture nobody has to make. -->
+    <div class="section-band">
+      <span class="band-label">All ({unpinned.length})</span>
+      <span class="band-actions">
+        <!-- Neutral, never `.primary`: §11.1 allows one accent per surface and
+             *Pull all* is already wearing it in the strip above. Same rule that
+             keeps *Branch…* neutral.
+
+             Stays put while filtering, like *Branch…* and unlike *Unpin all*:
+             that rule is about acting silently on rows the user cannot see, and
+             this acts on nothing — it opens a dialog listing every repository
+             it would touch, with a checkbox on each. -->
+        <button
+          type="button"
+          class="branch"
+          disabled={bulk !== null}
+          onclick={() => switchPull.show()}
+        >
+          Switch &amp; pull…
+        </button>
+      </span>
+    </div>
     <ul>
       {#each unpinned as repo (repo.id)}
         <li>
@@ -220,6 +292,26 @@
     </ul>
   {/if}
 </Pane>
+
+<!-- Hosted here rather than in `App.svelte` because this pane owns the pinned
+     set the dialog acts on. The menu's second route opens the same store flag
+     (§4.1), so there is still exactly one dialog. -->
+{#if multiBranch.open}
+  <MultiBranchDialog
+    onCreate={(repoIds, name, checkout) => void repos.branchAll(repoIds, name, checkout)}
+    onClose={() => multiBranch.close()}
+  />
+{/if}
+
+<!-- Hosted here for the same reason, and separately: the two dialogs are two
+     components over two sections, and nothing about opening one bears on the
+     other. -->
+{#if switchPull.open}
+  <SwitchPullDialog
+    onSwitch={(repoIds, name, pull) => void repos.switchPullAll(repoIds, name, pull)}
+    onClose={() => switchPull.close()}
+  />
+{/if}
 
 <style>
   .filter {
@@ -404,17 +496,92 @@
     list-style: none;
   }
 
-  .section-header {
+  /* Built the way `.root-strip` is built, rather than to a matching height:
+     the same --bg-app fill and the same 4px padding around a 22px control, so
+     all three bands are the same object at three scopes and stay that way if
+     the button height ever moves.
+
+     One rule for both section bands rather than two that happen to match. They
+     are the same object one section apart — the moment they are two rules is
+     the moment they stop looking alike, which is the mistake `.icon-action`
+     records having made once already.
+
+     No border-top. The band is darker than the filter row above it, so the
+     value change already draws the edge — and a border there would sit on top
+     of the filter's own border-bottom as a 2px line. `.root-strip` omits it
+     for the same reason. */
+  .pinned-band,
+  .section-band {
     display: flex;
     align-items: center;
-    justify-content: space-between;
     gap: var(--space-2);
-    padding: var(--space-2) var(--space-3) var(--space-1);
+    min-width: 0;
+    padding: var(--space-1) var(--space-3);
+    background: var(--bg-app);
+    border-bottom: 1px solid var(--border);
+  }
+
+  /* Still the section header's type, not the strip's: this band replaced
+     *Pinned (5)* and has to keep reading as the pair of *All (72)* below. Only
+     the chrome around it changed. */
+  .band-label {
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
     font-size: var(--text-xs);
     font-weight: 600;
     letter-spacing: 0.06em;
     text-transform: uppercase;
     color: var(--text-muted);
+  }
+
+  .band-actions {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin-left: auto;
+    flex: 0 0 auto;
+  }
+
+  /* The same box as the strip's *Pull all*, per §11.1: 22px, --bg-raised on a
+     --bg-app band, a 1px --border and --radius-sm.
+
+     Neutral, never `.primary`. §11.1 allows one accent per surface and *Pull
+     all* is already wearing it forty pixels above; a second accented button
+     within sight of the first leaves neither reading as primary.
+
+     The font is reset rather than inherited: the band's label type is
+     uppercase, 600 and letter-spaced, and no button in the app is any of
+     those. */
+  .branch {
+    flex: 0 0 auto;
+    height: 22px;
+    padding: 0 var(--space-2);
+    font-family: inherit;
+    font-size: var(--text-sm);
+    font-weight: 400;
+    letter-spacing: normal;
+    text-transform: none;
+    color: var(--text-primary);
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    cursor: default;
+  }
+
+  .branch:hover:not(:disabled) {
+    background: var(--bg-hover);
+    border-color: var(--border-strong);
+  }
+
+  /* Unavailable while a bulk run is going — the same lockout the strip's own
+     controls take, since a second run cannot start on top of the first. Colour
+     only, matching `.pull-all:disabled`: the box stays, so the band does not
+     change height when a run starts. */
+  .branch:disabled {
+    color: var(--text-disabled);
   }
 
   .clear {
@@ -429,9 +596,9 @@
     opacity: 0;
   }
 
-  /* Revealed with the section, not the individual row — it acts on the whole
-     set, so hovering any part of that set is the right trigger. */
-  .section-header:hover .clear,
+  /* Revealed with the band, not the individual row — it acts on the whole
+     set, and the band is that set's own chrome. */
+  .pinned-band:hover .clear,
   .clear:focus-visible {
     opacity: 1;
   }
@@ -440,4 +607,5 @@
     color: var(--text-primary);
     text-decoration: underline;
   }
+
 </style>
