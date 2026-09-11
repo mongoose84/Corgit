@@ -25,6 +25,11 @@ export interface RefBadge {
   name: string;
   commit: string;
   kind: RefKind;
+  /** The tip commit's `%ct`, and `subject` its first line — both carried for
+   *  the branch search (§5.3), which describes branches whose tip is not among
+   *  the loaded rows and so cannot look either up from `rows`. */
+  timestamp: number;
+  subject: string;
 }
 
 interface GraphPage {
@@ -43,6 +48,19 @@ interface RepoStatusEvent {
 /** `working-tree` is the synthetic "Uncommitted Changes" node (§5.3); a real
  *  selection is a full commit hash. */
 export type GraphSelection = 'working-tree' | string;
+
+/**
+ * How many extra pages one branch-search jump may read before giving up
+ * (§5.3). Ten pages is 3000 commits, and the number is a *time* budget wearing
+ * a commit count: the pages are sequential — each one's `skip` is the row count
+ * the last produced — so this is ten spawns end to end, ~85 ms each on the
+ * bench machine before git does any work. A second of chasing is defensible for
+ * something the user explicitly asked for; a minute of it, which is what an
+ * uncapped walk costs on a monorepo whose release branch is 40k commits back,
+ * is not. Past the cap the pane says how far it looked and leaves *Load more*
+ * where it was, which is the same answer at the user's own pace.
+ */
+const REVEAL_PAGE_LIMIT = 10;
 
 /** The commit info panel (§5.2 revised, §8.5) — read-only, so unlike
  *  `FileChanges` the file list here is never capped. */
@@ -285,6 +303,61 @@ class GraphStore {
       if (this.repoId === id) this.error = String(err);
     } finally {
       if (this.repoId === id) this.loadingMore = false;
+    }
+  }
+
+  /** The branch the search is reading pages to reach (§5.3), `null` when no
+   *  jump is running. The name rather than a boolean because the narration
+   *  names it — "Reading history to reach release/R2026-08…" is the sentence
+   *  that makes a two-second pause legible instead of alarming. */
+  revealing = $state<string | null>(null);
+
+  /**
+   * Brings a commit into the loaded rows and returns its index, or `-1` if it
+   * could not be reached (§5.3). The branch search's jump.
+   *
+   * A branch the user went looking for is usually one whose tip the first page
+   * never reached — that is the whole shape of the feature — and there is no
+   * cheaper way to get a row for it than to read the pages in between. `git
+   * log` has no "which index is this commit at" to ask, and the rows have to
+   * exist regardless: the list is virtualized against `rows.length`, so a
+   * selection outside it is a selection with nowhere to scroll.
+   *
+   * Deliberately not a fresh `--ancestry-path` query for just that commit: the
+   * graph's lane layout is a fold over the page sequence (`laneState`), so a
+   * row spliced in out of order would draw its lanes against a state that
+   * never ran.
+   */
+  async reveal(hash: string, label: string): Promise<number> {
+    const indexOf = () => this.rows.findIndex((row) => row.commit.hash === hash);
+
+    const already = indexOf();
+    if (already !== -1) return already;
+
+    const id = this.repoId;
+    if (!id) return -1;
+
+    this.revealing = label;
+    try {
+      for (let page = 0; page < REVEAL_PAGE_LIMIT; page += 1) {
+        if (!this.hasMore) break;
+        const before = this.rows.length;
+        await this.loadMore();
+        // Three bail-outs in one test, and they want to be one: the repo
+        // changed under us, a `status:repo` reload replaced the rows this walk
+        // was extending, or the page simply failed. In every case the rows are
+        // no longer the ones the last iteration measured, and walking on would
+        // be counting pages against a graph that restarted.
+        if (this.repoId !== id || this.rows.length <= before) break;
+
+        const at = indexOf();
+        if (at !== -1) return at;
+      }
+      return -1;
+    } finally {
+      // Same guard as everywhere else in here: a jump that outlived its repo
+      // must not clear a label belonging to the repo now on screen.
+      if (this.repoId === id) this.revealing = null;
     }
   }
 }

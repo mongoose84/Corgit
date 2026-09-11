@@ -101,12 +101,25 @@ pub enum RefKind {
 
 /// One ref badge (§5.3: "Ref badges come from `for-each-ref` (§8.3), not
 /// `%d`"). `commit` is the full hash it points at, matched against `Commit::hash`.
+///
+/// `timestamp` and `subject` describe that tip commit, and they are here for
+/// the branch search (§5.3): the thing being looked for is usually a branch
+/// whose tip is *not* among the 300 commits on screen, so a result list that
+/// could only describe loaded tips would go blank exactly where the feature
+/// earns itself. They cost nothing to carry — two more `--format` fields on a
+/// command already being run, not a second spawn.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RefBadge {
     pub name: String,
     pub commit: String,
     pub kind: RefKind,
+    /// `%(committerdate:unix)` — the same Unix seconds `Commit::timestamp`
+    /// carries, so both render through `dateFormat.ts` and a branch's date in
+    /// the search reads identically to its row's date in the graph.
+    pub timestamp: i64,
+    /// `%(contents:subject)`, which git already folds to a single line.
+    pub subject: String,
 }
 
 /// `git for-each-ref` over `refs/heads` and `refs/remotes` (§8.3) — the same
@@ -115,7 +128,12 @@ pub struct RefBadge {
 pub async fn refs(repo: &Path) -> Result<Vec<RefBadge>, String> {
     let output = git::read(
         repo,
-        &["for-each-ref", "--format=%(refname)%1f%(objectname)", "refs/heads", "refs/remotes"],
+        &[
+            "for-each-ref",
+            "--format=%(refname)%1f%(objectname)%1f%(committerdate:unix)%1f%(contents:subject)",
+            "refs/heads",
+            "refs/remotes",
+        ],
     )
     .await?;
 
@@ -131,7 +149,12 @@ fn parse_refs(raw: &str) -> Vec<RefBadge> {
 }
 
 fn parse_ref(line: &str) -> Option<RefBadge> {
-    let (refname, commit) = line.split_once('\u{1f}')?;
+    let (refname, rest) = line.split_once('\u{1f}')?;
+    let (commit, rest) = rest.split_once('\u{1f}')?;
+    // Subject last and unsplit: it is the one field that could itself contain
+    // the separator, and taking the remainder means a commit message with a
+    // stray 0x1f in it loses nothing rather than truncating the badge.
+    let (timestamp, subject) = rest.split_once('\u{1f}')?;
 
     // clippy::question_mark wants the last arm folded into a `?` on the
     // `refs/remotes/` prefix. That would work, but it breaks the symmetry the
@@ -155,7 +178,17 @@ fn parse_ref(line: &str) -> Option<RefBadge> {
         return None;
     }
 
-    Some(RefBadge { name: short.to_string(), commit: commit.to_string(), kind })
+    Some(RefBadge {
+        name: short.to_string(),
+        commit: commit.to_string(),
+        kind,
+        // A ref whose date git could not print is a ref we still want to badge
+        // and still want findable — the name is what the search matches on.
+        // Zero sorts it to the bottom of a date order, which is where an
+        // undatable ref belongs anyway.
+        timestamp: timestamp.parse().unwrap_or(0),
+        subject: subject.to_string(),
+    })
 }
 
 /// The middle pane's Mode B (§5.2, §8.5) — read-only, so unlike `FileChanges`
@@ -399,8 +432,8 @@ mod tests {
     #[test]
     fn reads_local_and_remote_branches() {
         let refs = parse_refs(
-            "refs/heads/main\u{1f}aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n\
-             refs/remotes/origin/main\u{1f}aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+            "refs/heads/main\u{1f}aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\u{1f}1700000000\u{1f}first\n\
+             refs/remotes/origin/main\u{1f}aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\u{1f}1700000000\u{1f}first\n",
         );
 
         assert_eq!(
@@ -410,20 +443,60 @@ mod tests {
                     name: "main".into(),
                     commit: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
                     kind: RefKind::Local,
+                    timestamp: 1_700_000_000,
+                    subject: "first".into(),
                 },
                 RefBadge {
                     name: "origin/main".into(),
                     commit: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
                     kind: RefKind::Remote,
+                    timestamp: 1_700_000_000,
+                    subject: "first".into(),
                 },
             ]
         );
     }
 
+    /// The branch search (§5.3) matches on the name and shows the tip's date —
+    /// an empty subject is a real state (a commit with only a body cannot
+    /// happen, but `contents:subject` is empty on one whose message git could
+    /// not read) and must not cost the badge its other three fields.
+    #[test]
+    fn a_ref_with_an_empty_subject_still_parses() {
+        let refs = parse_refs(
+            "refs/heads/wip\u{1f}bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\u{1f}1700000001\u{1f}\n",
+        );
+
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].subject, "");
+        assert_eq!(refs[0].timestamp, 1_700_000_001);
+    }
+
+    /// Subject takes the remainder, so a separator inside a commit message
+    /// truncates nothing.
+    #[test]
+    fn a_separator_inside_a_subject_is_kept() {
+        let refs = parse_refs(
+            "refs/heads/odd\u{1f}cccccccccccccccccccccccccccccccccccccccc\u{1f}1700000002\u{1f}a\u{1f}b\n",
+        );
+
+        assert_eq!(refs[0].subject, "a\u{1f}b");
+    }
+
+    #[test]
+    fn an_undatable_ref_is_still_a_badge() {
+        let refs = parse_refs(
+            "refs/heads/odd\u{1f}dddddddddddddddddddddddddddddddddddddddd\u{1f}\u{1f}x\n",
+        );
+
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].timestamp, 0);
+    }
+
     #[test]
     fn a_remote_head_symbolic_ref_is_skipped() {
         let refs = parse_refs(
-            "refs/remotes/origin/HEAD\u{1f}aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+            "refs/remotes/origin/HEAD\u{1f}aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\u{1f}1700000000\u{1f}first\n",
         );
         assert!(refs.is_empty());
     }

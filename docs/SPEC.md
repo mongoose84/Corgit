@@ -880,6 +880,51 @@ whenever a diff is open.
   fixed-width and right-aligned; at 19 characters it costs ~140 px, so it is laid out
   before the message column gets its remaining space.
 - Loads **300 commits at a time** with a "Load more" row at the bottom.
+- **Branch search**, opened from a borderless icon in the pane header or with Ctrl+F, and
+  closed with Esc or the same button. It exists because of an asymmetry: the rows are one
+  page of a long history, but the frontend holds **every** ref `for-each-ref` returned
+  (§8.4), tip loaded or not — so the question "where is the branch I cut last summer" is
+  answerable instantly even though the commit it names is 4000 rows down.
+
+  - **Summoned, not standing.** The repo list's filter box is always on screen because
+    that pane exists to be narrowed; this one would cost 43 px of the pane that wants
+    vertical height most, for a task that happens a few times a day.
+  - **It does not survive a repo change** — the box closes and the query is dropped, the
+    same rule §5.2 applies to the file selection and §5.4 to the open diff. Every part of
+    it is about the repo being left: the query was aimed at that repo's branches, and a
+    box reappearing over another repo's history already narrowed by something typed about
+    the previous one is a search that has quietly changed its subject.
+  - **The box and the results sit in flow**, as a `--bg-app` band above the rows (§11.1's
+    container rule — the band scopes what is under it) with a bounded 186 px result list
+    beneath it. Not a popover: the pane's body is a scroll container, so an absolutely
+    positioned menu anchored in it is clipped by it and scrolls away with it, which is
+    why `ContextMenu` is `position: fixed` with a measure-then-nudge pass. Nothing here
+    needs that machinery, and the rows are virtualized, so the height costs only rows.
+  - **Plain case-insensitive substring** on the whole ref name, remote included, so
+    typing `origin/` narrows to remote-tracking branches. The same predicate as the
+    *Switch & pull* picker (§5.1) and deliberately **not** `repoFilter.ts`'s
+    comma-separated terms: that plural exists for §13's bulk banner writing *Show the 2*
+    into a box, nothing inside one repo asks it, and a comma is legal in a branch name.
+  - **Local before remote, newest tip first** within each group — not alphabetical, which
+    is what every other list in Corgit uses and what `for-each-ref` hands over. The repo
+    list is alphabetical because you are hunting a name you know; here you have already
+    typed the name you know, and what is left is `release/R2026-08` against
+    `release/R2024-11`. Ties break on name so the order is total.
+  - **Finding is not switching.** Picking a result selects the branch's tip commit and
+    scrolls the graph to it. The graph already has a switch gesture — double-click a
+    badge, or the row menu (§8.3) — and a search result that wrote to the working tree
+    would be the one place in Corgit where finding something changed it. Landing on the
+    row leaves every one of those gestures one click away.
+  - **A jump may have to read pages**, because a row has to exist before there is
+    anywhere to scroll to, and the lane layout is a fold over the page sequence — a row
+    spliced in out of order would draw against a lane state that never ran. Results whose
+    tip is not among the loaded rows say so before you click. The walk is capped at
+    **ten pages (3000 commits)**, which is a time budget wearing a commit count: the
+    pages are sequential, so it is ten spawns end to end at ~85 ms each before git does
+    any work. Past the cap the pane says how far it looked and leaves *Load more* where
+    it was — the same answer at the user's own pace.
+  - The keyboard cursor is **not** the accent (§11 rule 3): nothing is selected until
+    Enter, and Enter is what paints a row in `--accent-muted` one list down.
 - Click a commit → it is selected, and nothing else happens. **The info panel does not
   open on selection** (§5.2); *Show info* on the row's context menu opens it.
 - Right-click a commit → **Show info** first, then the branch entries for any ref badges the
@@ -1284,11 +1329,26 @@ git log --all --date-order -z -n 300 --skip=<offset> \
 ```
 
 Records NUL-separated (`-z`), fields separated by `%x1f`. Parents in `%P` drive lane layout.
-Ref badges come from `for-each-ref` (§8.3), not `%d`.
+Ref badges come from `for-each-ref` (§8.3), not `%d`:
+
+```
+git for-each-ref --format=%(refname)%1f%(objectname)%1f%(committerdate:unix)%1f%(contents:subject) \
+  refs/heads refs/remotes
+```
+
+The last two fields are for §5.3's branch search, which describes branches whose tip is not
+among the loaded rows and so cannot look either up from the graph. They are two more
+`--format` fields on a command already being run, not a second spawn. Subject is parsed as
+the remainder rather than split, since it is the one field that could itself contain the
+separator.
 
 `--all` includes remote-tracking refs, so `origin/*` branches appear in the graph. Intended.
 If lane count becomes unreadable on a repo with hundreds of remote branches, add a branch
-filter dropdown above the graph (Git Graph's approach) — v2, not v1.
+filter dropdown above the graph (Git Graph's approach) — v2, not v1. §5.3's branch search is
+**not** that dropdown and does not close the question: it finds a branch and goes to it,
+leaving every lane on screen. Scoping the graph to one branch is still the unbuilt thing,
+and the argument against doing it instead was that where an old branch sits relative to
+`main` is usually the reason you went looking for it.
 
 Run `git commit-graph write --reachable` on first load of a large repo, and consider setting
 `fetch.writeCommitGraph=true`, to keep traversal fast.
