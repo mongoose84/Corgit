@@ -642,4 +642,41 @@ mod tests {
         let files = parse_files(&joined(&["1 M. N... 100644 100644 100644 aaa bbb my notes.txt"]));
         assert_eq!(files.staged, vec![FileEntry { path: "my notes.txt".into(), status: 'M' }]);
     }
+
+    use crate::testrepo::TempRepo;
+
+    /// The sweep's own command, run against a repository that has pointed
+    /// `core.fsmonitor` at a script — and the only test in this file that
+    /// needs a real git, because the thing under test is what git decides to
+    /// execute rather than what it prints.
+    ///
+    /// This is the automatic path: discovery takes every direct child of the
+    /// chosen root (§8.1) and the sweep reads each on a timer, so nobody has
+    /// clicked anything and no repo here was necessarily cloned on purpose.
+    /// Verified before `git::READ_CONFIG` existed — the hook ran twice per
+    /// `git status`, and a full sweep would have run it twice per tick for as
+    /// long as the folder sat there.
+    ///
+    /// A marker file rather than the hook's stderr: `git::read` returns stderr
+    /// to the caller, so asserting on it would pass if git merely *reported*
+    /// the hook instead of running it.
+    #[tokio::test]
+    async fn a_repos_own_fsmonitor_hook_never_runs_during_a_status_read() {
+        let repo = TempRepo::new("status-fsmonitor");
+        repo.write("a.txt", "x\n");
+        repo.commit_all("initial");
+
+        repo.write("hook.sh", "#!/bin/sh\ntouch \"$(dirname \"$0\")/HOOK-RAN\"\nexit 1\n");
+        let hook = repo.path().join("hook.sh").to_string_lossy().replace('\\', "/");
+        repo.git(&["config", "core.fsmonitor", &hook]);
+
+        // The result itself is beside the point; that it was produced without
+        // running the repo's program is the whole assertion.
+        let _ = query(repo.path()).await;
+
+        assert!(
+            !repo.exists("HOOK-RAN"),
+            "a scanned repo's core.fsmonitor program ran during the status sweep"
+        );
+    }
 }

@@ -1,9 +1,11 @@
 mod atomicfile;
+mod bulk;
 mod branch;
 mod cache;
 mod commit;
 mod diff;
 mod discovery;
+mod fetchsweep;
 mod git;
 mod graph;
 mod ignore;
@@ -14,12 +16,15 @@ mod remote;
 mod roots;
 mod settings;
 mod status;
+mod sweep;
+#[cfg(test)]
+mod testrepo;
 mod watch;
 mod writequeue;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -38,8 +43,6 @@ use crate::writequeue::WriteQueues;
 /// welcome screen stays a list rather than a search problem.
 const MAX_RECENT_ROOTS: usize = 10;
 
-const SWEEP_EVENT: &str = "status:sweep";
-const REPO_STATUS_EVENT: &str = "status:repo";
 /// A failure was added to the Recent Problems ring (§13). Emitted so the
 /// *other* windows learn about it — the one that triggered the operation
 /// already has the error in hand.
@@ -192,6 +195,36 @@ impl RootState {
 
         self.repos = repos;
     }
+
+    /// Fold one sweep's results into the open root (§6).
+    ///
+    /// **A merge, not a replace**, and that is the whole of why this is a
+    /// named method rather than two loops inside `sweep`. A repo whose write
+    /// lock was held when the sweep reached it is skipped rather than waited
+    /// for (§6, §7 rule 2), which means it is absent from *both* maps — so
+    /// anything that assigned these wholesale would erase a repo's status for
+    /// no reason other than that it was busy, and the row would blank every
+    /// time the user staged something in it.
+    ///
+    /// The two maps are kept mutually exclusive in both directions, because
+    /// the row draws from both: a repo that has just succeeded must lose the
+    /// error it used to carry, and one that has just failed must lose the
+    /// status, or `errors` says unknown while `statuses` still shows a clean
+    /// dot and the row picks whichever it happens to read first.
+    pub(crate) fn merge_sweep_results(
+        &mut self,
+        statuses: &HashMap<String, RepoStatus>,
+        errors: &HashMap<String, String>,
+    ) {
+        for (id, status) in statuses {
+            self.statuses.insert(id.clone(), status.clone());
+            self.errors.remove(id);
+        }
+        for (id, err) in errors {
+            self.errors.insert(id.clone(), err.clone());
+            self.statuses.remove(id);
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -208,41 +241,6 @@ struct RootView {
     /// (§9.5) — the frontend selects it on load so a relaunch drops you back
     /// where you left off.
     last_selected: Option<String>,
-}
-
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct SweepEvent {
-    /// Echoed back so a window can ignore results for a root it no longer shows.
-    root: PathBuf,
-    statuses: HashMap<String, RepoStatus>,
-    errors: HashMap<String, String>,
-    /// Measured against the 300 ms budget in §1. It is the number the whole
-    /// project is justified by, so it is reported, not guessed at.
-    elapsed_ms: u64,
-}
-
-/// Emitted after a stage, unstage or commit lands, so the row and middle pane
-/// update immediately rather than waiting up to 60 s for the next sweep tick.
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct RepoStatusEvent {
-    root: PathBuf,
-    repo_id: String,
-    status: Option<RepoStatus>,
-    error: Option<String>,
-    /// The pane's rows, carried only when this repo is the selected one —
-    /// `None` for every other repo, which is what keeps the §1 memory budget
-    /// to counts alone for the other 76.
-    ///
-    /// This is what lets the frontend stop calling `repo_files` after every
-    /// write: that call re-ran the same `git status` this event was already
-    /// built from (§8.2). It also closes a staleness gap that had nothing to
-    /// do with speed — a stage done in the user's terminal reaches here
-    /// through `watch.rs`, and used to refresh the row's badge while leaving
-    /// the pane underneath it showing the pre-stage list until the repo was
-    /// reselected.
-    files: Option<FileChanges>,
 }
 
 #[tauri::command]
@@ -394,7 +392,7 @@ fn open_root(path: PathBuf, app: AppHandle) -> Result<RootView, String> {
     };
 
     remember_root(&app, &root);
-    start_sweep(&app, generation, repos.clone());
+    sweep::start_sweep(&app, generation, repos.clone());
     sync_watchers(&app);
 
     // Split rather than a single total, because the three phases fail for
@@ -480,7 +478,7 @@ fn refresh_root(app: AppHandle) -> Result<RootView, String> {
         )
     };
 
-    start_sweep(&app, generation, view.repos.clone());
+    sweep::start_sweep(&app, generation, view.repos.clone());
     sync_watchers(&app);
     Ok(view)
 }
@@ -710,16 +708,26 @@ async fn open_in_vscode(
 ) -> Result<(), String> {
     let path = repo_path(&app, &repo_id)?;
 
-    // VS Code's Windows launcher is a `.cmd` shim; `Command::new("code")` alone
-    // does not resolve it (Windows does not walk PATHEXT for a bare child
-    // process the way a shell does), so it has to run through one.
-    let mut command = if cfg!(windows) {
-        let mut command = tokio::process::Command::new("cmd");
-        command.args(["/C", "code"]);
-        command
-    } else {
-        tokio::process::Command::new("code")
-    };
+    // VS Code's Windows entry point is `code.cmd`, a shim, and Windows does not
+    // walk PATHEXT for a bare child process the way a shell does — so the name
+    // has to be resolved before spawning. This used to hand it to `cmd /C`
+    // instead, which resolved it by putting a shell between Corgit and these
+    // arguments; see `program_on_path` for why that was not survivable.
+    //
+    // A missing VS Code is now an error rather than a spawn that succeeds and
+    // does nothing: `cmd` exists whether or not `code` does, so the old form
+    // reported success and left the user looking at a window that never
+    // opened — precisely what §13 forbids, and what `openInVSCode`'s own
+    // error handling in `repos.svelte.ts` was already written to catch.
+    #[cfg(windows)]
+    let mut command = tokio::process::Command::new(program_on_path("code").ok_or_else(|| {
+        "could not find VS Code — install it, or re-run its installer with \
+         \"Add to PATH\" ticked"
+            .to_string()
+    })?);
+    #[cfg(not(windows))]
+    let mut command = tokio::process::Command::new("code");
+
     command.arg(&path);
 
     if let Some(file) = file {
@@ -866,6 +874,66 @@ fn open_folder(dir: &Path) -> Result<(), String> {
         .map_err(|err| format!("could not open the folder: {err}"))
 }
 
+/// Resolve a bare program name against `PATH` the way a shell would, trying
+/// each `PATHEXT` extension in turn.
+///
+/// This exists so VS Code is spawned *directly* rather than through
+/// `cmd /C code`, which is what `open_in_vscode` used to do. cmd re-parses the
+/// command line it is handed, and Rust quotes an argument only when it
+/// contains a space or a tab — so a repo folder or a file named `build&deploy`
+/// reached cmd unquoted and the `&` in it started a second command. `&`, `|`,
+/// `^`, `<` and `>` are all legal in Windows filenames, and the name can
+/// arrive in a repo someone cloned, which made a right-click on a file row
+/// enough to run it. Resolving the shim here takes the shell out of the path
+/// entirely, which is the only fix that holds: no amount of quoting survives
+/// a second parser with different rules.
+///
+/// Spawning the resolved `.cmd` is then safe on its own terms — CVE-2024-24576
+/// is this same hazard from the other direction, and std has escaped a batch
+/// file's arguments since the `rust-version = "1.77.2"` floor in Cargo.toml.
+#[cfg(windows)]
+fn program_on_path(name: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    let extensions = path_extensions(std::env::var("PATHEXT").ok().as_deref());
+
+    for dir in std::env::split_paths(&path) {
+        for extension in &extensions {
+            let candidate = dir.join(format!("{name}{extension}"));
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+/// The extensions Windows tries for a bare program name, in the order its
+/// shell tries them. Read from `PATHEXT` rather than hard-coded so a machine
+/// that has added one still resolves it, falling back to the documented
+/// default that every Windows install has shipped since NT.
+///
+/// `.CMD` is the entry that matters and the reason this is not simply
+/// `[".EXE"]`: VS Code's Windows entry point is `code.cmd`. A resolver that
+/// missed it would leave *Open in VS Code* permanently unavailable, which is
+/// the failure this whole change was made to stop having a silent version of.
+///
+/// Takes the value rather than reading the environment so the list is testable
+/// without setting a process-wide variable.
+#[cfg(windows)]
+fn path_extensions(pathext: Option<&str>) -> Vec<String> {
+    const DEFAULT: &str = ".COM;.EXE;.BAT;.CMD";
+
+    pathext
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(DEFAULT)
+        .split(';')
+        .map(str::trim)
+        .filter(|extension| !extension.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
 #[cfg(windows)]
 fn windows_terminal_on_path() -> Option<PathBuf> {
     std::env::split_paths(&std::env::var_os("PATH")?)
@@ -992,7 +1060,7 @@ fn persist_root_settings(app: &AppHandle, root_path: &Path, pins: HashSet<String
 #[tauri::command]
 async fn fetch_repo(repo_id: String, app: AppHandle) -> Result<(), String> {
     let result = write_and_refresh(&app, repo_id.clone(), "Fetch", |path| async move { remote::fetch(&path).await }).await;
-    record_fetch_attempt(&app, &repo_id);
+    fetchsweep::record_fetch_attempt(&app, &repo_id);
     result
 }
 
@@ -1004,430 +1072,6 @@ async fn pull_repo(repo_id: String, app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 async fn push_repo(repo_id: String, app: AppHandle) -> Result<(), String> {
     write_and_refresh(&app, repo_id, "Push", |path| async move { remote::push(&path).await }).await
-}
-
-/// How many of the global eight (§7 rule 3) a bulk run may hold at once.
-///
-/// One click here queues dozens of writes, and left uncapped they take every
-/// slot: the status sweep, the graph read behind the next click, and the repo
-/// the user gives up and selects instead all end up queued behind a run whose
-/// end they cannot see. Keeping half the budget free is what leaves the window
-/// answering while the herd comes down (§7 rule 4).
-///
-/// Deliberately the same 4 as [`FETCH_CONCURRENCY`] rather than a second
-/// number to defend: the fetch sweep arrived at it by this exact argument, and
-/// a pull is that work with a merge on the end, holding its slot longer.
-const BULK_CONCURRENCY: usize = 4;
-
-const BULK_PROGRESS_EVENT: &str = "bulk:progress";
-
-/// The bulk runs (§5.1's *Fetch all*, *Pull all* and *Branch…*, §4.1's
-/// Repository ▸ root group). An enum rather than a closure passed into the
-/// runner: they differ only in which git call they make, and the interactivity
-/// decision below is the one thing about them worth reading in a single place.
-///
-/// `Clone` rather than `Copy` since `Branch` carries a name. It is an
-/// `Arc<str>` so the per-task clones share one allocation — the whole point of
-/// the run is that a single name reaches every repo, and copying it per repo
-/// would be the one place this file pretended otherwise.
-#[derive(Clone)]
-enum BulkOp {
-    Fetch,
-    Pull,
-    Branch { name: Arc<str>, checkout: bool },
-    /// §5.1's *Switch & pull* — one existing branch, checked out in every repo
-    /// the dialog listed, and pulled unless the user unticked it.
-    SwitchPull { name: Arc<str>, pull: bool },
-}
-
-impl BulkOp {
-    /// The user's word for the operation, shared with `write_and_refresh` so
-    /// the busy row, the Problems record and the failure banner all name the
-    /// same act (§13).
-    fn label(&self) -> &'static str {
-        match self {
-            Self::Fetch => "Fetch",
-            Self::Pull => "Pull",
-            Self::Branch { .. } => "Branch",
-            // Two labels for one variant, because the checkbox changes what the
-            // run actually does and this word is what the busy row, the
-            // Problems record and the failure banner all print (§13). A repo
-            // that failed to switch, in a run that was never going to pull,
-            // must not be recorded as having failed to "Switch & pull".
-            Self::SwitchPull { pull, .. } => {
-                if *pull {
-                    "Switch & pull"
-                } else {
-                    "Switch"
-                }
-            }
-        }
-    }
-
-    async fn run(self, path: &Path) -> Result<(), String> {
-        match self {
-            // The one place §8.7's "the user is sitting right there, so let it
-            // prompt" stops holding. It is true of a fetch on one repo and
-            // false of a fetch on seventy-seven: a queue of credential dialogs
-            // is not a fetch, it is a hang with extra steps, and the user
-            // cannot tell which repo each one is even for. So a bulk fetch is
-            // the non-interactive one, and a repo whose auth fails takes the ⚿
-            // badge that already means exactly this — with the row's own
-            // *Fetch now* as the place a prompt is welcome (§13).
-            Self::Fetch => remote::fetch_background(path).await,
-            // Pull stays interactive. It only ever runs on repos we believe
-            // are behind, and believing that means a fetch reached their
-            // remote recently — so a prompt here is both rare and worth
-            // answering, unlike the fetch case above.
-            Self::Pull => remote::pull(path).await,
-            // `HEAD`, never the branch name the dialog printed beside the row.
-            // That name came from a status read that can be a whole sweep old
-            // (§5.1), and the repo may have been switched in a terminal since
-            // — so the start point is resolved by git, in the repo, at the
-            // moment the branch is cut. Same rule, and the same reason, as
-            // `remote::publish` pushing `HEAD` rather than a cached name.
-            //
-            // No network, so this is `git::write` like the single-repo create:
-            // it writes to `.git`, which makes it a write (§7 rule 1), but it
-            // needs no credential helper.
-            Self::Branch { name, checkout } => branch::create(path, &name, "HEAD", checkout).await,
-            // Two git commands, one operation — and deliberately not two
-            // queued writes. `write_and_refresh` holds this repo's write lock
-            // around the whole closure (§7 rule 1), so nothing can land between
-            // the checkout and the pull: another window's fetch, the row's own
-            // Pull, or a second bulk run would each be a merge starting from a
-            // tree that is no longer the one that was just checked out.
-            //
-            // The pull is skipped rather than the switch on `!pull`, because
-            // the checkbox is *Pull after switching* — the switch is the part
-            // the user always asked for.
-            Self::SwitchPull { name, pull } => {
-                branch::switch_to(path, &name).await?;
-                if pull {
-                    // Interactive, like every other pull that is not the fetch
-                    // sweep: this ran because the user pressed a button and is
-                    // watching the strip count, so a credential prompt is
-                    // worth answering (§8.7). The cap of four keeps it to four
-                    // prompts at worst rather than sixty.
-                    remote::pull(path).await?;
-                }
-                Ok(())
-            }
-        }
-    }
-}
-
-/// Progress for the repo-list strip's "Pulling… 4 of 7" (§5.1). Sent on every
-/// completion rather than batched: the count is the only thing on screen that
-/// moves during a run, and a run is seconds long per repo.
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct BulkProgress {
-    operation: String,
-    /// Repos that have landed, success or failure. The solid half of the
-    /// strip's bar.
-    done: u32,
-    /// Repos with a git process running right now — never more than
-    /// [`BULK_CONCURRENCY`]. Drawn as a dimmer segment ahead of `done`, which
-    /// is what stops the bar sitting at zero for the first few seconds while
-    /// four pulls work invisibly: it shows work happening without claiming
-    /// work is finished. The gap between the two segments is the concurrency
-    /// cap, made visible for free.
-    running: u32,
-    total: u32,
-}
-
-/// What the run is handed back with. §13's error model names one repo at a
-/// time, and a bulk run cannot — so the failures come back as a list and the
-/// frontend raises **one** notice for the run, with each repo still carrying
-/// its own `!` badge from `write_and_refresh`'s Problems record.
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct BulkOutcome {
-    operation: String,
-    total: u32,
-    succeeded: u32,
-    /// Repos *Stop* got to before they started. Reported separately from
-    /// failures because they are not one: nothing was attempted, nothing
-    /// changed, and the repo still carries whatever badge it had.
-    skipped: u32,
-    failed: Vec<BulkFailure>,
-}
-
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct BulkFailure {
-    repo_id: String,
-    /// Carried rather than looked up by the frontend: the banner names these
-    /// repos and writes them into the filter box (§5.1), and by the time it
-    /// renders, a rescan may have removed the row it would have read.
-    name: String,
-    message: String,
-}
-
-/// Runs `op` across `targets`, at most [`BULK_CONCURRENCY`] at a time.
-///
-/// Every repo goes through `write_and_refresh` exactly as a single-repo
-/// command does — the per-repo write queue (§7 rule 1), the Problems record
-/// and the status republish are all things a bulk run needs, and the moment
-/// this hand-rolls that sequence is the moment the two drift apart.
-async fn run_bulk(app: &AppHandle, op: BulkOp, targets: Vec<Repo>) -> BulkOutcome {
-    let operation = op.label();
-    let total = targets.len() as u32;
-    app.state::<AppState>().bulk_cancelled.store(false, Ordering::SeqCst);
-    emit_bulk_progress(app, operation, 0, 0, total);
-
-    let semaphore = Arc::new(tokio::sync::Semaphore::new(BULK_CONCURRENCY));
-    let done = Arc::new(AtomicU32::new(0));
-    // Counted here rather than read back off the semaphore's available
-    // permits: a permit is taken slightly before the git process starts and
-    // released slightly after it ends, and this number is drawn on screen —
-    // it should count repos actually being worked on, not permits in hand.
-    let running = Arc::new(AtomicU32::new(0));
-
-    let tasks: Vec<_> = targets
-        .into_iter()
-        .map(|repo| {
-            let app = app.clone();
-            let semaphore = semaphore.clone();
-            let done = done.clone();
-            let running = running.clone();
-            let op = op.clone();
-            tauri::async_runtime::spawn(async move {
-                let Ok(_permit) = semaphore.acquire().await else {
-                    return BulkResult::Skipped;
-                };
-
-                // *Stop*, and the whole of what it can promise (§5.1). A
-                // `git pull` mid-merge cannot be cancelled — killing it is how
-                // you get a half-merged tree — so Stop is about the queue, and
-                // this is the queue's last honest moment: the permit is held
-                // but no process has been spawned.
-                if app.state::<AppState>().bulk_cancelled.load(Ordering::SeqCst) {
-                    return BulkResult::Skipped;
-                }
-
-                // Emitted on the way in as well as on the way out, so the bar
-                // moves the moment the run starts rather than after the first
-                // repo lands.
-                let started = running.fetch_add(1, Ordering::SeqCst) + 1;
-                emit_bulk_progress(&app, operation, done.load(Ordering::SeqCst), started, total);
-
-                // Read before `op` is moved into the closure below. Only the
-                // fetch bookkeeping needs it, and it is one bit rather than a
-                // second clone of the op.
-                let is_fetch = matches!(op, BulkOp::Fetch);
-                let result =
-                    write_and_refresh(&app, repo.id.clone(), operation, |path| async move { op.run(&path).await }).await;
-
-                // Progress counts *completions*, including failures: the strip
-                // is telling the user how much of the run is left, not how
-                // much of it worked. The banner at the end is where the
-                // difference is reported.
-                let finished = done.fetch_add(1, Ordering::SeqCst) + 1;
-                let still_running = running.fetch_sub(1, Ordering::SeqCst) - 1;
-                emit_bulk_progress(&app, operation, finished, still_running, total);
-
-                match result {
-                    Ok(()) => {
-                        if is_fetch {
-                            record_fetch_attempt(&app, &repo.id);
-                        }
-                        BulkResult::Ok
-                    }
-                    Err(message) => {
-                        if is_fetch {
-                            record_bulk_fetch_failure(&app, &repo.id, remote::looks_like_auth_failure(&message));
-                        }
-                        BulkResult::Failed(BulkFailure { repo_id: repo.id, name: repo.name, message })
-                    }
-                }
-            })
-        })
-        .collect();
-
-    let mut failed = Vec::new();
-    let mut succeeded = 0;
-    let mut skipped = 0;
-    for task in tasks {
-        // A task that panicked is counted as skipped rather than silently
-        // dropped: the three numbers have to add up to `total`, or the banner
-        // is arithmetic the user can see is wrong.
-        match task.await.unwrap_or(BulkResult::Skipped) {
-            BulkResult::Ok => succeeded += 1,
-            BulkResult::Skipped => skipped += 1,
-            BulkResult::Failed(failure) => failed.push(failure),
-        }
-    }
-
-    // A fetch moved `refs/remotes/*` for every repo it reached, which is what
-    // ahead/behind is read from (§8.2) — and the strip's own count is the
-    // first thing that has to be right afterwards.
-    if matches!(op, BulkOp::Fetch) {
-        publish_fetch_state(app);
-        trigger_sweep(app, Scope::All);
-    }
-
-    BulkOutcome { operation: operation.to_string(), total, succeeded, skipped, failed }
-}
-
-/// One repo's share of a bulk run. Three outcomes rather than a `Result`,
-/// because *skipped* is neither half of one: nothing ran, so there is no error
-/// to report and no success to count.
-enum BulkResult {
-    Ok,
-    Skipped,
-    Failed(BulkFailure),
-}
-
-/// §5.1's *Stop*. Stops the run from starting anything further; the repos
-/// already in flight finish, because there is no way to abandon a `git pull`
-/// part-way through that does not leave a tree someone has to repair by hand.
-#[tauri::command]
-fn stop_bulk(app: AppHandle) {
-    app.state::<AppState>().bulk_cancelled.store(true, Ordering::SeqCst);
-}
-
-fn emit_bulk_progress(app: &AppHandle, operation: &str, done: u32, running: u32, total: u32) {
-    let event = BulkProgress { operation: operation.to_string(), done, running, total };
-    if let Err(err) = app.emit(BULK_PROGRESS_EVENT, event) {
-        log::warn!("could not publish bulk progress ({err})");
-    }
-}
-
-/// A bulk fetch's counterpart to [`record_fetch_attempt`] — same bookkeeping,
-/// the opposite decision about the badge.
-///
-/// The per-repo manual fetch clears "auth needed" whatever happens, because
-/// the user is watching that one repo and may have just typed a password into
-/// it. A bulk fetch never prompts (see [`BulkOp::run`]), so a repo that failed
-/// on auth has learned nothing new — clearing its badge there would hide the
-/// one thing the run actually discovered about it.
-fn record_bulk_fetch_failure(app: &AppHandle, repo_id: &str, auth_failed: bool) {
-    let state = app.state::<AppState>();
-    let mut current = state.root.lock().expect("root mutex poisoned");
-    let Some(root) = current.as_mut() else { return };
-    root.last_fetch_at.insert(repo_id.to_string(), now_unix());
-    if auth_failed {
-        root.auth_needed.insert(repo_id.to_string());
-    }
-}
-
-/// Publishes `last_fetch_at` and `auth_needed` the way the fetch sweep does,
-/// and saves the cache once for the whole run.
-///
-/// Deliberately reusing `FetchSweepEvent`: what changed is exactly what that
-/// event exists to carry, and a second event shape saying the same thing is
-/// how the row's ⚿ badge ends up with two ways to be set that disagree.
-/// `elapsed_ms` is zero — the run's own timing belongs to the strip, and the
-/// repo list's header readout is the *status* sweep's number (§1).
-fn publish_fetch_state(app: &AppHandle) {
-    let state = app.state::<AppState>();
-    let published = {
-        let current = state.root.lock().expect("root mutex poisoned");
-        let Some(root) = current.as_ref() else { return };
-        (root.path.clone(), root.statuses.clone(), root.last_fetch_at.clone(), root.auth_needed.clone())
-    };
-    let (root_path, statuses, last_fetch_at, auth_needed) = published;
-    persist_cache(app, &root_path, statuses, last_fetch_at.clone());
-
-    let event = FetchSweepEvent { root: root_path, last_fetch_at, auth_needed, elapsed_ms: 0 };
-    if let Err(err) = app.emit(FETCH_SWEEP_EVENT, event) {
-        log::warn!("could not publish bulk fetch results ({err})");
-    }
-}
-
-/// Every repo in the open root that has a remote worth fetching (§5.1's
-/// *Fetch all*). A repo with no remote is dropped here rather than failing
-/// inside the run and landing in the banner as a failure it is not.
-#[tauri::command]
-async fn fetch_all(app: AppHandle) -> Result<BulkOutcome, String> {
-    let repos = open_repos(&app)?;
-
-    let mut targets = Vec::with_capacity(repos.len());
-    for repo in repos {
-        if remote::has_remote(&repo.path).await {
-            targets.push(repo);
-        }
-    }
-
-    Ok(run_bulk(&app, BulkOp::Fetch, targets).await)
-}
-
-/// The repos the *last* status read said were behind (§5.1's *Pull all*).
-///
-/// Reading the decision out of cached status is safe in both directions, which
-/// is the test CLAUDE.md sets for anything that decides from the cache: a repo
-/// that has since caught up gets a `git pull` that is a no-op, and one that has
-/// since fallen behind is picked up by the next run. Neither is a wrong answer
-/// the user pays for — unlike, say, pushing a cached branch name (§8.7).
-///
-/// Deliberately blind to the filter box (§5.1): the strip counts the whole
-/// root, so this must pull the whole root, or the number the user pressed and
-/// the work that happened are two different things.
-#[tauri::command]
-async fn pull_all_behind(app: AppHandle) -> Result<BulkOutcome, String> {
-    let targets = {
-        let state = app.state::<AppState>();
-        let current = state.root.lock().expect("root mutex poisoned");
-        let root = current.as_ref().ok_or_else(|| "No folder is open".to_string())?;
-        root.repos
-            .iter()
-            .filter(|repo| root.statuses.get(&repo.id).is_some_and(status::can_pull))
-            .cloned()
-            .collect::<Vec<_>>()
-    };
-
-    Ok(run_bulk(&app, BulkOp::Pull, targets).await)
-}
-
-/// §5.1's *Branch…* — one branch name, cut in every repo the dialog listed.
-///
-/// The dialog has already dropped the repos that cannot take it (the name is
-/// already there, or a merge is in progress and checkout is on), and this is
-/// deliberately not a second gate on the same question: ids in, branches out.
-/// Re-deciding here from cached status would add nothing but a way for the two
-/// halves to disagree, and anything that still fails surfaces as git's own
-/// error in the run's banner like every other write (§13).
-#[tauri::command]
-async fn branch_all(
-    app: AppHandle,
-    repo_ids: Vec<String>,
-    name: String,
-    checkout: bool,
-) -> Result<BulkOutcome, String> {
-    let targets = repos_by_id(&app, &repo_ids)?;
-    if targets.is_empty() {
-        return Err("None of those repositories are open any more".to_string());
-    }
-    Ok(run_bulk(&app, BulkOp::Branch { name: name.into(), checkout }, targets).await)
-}
-
-/// §5.1's *Switch & pull* — one existing branch, checked out across the *All*
-/// section and then brought up to date.
-///
-/// Same contract as `branch_all` above and for the same reason: the dialog has
-/// already dropped the repos that cannot take it (no branch of that name, or a
-/// merge in progress), and re-deciding that here from cached status would add
-/// nothing but a way for the two halves to disagree. Ids in, branches switched.
-///
-/// A dirty tree is deliberately *not* filtered here either, on either side of
-/// the boundary. Git switches through uncommitted changes unless they collide
-/// with what differs between the branches, and which of the two it is cannot be
-/// known without trying — §8.3 forbids force-checkout, so the honest thing is
-/// to let git refuse and surface its own stderr in the run's banner (§13).
-#[tauri::command]
-async fn switch_pull_all(
-    app: AppHandle,
-    repo_ids: Vec<String>,
-    name: String,
-    pull: bool,
-) -> Result<BulkOutcome, String> {
-    let targets = repos_by_id(&app, &repo_ids)?;
-    if targets.is_empty() {
-        return Err("None of those repositories are open any more".to_string());
-    }
-    Ok(run_bulk(&app, BulkOp::SwitchPull { name: name.into(), pull }, targets).await)
 }
 
 /// Branch names per repo, for both multi-repo dialogs — Create Branch's
@@ -1600,23 +1244,6 @@ fn publish_needed(app: &AppHandle, repo_id: &str) -> Result<bool, String> {
     Ok(status::needs_publish(branch, status.upstream.as_deref()))
 }
 
-/// Records this repo's fetch attempt and clears any "auth needed" flag (§8.7,
-/// §13) — shared by the manual `fetch_repo` command. Persists immediately,
-/// mirroring `emit_repo_status`'s per-write cache save: a manual fetch is a
-/// user action, not a batch the fetch sweep already throttles.
-fn record_fetch_attempt(app: &AppHandle, repo_id: &str) {
-    let state = app.state::<AppState>();
-    let published = {
-        let mut current = state.root.lock().expect("root mutex poisoned");
-        let Some(root) = current.as_mut() else { return };
-        root.last_fetch_at.insert(repo_id.to_string(), now_unix());
-        root.auth_needed.remove(repo_id);
-        (root.path.clone(), root.statuses.clone(), root.last_fetch_at.clone())
-    };
-    let (root_path, statuses, last_fetch_at) = published;
-    persist_cache(app, &root_path, statuses, last_fetch_at);
-}
-
 /// §13's *Work in progress*, published for one repo. `operation` is the
 /// user's word for what they asked — "Switch branch", "Pull" — the same one
 /// the Problems record and the error banner use, so the row's tooltip and the
@@ -1717,90 +1344,8 @@ where
         }
     }
 
-    emit_repo_status(app, &repo_id, &path).await;
+    sweep::emit_repo_status(app, &repo_id, &path).await;
     result
-}
-
-/// Re-reads one repo's status outside any write lock, updates it in the open
-/// root (if that root and repo are still current), saves the cache, and
-/// notifies every window watching this root — the single-repo counterpart to
-/// what a full sweep does for all of them. `pub(crate)` so `watch.rs`'s
-/// debounced FS-watcher callbacks (§6) can call it directly, the same way
-/// `write_and_refresh` does after every mutating command.
-pub(crate) async fn emit_repo_status(app: &AppHandle, repo_id: &str, path: &Path) {
-    let state = app.state::<AppState>();
-
-    // Whether the middle pane is looking at this repo decides how much of the
-    // read to keep: paths for the selected repo, counts for everyone else.
-    // Asked *before* the git call rather than after, because the answer picks
-    // the command — deciding afterwards would mean a second `git status` for
-    // the paths, which is precisely the spawn this exists to remove.
-    //
-    // Racing the user's selection here is harmless in the direction that
-    // matters: a selection that moves on mid-read publishes file lists the
-    // frontend drops, whereas one that arrives late leaves the pane to
-    // `repo_files`, which selection calls anyway.
-    let selected = {
-        let current = state.root.lock().expect("root mutex poisoned");
-        current
-            .as_ref()
-            .is_some_and(|root| root.selected.as_deref() == Some(repo_id))
-    };
-
-    // §7 rule 2, and it matters far more now than when this was reached only
-    // by the hot set: every repo is watched, and a commit writes `.git` a
-    // dozen times, so an unguarded read here would parse repos mid-mutation
-    // routinely rather than rarely. Blocking rather than `try_read` because
-    // unlike the sweep this refresh has no next tick to fall back on — it is
-    // the only thing that will publish this change.
-    //
-    // No deadlock with `write_and_refresh`: that releases its write guard
-    // before calling here, precisely so this can be taken.
-    let _read_guard = state.write_queues.read(repo_id).await;
-
-    let (status, files) = if selected {
-        match status::query_with_files(path).await {
-            Ok((status, files)) => (Ok(status), Some(files)),
-            Err(err) => (Err(err), None),
-        }
-    } else {
-        (status::query(path).await, None)
-    };
-
-    let published = {
-        let mut current = state.root.lock().expect("root mutex poisoned");
-        let Some(root) = current.as_mut() else { return };
-        if !root.repos.iter().any(|repo| repo.id == repo_id) {
-            return;
-        }
-
-        match &status {
-            Ok(s) => {
-                root.statuses.insert(repo_id.to_string(), s.clone());
-                root.errors.remove(repo_id);
-            }
-            Err(err) => {
-                root.errors.insert(repo_id.to_string(), err.clone());
-                root.statuses.remove(repo_id);
-            }
-        }
-
-        (root.path.clone(), root.statuses.clone(), root.last_fetch_at.clone())
-    };
-
-    let (root_path, statuses, last_fetch_at) = published;
-    persist_cache(app, &root_path, statuses, last_fetch_at);
-
-    let event = RepoStatusEvent {
-        root: root_path,
-        repo_id: repo_id.to_string(),
-        status: status.as_ref().ok().cloned(),
-        error: status.as_ref().err().cloned(),
-        files,
-    };
-    if let Err(err) = app.emit(REPO_STATUS_EVENT, event) {
-        log::warn!("could not publish repo status ({err})");
-    }
 }
 
 /// The one place that writes the per-root cache file (§9.5): every caller —
@@ -1826,253 +1371,6 @@ fn now_unix() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
-}
-
-fn start_sweep(app: &AppHandle, generation: u64, repos: Vec<Repo>) {
-    let app = app.clone();
-    tauri::async_runtime::spawn(async move { sweep(app, generation, repos).await });
-}
-
-async fn sweep(app: AppHandle, generation: u64, repos: Vec<Repo>) {
-    let (write_queues, reconcile) = {
-        let state = app.state::<AppState>();
-        if state.sweeping.swap(true, Ordering::SeqCst) {
-            return;
-        }
-
-        // Which repo this sweep owes a *full* republish to when it lands, if
-        // it is covering that repo at all. Taken here because `collect` below
-        // consumes the list, and because the answer is only interesting for
-        // the one repo whose paths anybody is looking at.
-        let reconcile = {
-            let current = state.root.lock().expect("root mutex poisoned");
-            current.as_ref().and_then(|root| {
-                let id = root.selected.as_ref()?;
-                let repo = repos.iter().find(|repo| &repo.id == id)?;
-                Some((repo.id.clone(), repo.path.clone()))
-            })
-        };
-
-        (state.write_queues.clone(), reconcile)
-    };
-
-    let started = Instant::now();
-    let (statuses, errors, stragglers) = collect(write_queues, repos, SWEEP_PATIENCE).await;
-    let elapsed_ms = started.elapsed().as_millis() as u64;
-
-    // Only the slow ones. A sweep runs every 60 s and normally lands inside
-    // §1's 300 ms budget, so logging each would bury the launch it is here to
-    // explain; a sweep past this threshold is one that held the 8-process cap
-    // (§7.3) long enough for clicking a repo to feel stuck.
-    const SLOW_SWEEP_MS: u64 = 2_000;
-    if elapsed_ms >= SLOW_SWEEP_MS || !stragglers.is_empty() {
-        log::info!(
-            "slow sweep: {} ok, {} failed in {} ms, {} still reading",
-            statuses.len(),
-            errors.len(),
-            elapsed_ms,
-            stragglers.len(),
-        );
-    }
-
-    let state = app.state::<AppState>();
-
-    let outcome = {
-        let mut current = state.root.lock().expect("root mutex poisoned");
-        match current.as_mut() {
-            Some(root) if root.generation == generation => {
-                // A merge, not a replace: repos skipped this round because
-                // their write lock was held (§6, §7 rule 2) are absent from
-                // both maps and must keep whatever they last had, not vanish.
-                for (id, status) in &statuses {
-                    root.statuses.insert(id.clone(), status.clone());
-                    root.errors.remove(id);
-                }
-                for (id, err) in &errors {
-                    root.errors.insert(id.clone(), err.clone());
-                    root.statuses.remove(id);
-                }
-                Outcome::Publish(
-                    SweepEvent {
-                        root: root.path.clone(),
-                        statuses: root.statuses.clone(),
-                        errors: root.errors.clone(),
-                        elapsed_ms,
-                    },
-                    root.last_fetch_at.clone(),
-                )
-            }
-            // The root was replaced while we were out, so these results
-            // describe a folder nobody is looking at any more. The sweep the
-            // new root asked for was turned away by the guard above, which
-            // makes redoing it our job — otherwise its rows never fill in.
-            Some(root) => Outcome::Restart(root.generation, root.repos.clone()),
-            None => Outcome::Nothing,
-        }
-    };
-
-    match outcome {
-        Outcome::Publish(event, last_fetch_at) => {
-            // Saved after every sweep rather than on a separate debounce
-            // timer: sweeps are already throttled to the configured interval
-            // (§6), so this already satisfies "not on every status change"
-            // (§9.5 rule 4) without a second timer to keep in sync with the
-            // first. Errors are deliberately not cached — a repo that failed
-            // this round keeps whatever the *previous* successful sweep or
-            // cache load left behind, until it succeeds again.
-            persist_cache(&app, &event.root, event.statuses.clone(), last_fetch_at);
-
-            if let Err(err) = app.emit(SWEEP_EVENT, event) {
-                log::warn!("could not publish sweep results ({err})");
-            }
-
-            // Cleared only now: the guard has to cover the cache write and
-            // event emit too, not just the git spawns in `collect`, or a
-            // sweep triggered in that window races `cache::save` against
-            // this one for the same root file (§6 — "a sweep never starts
-            // while one is in flight").
-            //
-            // And not here at all when repos are still reading: publishing
-            // early moved the *event*, not the end of the sweep. §6's "a sweep
-            // never starts while one is in flight" is what keeps a straggler
-            // from being overtaken by the next tick's read of the same repo
-            // and publishing the older answer second, so `finish_stragglers`
-            // owns the flag from here.
-            if stragglers.is_empty() {
-                state.sweeping.store(false, Ordering::SeqCst);
-            } else {
-                let app = app.clone();
-                tauri::async_runtime::spawn(async move {
-                    finish_stragglers(app, generation, stragglers).await;
-                });
-            }
-
-            // A sweep publishes counts, and counts are all the *rows* need.
-            // The middle pane's file list and the open diff are fed by
-            // `status:repo` instead (§5.2, §5.4), so reconciling the rows
-            // without reconciling the selected repo in full leaves those two
-            // describing the working tree as it was when a watcher last
-            // fired. The case that makes it visible is the one where the
-            // sweep itself has nothing to show: editing a file that was
-            // already modified moves no count, so the row is right, the list
-            // is right, and the diff under them is stale.
-            //
-            // This is what covers the window with no watchers at all — §6
-            // drops them on blur, so *every* change made in an editor while
-            // Corgit is in the background arrives through the focus-gain
-            // sweep and nothing else. It also covers repos that could never
-            // be watched (a linked worktree, a network share), which have no
-            // other path to a fresh diff than this one.
-            //
-            // One extra `git status` for one repo, on sweeps that covered it.
-            if let Some((repo_id, path)) = reconcile {
-                let app = app.clone();
-                tauri::async_runtime::spawn(async move {
-                    emit_repo_status(&app, &repo_id, &path).await;
-                });
-            }
-        }
-        // Both remaining arms describe a root nobody is looking at, so a
-        // straggler still reading one of its repos has no one to publish to.
-        // Aborted rather than left to finish: `kill_on_drop` (§7.3) turns that
-        // into killing the git process, which is the whole point — the results
-        // are worthless and the semaphore permits are not.
-        Outcome::Restart(generation, repos) => {
-            for task in stragglers {
-                task.abort();
-            }
-            // Cleared before restarting, not after: `start_sweep` spawns a
-            // fresh sweep that immediately re-swaps the guard to `true`, so
-            // it must find it `false` here or the restart silently no-ops.
-            state.sweeping.store(false, Ordering::SeqCst);
-            start_sweep(&app, generation, repos);
-        }
-        Outcome::Nothing => {
-            for task in stragglers {
-                task.abort();
-            }
-            state.sweeping.store(false, Ordering::SeqCst);
-        }
-    }
-}
-
-/// Publishes the repos that outran [`SWEEP_PATIENCE`], one at a time as they
-/// land, and only then lets the next sweep start.
-///
-/// Per-repo events rather than a second batch: this *is* the "one repo's
-/// status arrived on its own" case, which `status:repo` already exists for and
-/// which the frontend already merges without disturbing the other 68 rows
-/// (§5.2). Carrying the status the read already produced rather than calling
-/// `emit_repo_status` matters for the same reason `query_with_files` exists —
-/// re-reading would spend another process to learn what is in hand.
-async fn finish_stragglers(app: AppHandle, generation: u64, stragglers: Vec<StatusTask>) {
-    let state = app.state::<AppState>();
-    let mut published = 0usize;
-
-    let mut remaining = stragglers.into_iter();
-    while let Some(task) = remaining.next() {
-        let Ok((repo_id, Some(status))) = task.await else { continue };
-
-        let root_path = {
-            let mut current = state.root.lock().expect("root mutex poisoned");
-            // Same guard as the batch: a result whose root was replaced while
-            // it was reading must not be written over the new one.
-            match current.as_mut() {
-                Some(root) if root.generation == generation => {
-                    match &status {
-                        Ok(fresh) => {
-                            root.statuses.insert(repo_id.clone(), fresh.clone());
-                            root.errors.remove(&repo_id);
-                        }
-                        Err(err) => {
-                            root.errors.insert(repo_id.clone(), err.clone());
-                            root.statuses.remove(&repo_id);
-                        }
-                    }
-                    root.path.clone()
-                }
-                // The root was replaced under us. Every straggler still out
-                // describes it, so they go the same way the `Restart` arm
-                // sends them rather than being awaited for nothing.
-                _ => {
-                    remaining.by_ref().for_each(|task| task.abort());
-                    break;
-                }
-            }
-        };
-
-        published += 1;
-        let event = RepoStatusEvent {
-            root: root_path,
-            repo_id,
-            status: status.as_ref().ok().cloned(),
-            error: status.as_ref().err().cloned(),
-            // Counts only, exactly as the batch would have carried. A straggler
-            // that happens to be the selected repo gets its file list from the
-            // reconciling read the sweep already scheduled (§5.2, §5.4).
-            files: None,
-        };
-        if let Err(err) = app.emit(REPO_STATUS_EVENT, event) {
-            log::warn!("could not publish a late repo status ({err})");
-        }
-    }
-
-    // Once, not per repo: the file is rewritten wholesale (§9.5), and these
-    // arrived seconds apart at most.
-    if published > 0 {
-        let snapshot = {
-            let current = state.root.lock().expect("root mutex poisoned");
-            current
-                .as_ref()
-                .filter(|root| root.generation == generation)
-                .map(|root| (root.path.clone(), root.statuses.clone(), root.last_fetch_at.clone()))
-        };
-        if let Some((root_path, statuses, last_fetch_at)) = snapshot {
-            persist_cache(&app, &root_path, statuses, last_fetch_at);
-        }
-    }
-
-    state.sweeping.store(false, Ordering::SeqCst);
 }
 
 /// Points a watcher at every repo in the open root (§6) and records the ones
@@ -2114,49 +1412,6 @@ fn sync_watchers(app: &AppHandle) {
     }
 }
 
-/// Which repos a sweep covers (§6). Two answers, because the watchers made
-/// the question worth asking: most ticks only owe something to the repos
-/// nothing is watching.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Scope {
-    /// Every repo — the reconciliation pass. Repairs whatever the watchers
-    /// could have missed: a dropped-event overflow, a change made while the
-    /// window was blurred and the watchers were down.
-    All,
-    /// Only repos with no working watcher, which is usually none of them and
-    /// therefore usually free.
-    Unwatched,
-}
-
-/// Sweep the currently open root, if any — a no-op with no root open. Shared
-/// by the focus-gained handler and the periodic ticker, both of which sweep
-/// whatever is open rather than a fixed repo list captured at start time.
-fn trigger_sweep(app: &AppHandle, scope: Scope) {
-    let state = app.state::<AppState>();
-    let current = state.root.lock().expect("root mutex poisoned");
-    let Some(root) = current.as_ref() else { return };
-    let generation = root.generation;
-    let repos: Vec<Repo> = match scope {
-        Scope::All => root.repos.clone(),
-        Scope::Unwatched => root
-            .repos
-            .iter()
-            .filter(|repo| root.unwatched.contains(&repo.id))
-            .cloned()
-            .collect(),
-    };
-    drop(current);
-
-    // Not merely wasteful — `sweep` publishes an event and rewrites the cache
-    // on every run, so an empty sweep would repaint the list every 60 s to say
-    // nothing. The common case with everything watched is exactly this.
-    if repos.is_empty() {
-        return;
-    }
-
-    start_sweep(app, generation, repos);
-}
-
 /// Window gained focus (§6): sweep immediately rather than waiting for the
 /// next tick, and (re)start the tickers that were aborted on the last blur.
 /// Unlike the status sweep, fetch does not also run immediately — it is a
@@ -2169,7 +1424,7 @@ fn on_focus(app: &AppHandle) {
     // dropped watchers left, and re-establishing them before it runs means
     // nothing that changes *during* the sweep falls between the two.
     sync_watchers(app);
-    trigger_sweep(app, Scope::All);
+    sweep::trigger_sweep(app, sweep::Scope::All);
     start_ticker(app);
     start_fetch_ticker(app);
 }
@@ -2216,21 +1471,10 @@ fn start_ticker(app: &AppHandle) {
         loop {
             tokio::time::sleep(interval).await;
             tick = tick.wrapping_add(1);
-            let scope = if tick % RECONCILE_EVERY == 0 { Scope::All } else { Scope::Unwatched };
-            trigger_sweep(&app, scope);
+            let scope = if tick % sweep::RECONCILE_EVERY == 0 { sweep::Scope::All } else { sweep::Scope::Unwatched };
+            sweep::trigger_sweep(&app, scope);
         }
     }));
-}
-
-/// Fetch the currently open root, if any — the fetch-sweep counterpart to
-/// `trigger_sweep`.
-fn trigger_fetch_sweep(app: &AppHandle) {
-    let state = app.state::<AppState>();
-    let current = state.root.lock().expect("root mutex poisoned");
-    let Some(root) = current.as_ref() else { return };
-    let (generation, repos) = (root.generation, root.repos.clone());
-    drop(current);
-    start_fetch_sweep(app, generation, repos);
 }
 
 /// A separate ticker from the status sweep's (§6: "these are different
@@ -2252,7 +1496,7 @@ fn start_fetch_ticker(app: &AppHandle) {
     *ticker = Some(tauri::async_runtime::spawn(async move {
         loop {
             tokio::time::sleep(jittered_interval(base_secs)).await;
-            trigger_fetch_sweep(&app);
+            fetchsweep::trigger_fetch_sweep(&app);
         }
     }));
 }
@@ -2270,285 +1514,6 @@ fn jittered_interval(base_secs: u64) -> Duration {
         .unwrap_or(0);
     let extra_secs = (nanos % (base as u128 * 1_000_000_000)) / 1_000_000_000;
     Duration::from_secs(base + extra_secs as u64)
-}
-
-/// What a finished sweep does next. Split out so the decision is made while
-/// the root lock is held and acted on after it is released.
-enum Outcome {
-    Publish(SweepEvent, HashMap<String, i64>),
-    Restart(u64, Vec<Repo>),
-    Nothing,
-}
-
-/// Every repo is dispatched at once; the semaphore in `git.rs` is what
-/// actually holds concurrency to 8 (§7.3). One batched result rather than 77
-/// events keeps the IPC cost off the sweep's measured time. A repo whose
-/// write lock is currently held is skipped rather than queried — a
-/// non-blocking `try_read`, not a wait, so one busy repo never holds up the
-/// other 76 (§6, §7 rule 2) — and is simply absent from both maps; `sweep`
-/// merges results in rather than replacing wholesale, so a skipped repo keeps
-/// its last known status until the next tick.
-async fn collect(
-    write_queues: Arc<WriteQueues>,
-    repos: Vec<Repo>,
-    patience: Duration,
-) -> (HashMap<String, RepoStatus>, HashMap<String, String>, Vec<StatusTask>) {
-    let tasks: Vec<_> = repos
-        .into_iter()
-        .map(|repo| {
-            let write_queues = write_queues.clone();
-            tauri::async_runtime::spawn(async move {
-                let result = match write_queues.try_read(&repo.id) {
-                    Some(_read_guard) => Some(status::query(&repo.path).await),
-                    None => None,
-                };
-                (repo.id, result)
-            })
-        })
-        .collect();
-
-    let mut statuses = HashMap::new();
-    let mut errors = HashMap::new();
-    let mut stragglers = Vec::new();
-
-    // One deadline for the batch, not one per repo: what the user is waiting
-    // for is the *list*, and the list arrives when the last repo in it does.
-    let deadline = tokio::time::Instant::now() + patience;
-
-    for mut task in tasks {
-        // `&mut task`, so a repo that runs past the deadline keeps running and
-        // keeps its read guard. Taking the handle by value would drop it, and
-        // a dropped `JoinHandle` detaches the task — the read would still cost
-        // its process and its semaphore permit, and then throw the answer
-        // away. `timeout_at` polls the task before it looks at the clock, so a
-        // task that finished while we waited on an earlier one is still
-        // collected here rather than needlessly deferred.
-        match tokio::time::timeout_at(deadline, &mut task).await {
-            // A panicked task is a bug in the parser, not a reason to lose the
-            // other 76 repos' results.
-            Ok(Err(_)) => continue,
-            Ok(Ok((id, result))) => match result {
-                Some(Ok(status)) => {
-                    statuses.insert(id, status);
-                }
-                Some(Err(err)) => {
-                    errors.insert(id, err);
-                }
-                None => {}
-            },
-            Err(_) => stragglers.push(task),
-        }
-    }
-
-    (statuses, errors, stragglers)
-}
-
-/// One repo's in-flight status read. `None` in the payload means the repo was
-/// skipped because a write held it, which is not an outcome a straggler can
-/// have — a skipped repo never reaches the deadline — but the type is the same
-/// one `collect` dispatches, so both arms exist.
-type StatusTask = tauri::async_runtime::JoinHandle<(String, Option<Result<RepoStatus, String>>)>;
-
-/// How long the batch waits for its slowest repo before publishing without it
-/// (§1, §6).
-///
-/// A full pass over 69 repos costs about 1.2 s at best, so this is not a
-/// budget the healthy case is meant to feel — it is the point past which one
-/// repo is no longer merely slow. The case it exists for is real and
-/// repeatable: on a cold file cache a large repo can take the whole 30 s
-/// `READ_TIMEOUT` and then be killed, and holding all 69 rows and the sweeping
-/// indicator for that is what made a launch look like a hang. The stragglers
-/// publish themselves as they land, through the same per-repo event a watcher
-/// uses (§5.2), so nothing is lost — it arrives separately.
-const SWEEP_PATIENCE: Duration = Duration::from_secs(3);
-
-/// How many status ticks pass between full reconciliation sweeps (§6).
-///
-/// Every tick sweeps the repos nothing is watching, which is normally none of
-/// them and therefore free; every fifth also sweeps the rest, to repair what a
-/// watcher can miss — a dropped-event overflow, a change that landed while the
-/// window was blurred. At the default 60 s interval that is a full pass every
-/// five minutes.
-///
-/// The full pass is the expensive one — one process per repo, 1.2 s at best
-/// for 69 of them — which is precisely why it is no longer what keeps the rows
-/// current. Lowering this number gives back the cost the watchers removed.
-const RECONCILE_EVERY: u32 = 5;
-
-/// How many `git fetch` processes the fetch sweep runs at once (§6) — on top
-/// of, not instead of, the global 8-process cap in `git.rs` (§7.3). Lower
-/// than the status sweep's implicit 8, because a fetch is 0.5–2 s of network
-/// time rather than a local read, and status reads should not have to queue
-/// behind a batch of them.
-const FETCH_CONCURRENCY: usize = 4;
-
-const FETCH_SWEEP_EVENT: &str = "fetch:sweep";
-
-/// The background fetch sweep's counterpart to `SweepEvent` — deliberately
-/// separate from it (§6: "these are different mechanisms"). Carries no
-/// status data of its own; a fetch changes `refs/remotes/*`, and it is the
-/// status sweep that turns that into ahead/behind counts.
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct FetchSweepEvent {
-    root: PathBuf,
-    last_fetch_at: HashMap<String, i64>,
-    auth_needed: HashSet<String>,
-    elapsed_ms: u64,
-}
-
-fn start_fetch_sweep(app: &AppHandle, generation: u64, repos: Vec<Repo>) {
-    let app = app.clone();
-    tauri::async_runtime::spawn(async move { fetch_sweep(app, generation, repos).await });
-}
-
-/// Unlike the status sweep, a fetch sweep that finds its root replaced
-/// mid-flight simply drops its results rather than restarting for the new
-/// root (§6's "must not vanish" guarantee is about currently-displayed rows,
-/// which fetch does not drive) — the next periodic tick picks the new root
-/// up on schedule, which is soon enough for a background convenience.
-async fn fetch_sweep(app: AppHandle, generation: u64, repos: Vec<Repo>) {
-    let (write_queues, interval_secs) = {
-        let state = app.state::<AppState>();
-        if state.fetch_sweeping.swap(true, Ordering::SeqCst) {
-            return;
-        }
-        let interval_secs = state.settings.lock().expect("settings mutex poisoned").fetch_sweep_secs.max(1);
-        (state.write_queues.clone(), interval_secs)
-    };
-
-    let (known_last_fetch_at, auth_needed) = {
-        let state = app.state::<AppState>();
-        let current = state.root.lock().expect("root mutex poisoned");
-        match current.as_ref() {
-            Some(root) if root.generation == generation => {
-                (root.last_fetch_at.clone(), root.auth_needed.clone())
-            }
-            _ => {
-                state.fetch_sweeping.store(false, Ordering::SeqCst);
-                return;
-            }
-        }
-    };
-
-    let started = Instant::now();
-    let now = now_unix();
-
-    // Repos this tick actually has work for: not currently flagged
-    // "auth needed" (§8.7, §13 — a manual fetch is what clears that), and not
-    // fetched within the last interval already, whether that timestamp came
-    // from this session or the cache seeded at open (§9.5).
-    let due: Vec<Repo> = repos
-        .into_iter()
-        .filter(|repo| !auth_needed.contains(&repo.id))
-        .filter(|repo| {
-            known_last_fetch_at
-                .get(&repo.id)
-                .map_or(true, |last| now - last >= interval_secs as i64)
-        })
-        .collect();
-
-    let (attempted, newly_auth_needed) = fetch_many(write_queues, due).await;
-    let elapsed_ms = started.elapsed().as_millis() as u64;
-
-    let state = app.state::<AppState>();
-    let published = {
-        let mut current = state.root.lock().expect("root mutex poisoned");
-        match current.as_mut() {
-            Some(root) if root.generation == generation => {
-                for id in &attempted {
-                    root.last_fetch_at.insert(id.clone(), now);
-                    root.auth_needed.remove(id);
-                }
-                for id in &newly_auth_needed {
-                    root.last_fetch_at.insert(id.clone(), now);
-                    root.auth_needed.insert(id.clone());
-                }
-                Some((
-                    root.path.clone(),
-                    root.statuses.clone(),
-                    root.last_fetch_at.clone(),
-                    root.auth_needed.clone(),
-                ))
-            }
-            _ => None,
-        }
-    };
-
-    if let Some((root_path, statuses, last_fetch_at, auth_needed)) = published {
-        persist_cache(&app, &root_path, statuses, last_fetch_at.clone());
-
-        let event = FetchSweepEvent { root: root_path, last_fetch_at, auth_needed, elapsed_ms };
-        if let Err(err) = app.emit(FETCH_SWEEP_EVENT, event) {
-            log::warn!("could not publish fetch sweep results ({err})");
-        }
-
-        // A fetch just moved refs/remotes/*, which is what the status
-        // sweep's ahead/behind reads (§8.2) — trigger one now rather than
-        // leaving badges stale until the next reconciliation pass (§6).
-        //
-        // `Scope::All` and not `Unwatched`: the watchers do cover this, since
-        // a fetch writes `.git/refs/remotes` inside every tree we watch, but
-        // it writes them for as many repos as the sweep just fetched at once,
-        // and each of those refreshes is subject to the per-repo throttle in
-        // `watch.rs`. One pass over the repos we know just changed is both
-        // cheaper and less racy than waiting for up to that many debounces.
-        trigger_sweep(&app, Scope::All);
-    }
-
-    state.fetch_sweeping.store(false, Ordering::SeqCst);
-}
-
-/// Dispatches up to [`FETCH_CONCURRENCY`] fetches at once. Returns the ids
-/// that were actually attempted (success or a non-auth failure — either way
-/// `last_fetch_at` should move forward so a repo that is, say, offline is not
-/// retried every tick) separately from the ids whose failure looked like an
-/// auth problem, which the caller marks "auth needed" instead (§8.7, §13).
-/// A repo with no remote, or whose write lock is currently held by something
-/// else, is skipped silently — absent from both lists, so its `last_fetch_at`
-/// is untouched and it is reconsidered next tick.
-async fn fetch_many(write_queues: Arc<WriteQueues>, repos: Vec<Repo>) -> (Vec<String>, Vec<String>) {
-    let semaphore = Arc::new(tokio::sync::Semaphore::new(FETCH_CONCURRENCY));
-
-    let tasks: Vec<_> = repos
-        .into_iter()
-        .map(|repo| {
-            let write_queues = write_queues.clone();
-            let semaphore = semaphore.clone();
-            tauri::async_runtime::spawn(async move {
-                if !remote::has_remote(&repo.path).await {
-                    return (repo.id, None);
-                }
-
-                let Ok(_permit) = semaphore.acquire().await else {
-                    return (repo.id, None);
-                };
-                // Skip rather than block (§6, §7 rule 2): a repo mid-write
-                // this round just waits for the next tick instead of holding
-                // up the other three fetch slots.
-                let Some(_write_guard) = write_queues.try_write(&repo.id) else {
-                    return (repo.id, None);
-                };
-
-                (repo.id, Some(remote::fetch_background(&repo.path).await))
-            })
-        })
-        .collect();
-
-    let mut attempted = Vec::new();
-    let mut auth_needed = Vec::new();
-
-    for task in tasks {
-        let Ok((id, result)) = task.await else { continue };
-        match result {
-            Some(Ok(())) => attempted.push(id),
-            Some(Err(err)) if remote::looks_like_auth_failure(&err) => auth_needed.push(id),
-            Some(Err(_)) => attempted.push(id),
-            None => {}
-        }
-    }
-
-    (attempted, auth_needed)
 }
 
 /// Most-recent-first, deduplicated, capped. Saved immediately rather than on
@@ -2730,12 +1695,12 @@ pub fn run() {
             fetch_repo,
             pull_repo,
             push_repo,
-            fetch_all,
-            pull_all_behind,
-            branch_all,
-            switch_pull_all,
+            bulk::fetch_all,
+            bulk::pull_all_behind,
+            bulk::branch_all,
+            bulk::switch_pull_all,
             repo_branches,
-            stop_bulk,
+            bulk::stop_bulk,
             merge_abort,
             publish_branch,
             commit_and_push,
@@ -2770,6 +1735,42 @@ mod tests {
     fn explorer_arg_flips_git_slashes() {
         let target = PathBuf::from(r"C:\dev\corgit").join("src/lib/repos.svelte.ts");
         assert_eq!(explorer_arg(&target), r"C:\dev\corgit\src\lib\repos.svelte.ts");
+    }
+
+    /// The reason `program_on_path` reads `PATHEXT` at all. VS Code's entry
+    /// point is `code.cmd`, so an extension list without `.CMD` resolves
+    /// nothing and *Open in VS Code* is dead on every machine — a failure with
+    /// no symptom other than the feature never working.
+    #[cfg(windows)]
+    #[test]
+    fn the_extension_list_can_always_find_a_cmd_shim() {
+        for pathext in [None, Some(""), Some("   "), Some(".COM;.EXE;.BAT;.CMD")] {
+            let extensions = path_extensions(pathext);
+            assert!(
+                extensions.iter().any(|extension| extension.eq_ignore_ascii_case(".cmd")),
+                "{pathext:?} resolved to {extensions:?}, which cannot find code.cmd"
+            );
+        }
+    }
+
+    /// Order is the machine's to decide, not ours: `PATHEXT` is what the shell
+    /// would try first, and a resolver that reordered it could pick a
+    /// different program than the one the user gets by typing the name.
+    #[cfg(windows)]
+    #[test]
+    fn the_extension_list_keeps_the_order_pathext_gave() {
+        assert_eq!(path_extensions(Some(".CMD;.EXE")), [".CMD", ".EXE"]);
+        assert_eq!(path_extensions(Some(".EXE;.CMD")), [".EXE", ".CMD"]);
+    }
+
+    /// A real `PATHEXT` picks up debris — a trailing separator from an
+    /// installer that appended carelessly, spaces from one that used a GUI.
+    /// An empty entry would build the bare name `code`, which is the one
+    /// candidate Windows will not execute.
+    #[cfg(windows)]
+    #[test]
+    fn the_extension_list_drops_blank_entries_and_surrounding_space() {
+        assert_eq!(path_extensions(Some(".EXE; .CMD ;;")), [".EXE", ".CMD"]);
     }
 
     fn repo(id: &str) -> Repo {
@@ -2855,6 +1856,66 @@ mod tests {
         assert_eq!(hot, vec!["billing"]);
     }
 
+    fn status_with(branch: &str) -> RepoStatus {
+        RepoStatus { branch: Some(branch.to_string()), ..RepoStatus::default() }
+    }
+
+    /// The rule `merge_sweep_results` exists for, and the one that is invisible
+    /// when it breaks. A repo whose write lock was held is skipped by the sweep
+    /// (§7 rule 2) and so appears in neither map — assigning the maps wholesale
+    /// would blank its row every time the user staged something in it, which
+    /// reads as the repo having vanished rather than as the sweep having
+    /// politely stayed out of the way.
+    #[test]
+    fn a_repo_the_sweep_skipped_keeps_the_status_it_had() {
+        let mut root = root_with(&["api", "billing"], &[], None);
+        root.statuses.insert("api".to_string(), status_with("main"));
+        root.statuses.insert("billing".to_string(), status_with("main"));
+
+        // Only `billing` was read this round; `api` was busy.
+        let swept = HashMap::from([("billing".to_string(), status_with("release"))]);
+        root.merge_sweep_results(&swept, &HashMap::new());
+
+        assert_eq!(root.statuses["api"].branch.as_deref(), Some("main"), "a skipped repo must not be erased");
+        assert_eq!(root.statuses["billing"].branch.as_deref(), Some("release"));
+    }
+
+    /// Both directions of the statuses/errors exclusion. The row draws from
+    /// both maps, so a repo left in both says "unknown" and shows a clean dot
+    /// at the same time — and which one the user sees depends on read order,
+    /// which is the shape of bug that survives a whole release.
+    #[test]
+    fn a_repo_is_never_in_both_statuses_and_errors() {
+        let mut root = root_with(&["api"], &[], None);
+
+        // Succeeded, having previously failed: the stale error has to go.
+        root.errors.insert("api".to_string(), "boom".to_string());
+        root.merge_sweep_results(&HashMap::from([("api".to_string(), status_with("main"))]), &HashMap::new());
+        assert!(root.errors.is_empty(), "a repo that just succeeded still carries its old error");
+        assert!(root.statuses.contains_key("api"));
+
+        // Failed, having previously succeeded: the stale status has to go, or
+        // the row shows a clean dot for a repo nothing could read.
+        root.merge_sweep_results(&HashMap::new(), &HashMap::from([("api".to_string(), "boom".to_string())]));
+        assert!(root.statuses.is_empty(), "a repo that just failed still shows its old status");
+        assert!(root.errors.contains_key("api"));
+    }
+
+    /// An empty sweep is the normal case for a `Scope::Unwatched` tick, which
+    /// is four ticks in five (§6, `sweep::RECONCILE_EVERY`) and usually covers
+    /// no repos at all. It must be a no-op, not a clear.
+    #[test]
+    fn a_sweep_that_read_nothing_changes_nothing() {
+        let mut root = root_with(&["api"], &[], None);
+        root.statuses.insert("api".to_string(), status_with("main"));
+        root.errors.insert("billing".to_string(), "boom".to_string());
+
+        root.merge_sweep_results(&HashMap::new(), &HashMap::new());
+
+        assert_eq!(root.statuses["api"].branch.as_deref(), Some("main"));
+        assert_eq!(root.errors["billing"], "boom");
+    }
+
     /// §6: "5–10 min, jittered" — verified against the default 300 s setting
     /// rather than a mocked clock, since the jitter source is real wall-clock
     /// time and the property under test is the range, not a specific value.
@@ -2871,24 +1932,6 @@ mod tests {
     fn fetch_jitter_never_divides_by_zero_at_a_zero_base() {
         let interval = jittered_interval(0);
         assert!(interval.as_secs() >= 1, "base_secs is floored at 1");
-    }
-
-    /// Both halves of what makes publishing early worth having. Raised to meet
-    /// `READ_TIMEOUT` the mechanism is dead code — no read can outlive its own
-    /// kill — and the 30 s wait it exists to remove comes straight back.
-    /// Lowered under a healthy full pass (about 1.2 s over 69 repos, per
-    /// `RECONCILE_EVERY`) it fires every time, and the batch the frontend
-    /// applies wholesale is routinely split for no reason.
-    #[test]
-    fn sweep_patience_sits_between_a_healthy_pass_and_a_killed_read() {
-        assert!(
-            SWEEP_PATIENCE < git::READ_TIMEOUT,
-            "a read that cannot outlive the patience can never straggle",
-        );
-        assert!(
-            SWEEP_PATIENCE >= Duration::from_secs(2),
-            "a full pass over 69 repos costs ~1.2 s; splitting that one is noise, not news",
-        );
     }
 }
 
@@ -2963,7 +2006,7 @@ mod bench {
         // Longer than any read can live — `git.rs`'s `READ_TIMEOUT` kills one
         // at 30 s — so nothing here becomes a straggler and each round is the
         // cost of the *whole* pass. That is the number §1 budgets. Production
-        // uses `SWEEP_PATIENCE` instead and publishes without its slowest
+        // uses `sweep::SWEEP_PATIENCE` instead and publishes without its slowest
         // repo, which is a different question from how long the pass takes.
         let no_stragglers = Duration::from_secs(60);
 
@@ -2971,12 +2014,12 @@ mod bench {
         // too, but only once, and from build step 3 it paints from cache while
         // it happens — so the steady-state number is the one under budget.
         let warm =
-            tauri::async_runtime::block_on(collect(write_queues.clone(), repos.clone(), no_stragglers));
+            tauri::async_runtime::block_on(sweep::collect(write_queues.clone(), repos.clone(), no_stragglers));
         println!("warm-up:   {} ok, {} failed", warm.0.len(), warm.1.len());
 
         for round in 1..=6 {
             let started = Instant::now();
-            let (statuses, errors, _) = tauri::async_runtime::block_on(collect(
+            let (statuses, errors, _) = tauri::async_runtime::block_on(sweep::collect(
                 write_queues.clone(),
                 repos.clone(),
                 no_stragglers,
@@ -2988,7 +2031,7 @@ mod bench {
                 elapsed.as_millis(),
                 statuses.len(),
                 errors.len(),
-                if elapsed > SWEEP_PATIENCE { " — would have published early" } else { "" },
+                if elapsed > sweep::SWEEP_PATIENCE { " — would have published early" } else { "" },
             );
             for (id, err) in errors.iter().take(3) {
                 println!("           {id}: {err}");

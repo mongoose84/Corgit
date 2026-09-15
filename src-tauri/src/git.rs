@@ -197,12 +197,35 @@ fn at_least(version: &str, min: (u32, u32)) -> bool {
 /// Run a read-only command. `--no-optional-locks` keeps git from writing the
 /// index while we are only looking (§8) — it is the difference between a sweep
 /// that is safe to run every 60 s and one that fights the user's terminal.
+///
+/// `core.fsmonitor=false` is the safety half, and it belongs on this path in
+/// particular. Set to a path rather than a boolean, `core.fsmonitor` names a
+/// **program git runs**, and the sweep reaches every repo under the chosen
+/// root (§8.1) on a timer with nobody having clicked anything — so a folder
+/// that merely *appeared* under that root decides what executes, twice per
+/// `git status` (measured). That is a different proposition from a repo the
+/// user is committing to, which is why `write` deliberately does not get this:
+/// §3 shells out precisely so hooks, credential helpers and LFS behave
+/// normally there, and overriding config on the write path would start
+/// unpicking the reason this app shells out at all.
+///
+/// Measured before adding it, per CLAUDE.md's rule about this exact knob: on a
+/// 3,000-file repo with the builtin daemon running, `git status` was 319 ms
+/// with fsmonitor and 320 ms with it forced off — best of eight each, i.e. no
+/// difference. That is the spawn-bound result §1 predicts: fsmonitor optimises
+/// the 2–10 ms of real work per repo, not the ~85 ms of process creation
+/// around it. The lever is still there for a monorepo big enough to need it;
+/// it is just no longer worth an unprompted `.git/config` deciding what runs.
 pub async fn read(cwd: &Path, args: &[&str]) -> Result<Output, String> {
-    let mut full = Vec::with_capacity(args.len() + 1);
-    full.push("--no-optional-locks");
+    let mut full = Vec::with_capacity(args.len() + READ_CONFIG.len());
+    full.extend_from_slice(READ_CONFIG);
     full.extend_from_slice(args);
     run_in(&binaries().read, cwd, &full, None, &[], READ_TIMEOUT).await
 }
+
+/// Named and tested for the same reason `commit.rs`'s flag constants are: both
+/// entries are load-bearing and neither is visibly so at a call site.
+const READ_CONFIG: &[&str] = &["--no-optional-locks", "-c", "core.fsmonitor=false"];
 
 /// Run a mutating command through the documented `git` entry point (§3) — the
 /// one credential helpers, hooks and LFS expect. Nothing that stages, commits,
@@ -390,6 +413,33 @@ mod tests {
         assert!(PROBE_TIMEOUT < READ_TIMEOUT, "the probe blocks startup; it must be the tightest");
         assert!(READ_TIMEOUT < NETWORK_TIMEOUT, "a local read must not outlive a fetch");
         assert!(NETWORK_TIMEOUT < LOCAL_WRITE_TIMEOUT, "hooks make commit the most generous case");
+    }
+
+    /// Both halves of [`READ_CONFIG`], which is the only thing standing
+    /// between the sweep and whatever a scanned repo's `.git/config` names.
+    /// `core.fsmonitor` as a path is a program git runs on every `git status`,
+    /// and the sweep runs one per repo on a timer with nobody having clicked
+    /// anything — so this is not a flag the read path can lose quietly.
+    #[test]
+    fn reads_neither_write_the_index_nor_run_a_repos_own_fsmonitor() {
+        assert_eq!(READ_CONFIG, ["--no-optional-locks", "-c", "core.fsmonitor=false"]);
+    }
+
+    /// `-c` is a *global* option: git only accepts it before the subcommand,
+    /// so a refactor that appended this instead of prefixing it would produce
+    /// `git status -c core.fsmonitor=false`, which is a `status` flag git does
+    /// not have. The command would fail outright rather than silently skip the
+    /// override — but it would fail on every repo at once, so pin the order.
+    #[test]
+    fn read_config_is_prefixed_before_the_subcommand() {
+        let mut full: Vec<&str> = Vec::new();
+        full.extend_from_slice(READ_CONFIG);
+        full.extend_from_slice(&["status", "--porcelain=v2"]);
+        assert_eq!(full.last(), Some(&"--porcelain=v2"));
+        assert!(
+            full.iter().position(|arg| *arg == "status") > full.iter().position(|arg| *arg == "-c"),
+            "-c must come before the subcommand: {full:?}"
+        );
     }
 
     #[test]

@@ -28,7 +28,7 @@ use notify_debouncer_mini::notify::{RecommendedWatcher, RecursiveMode};
 use notify_debouncer_mini::{new_debouncer, DebounceEventResult, Debouncer};
 use tauri::{AppHandle, Manager};
 
-use crate::emit_repo_status;
+use crate::sweep::emit_repo_status;
 
 /// Whether this platform gives subtree watches cheaply enough to point one at
 /// a working tree (§6). Windows does; inotify does not, and there the watch

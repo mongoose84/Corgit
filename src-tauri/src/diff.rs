@@ -99,7 +99,22 @@ pub async fn file(repo: &Path, path: &str, source: &DiffSource) -> Result<FileDi
     // config would salt the output with escape sequences. `--no-renames`
     // because the pathspec already pins exactly one path, and half a rename
     // pair reads worse than the add/delete pair git falls back to.
-    let common = ["--no-ext-diff", "--no-color", "--no-renames", "-U3"];
+    //
+    // `--no-textconv` closes the gap `--no-ext-diff` alone left open, and it is
+    // the more dangerous of the two because nothing about it is opt-in for the
+    // person running Corgit: `diff.<driver>.textconv` is a **shell command**,
+    // and `.gitattributes` — a tracked, in-tree file — is what points a path at
+    // the driver. So a repository decides, from its own contents and config,
+    // what runs when someone clicks one of its file rows. Corgit sweeps every
+    // folder under the chosen root (§8.1), which is not a threat model that
+    // assumes every repo there was cloned deliberately.
+    //
+    // It is a correctness flag as much as a safety one, which is why it sits
+    // with the others rather than in a comment about trust: whatever textconv
+    // prints becomes the diff, so `parse_patch` reads the driver's output as
+    // though it were file content — verified, an injected line lands in the
+    // hunk as context and every line number after it is wrong.
+    let common = ["--no-ext-diff", "--no-color", "--no-renames", "--no-textconv", "-U3"];
 
     let args: Vec<&str> = match source {
         DiffSource::Unstaged => {
@@ -473,5 +488,41 @@ mod tests {
         assert!(parse_hunk_header(" nonsense @@").is_none());
         assert!(parse_hunk_header(" -x,y +1,2 @@").is_none());
         assert!(parse_patch("f.txt", "@@ garbage @@\n+a\n").hunks.is_empty());
+    }
+
+    use crate::testrepo::TempRepo;
+
+    /// `--no-textconv`, against a repository that actually configures one.
+    ///
+    /// A fixture cannot test this: the flag's whole effect is on what git
+    /// decides to run, and every fixture in this file is already the output of
+    /// a git that ran nothing. Without the flag, `diff.<driver>.textconv` is a
+    /// shell command and `.gitattributes` — tracked, in-tree — is what points
+    /// a path at it, so opening a file row in a repository that arrived in the
+    /// scanned root (§8.1) runs whatever that repository chose.
+    ///
+    /// Asserted on the parsed output rather than by looking for a side effect,
+    /// because that is also the correctness half: textconv's stdout *becomes*
+    /// the diff, so the marker below would be read as a line of the user's
+    /// file and every line number after it would be wrong.
+    #[tokio::test]
+    async fn a_repos_own_textconv_driver_never_runs() {
+        let repo = TempRepo::new("diff-textconv");
+        repo.write("data.bin", "original\n");
+        repo.write(".gitattributes", "*.bin diff=corgitprobe\n");
+        repo.commit_all("initial");
+        repo.git(&["config", "diff.corgitprobe.textconv", "echo TEXTCONV-RAN; cat"]);
+        repo.write("data.bin", "changed\n");
+
+        let diff = file(repo.path(), "data.bin", &DiffSource::Unstaged).await.unwrap();
+
+        let lines: Vec<&str> =
+            diff.hunks.iter().flat_map(|hunk| hunk.lines.iter()).map(|line| line.text.as_str()).collect();
+        assert!(
+            !lines.iter().any(|line| line.contains("TEXTCONV-RAN")),
+            "a textconv driver ran and its output was parsed as file content: {lines:?}"
+        );
+        assert!(lines.contains(&"original"), "the real file content is missing: {lines:?}");
+        assert!(lines.contains(&"changed"), "the real file content is missing: {lines:?}");
     }
 }
