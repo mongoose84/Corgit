@@ -264,10 +264,19 @@ pub async fn details(repo: &Path, hash: &str) -> Result<CommitDetails, String> {
 /// Its own function, and tested, for the same reason `branch::create_args` is:
 /// the flags *are* the behaviour here, and three of them look droppable to
 /// anyone who only ever selects an ordinary commit while checking.
-fn diff_tree_args(hash: &str) -> [&str; 10] {
+fn diff_tree_args(hash: &str) -> [&str; 11] {
     [
         "diff-tree",
         "--no-commit-id",
+        // Rename detection, which `diff-tree` does **not** do on its own.
+        // `diff.renames` has defaulted to true since git 2.9, but that is a
+        // porcelain default and this is plumbing, so without `-M` a `git mv`
+        // arrives as an unrelated add and delete: two rows in the details pane
+        // for one act, and `CommitFileEntry`'s documented `R`/`C` letters never
+        // reachable. Both walks in `parse_raw_and_numstat` already handle the
+        // deferred path pair a rename brings with it — they were simply never
+        // being sent one.
+        "-M",
         // Split a merge into one diff per parent, then keep only the first —
         // together they are one diff, not N. An octopus merge would otherwise
         // repeat every path once per parent.
@@ -605,6 +614,9 @@ mod tests {
         let args = diff_tree_args("a3f9c21");
 
         assert!(args.contains(&"-m"), "a merge diffs against no parent without -m");
+        // Plumbing ignores `diff.renames`, so without this a `git mv` is an
+        // add and a delete and the pane shows two rows for one act.
+        assert!(args.contains(&"-M"), "diff-tree does not detect renames on its own");
         assert!(args.contains(&"--first-parent"), "-m alone repeats every path once per parent");
         assert!(args.contains(&"--root"), "the root commit has no parent to diff against");
         // `--cc` would make merges non-empty too, but emits no `--raw` block on
@@ -612,5 +624,106 @@ mod tests {
         // blocks by position — so it lands back on an empty file list.
         assert!(!args.contains(&"--cc"), "--cc breaks the raw/numstat positional zip");
         assert_eq!(args.last(), Some(&"a3f9c21"), "the revision stays last");
+    }
+
+    use crate::testrepo::TempRepo;
+
+    /// The positional zip, on the case `details`' doc comment singles out: a
+    /// merge, where `-m --first-parent` is the only reason `diff-tree` prints
+    /// anything at all. The two blocks are requested in one command and paired
+    /// by index — nothing checks they describe the same files in the same
+    /// order.
+    ///
+    /// The two files the merge brings in are therefore given *different* line
+    /// counts. A swapped pair still yields a complete, entirely plausible file
+    /// list; only the numbers give it away, so the numbers are what is
+    /// asserted.
+    #[tokio::test]
+    async fn a_merges_raw_and_numstat_blocks_stay_aligned() {
+        let repo = TempRepo::new("graph-merge-zip");
+        repo.write("base.txt", "base\n");
+        repo.commit_all("initial");
+
+        repo.git(&["switch", "--quiet", "-c", "feature"]);
+        repo.write("one-line.txt", "a\n");
+        repo.write("five-lines.txt", "a\nb\nc\nd\ne\n");
+        repo.commit_all("feature work");
+
+        // main has to move too, or the merge fast-forwards and there is no
+        // merge commit to read.
+        repo.git(&["switch", "--quiet", "main"]);
+        repo.write("base.txt", "moved on\n");
+        repo.commit_all("main work");
+        repo.git(&["merge", "--no-edit", "--quiet", "feature"]);
+
+        let head = repo.git_stdout(&["rev-parse", "HEAD"]);
+        let details = details(repo.path(), &head).await.unwrap();
+
+        assert!(!details.files.is_empty(), "a merge came back with no files at all");
+        let find = |name: &str| {
+            details
+                .files
+                .iter()
+                .find(|file| file.path == name)
+                .unwrap_or_else(|| panic!("{name} missing from {:?}", details.files))
+        };
+        assert_eq!(find("one-line.txt").insertions, Some(1), "{:?}", details.files);
+        assert_eq!(
+            find("five-lines.txt").insertions,
+            Some(5),
+            "the +/- counts landed on the wrong paths: {:?}",
+            details.files
+        );
+    }
+
+    /// The rename arms of both walks, which until `-M` was added to
+    /// `diff_tree_args` could not run at all: `diff-tree` is plumbing and
+    /// ignores `diff.renames`, so a `git mv` arrived as an unrelated add and
+    /// delete and neither walk ever saw the deferred path pair it handles.
+    ///
+    /// Three files with three different pairs of counts, and the rename
+    /// deliberately in the **middle**. That position is the whole test: the
+    /// numstat block spends two extra tokens on a rename's old and new paths,
+    /// and failing to consume them shifts every count that follows onto the
+    /// wrong path. A rename sorted last would hide that — nothing follows it
+    /// to be shifted — which is exactly how the first version of this test
+    /// passed while asserting nothing.
+    #[tokio::test]
+    async fn a_rename_keeps_the_counts_after_it_on_their_own_paths() {
+        let repo = TempRepo::new("graph-rename-zip");
+        repo.write("old-name.txt", "a\nb\nc\n");
+        repo.write("after.txt", "one\n");
+        repo.write("zz-last.txt", "x\n");
+        repo.commit_all("initial");
+
+        repo.git(&["mv", "old-name.txt", "new-name.txt"]);
+        repo.write("after.txt", "one\ntwo\nthree\n");
+        repo.write("zz-last.txt", "x\ny\ny\ny\n");
+        repo.commit_all("rename between two edits");
+
+        let head = repo.git_stdout(&["rev-parse", "HEAD"]);
+        let details = details(repo.path(), &head).await.unwrap();
+
+        let find = |name: &str| {
+            details
+                .files
+                .iter()
+                .find(|file| file.path == name)
+                .unwrap_or_else(|| panic!("{name} missing from {:?}", details.files))
+        };
+        assert_eq!(find("after.txt").insertions, Some(2), "{:?}", details.files);
+        // The one that moves if the numstat walk loses its place.
+        assert_eq!(find("zz-last.txt").insertions, Some(3), "{:?}", details.files);
+
+        // Filed under the new path, with git's own letter, and the old path
+        // gone rather than reported as a delete beside it.
+        let renamed = find("new-name.txt");
+        assert_eq!(renamed.status, 'R', "{:?}", details.files);
+        assert!(
+            !details.files.iter().any(|file| file.path == "old-name.txt"),
+            "the rename's source came back as a file of its own: {:?}",
+            details.files
+        );
+        assert_eq!(details.files.len(), 3, "{:?}", details.files);
     }
 }

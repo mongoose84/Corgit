@@ -1060,7 +1060,7 @@ fn persist_root_settings(app: &AppHandle, root_path: &Path, pins: HashSet<String
 #[tauri::command]
 async fn fetch_repo(repo_id: String, app: AppHandle) -> Result<(), String> {
     let result = write_and_refresh(&app, repo_id.clone(), "Fetch", |path| async move { remote::fetch(&path).await }).await;
-    fetchsweep::record_fetch_attempt(&app, &repo_id);
+    fetchsweep::record_fetch_attempt(&app, &repo_id).await;
     result
 }
 
@@ -1353,16 +1353,38 @@ where
 /// current snapshot, because the file is overwritten wholesale each time and
 /// a partial write (e.g. statuses without `last_fetch_at`) would silently
 /// erase the other half on disk.
-fn persist_cache(
+/// `spawn_blocking`, because `cache::save` is `File::create` + `write_all` +
+/// **`sync_all`** + rename (see `atomicfile`), and every caller is an async
+/// task. Left where it was, that fsync ran on a tokio worker thread — once a
+/// minute, per sweep, for as long as the window had focus. Every other
+/// synchronous write in this file is at least *documented* as blocking a
+/// thread (`save_settings`, `open_root`, `refresh_root`, `initial_root` all
+/// carry the same note about a redirected %APPDATA% on a network share); this
+/// one said nothing and ran the most often of any of them.
+///
+/// Awaited rather than fired and forgotten. Overlapping saves for one root are
+/// already normal and `atomicfile::write` is built to survive them (§9.5 rule
+/// 1), but awaiting keeps each caller's own writes in the order it issued
+/// them, which is exactly the ordering it had when this was synchronous. The
+/// caller waits on a blocking pool thread instead of blocking a worker — the
+/// point is which thread stalls, not whether anyone waits.
+async fn persist_cache(
     app: &AppHandle,
     root_path: &Path,
     statuses: HashMap<String, RepoStatus>,
     last_fetch_at: HashMap<String, i64>,
 ) {
-    let state = app.state::<AppState>();
+    let cache_dir = app.state::<AppState>().cache_dir.clone();
+    let root_path = root_path.to_path_buf();
     let on_disk = RootCache { version: cache::CACHE_VERSION, statuses, last_fetch_at };
-    if let Err(err) = cache::save(&state.cache_dir, root_path, &on_disk) {
-        log::warn!("could not save status cache ({err})");
+
+    let saved = tokio::task::spawn_blocking(move || cache::save(&cache_dir, &root_path, &on_disk)).await;
+    match saved {
+        Ok(Err(err)) => log::warn!("could not save status cache ({err})"),
+        // The pool shut down, or the save panicked. Neither is recoverable and
+        // neither is worth failing the sweep over — the cache is a cache.
+        Err(err) => log::warn!("the status cache save did not run ({err})"),
+        Ok(Ok(())) => {}
     }
 }
 
@@ -1389,7 +1411,12 @@ fn sync_watchers(app: &AppHandle) {
         let current = state.root.lock().expect("root mutex poisoned");
         let Some(root) = current.as_ref() else {
             drop(current);
-            state.watchers.clear();
+            // `sync` with nothing to watch rather than `clear`: the root is
+            // gone, so the throttle state should go with it, and `sync` is the
+            // call that prunes it. `clear` is for a blur, where the repos are
+            // coming back.
+            state.watchers.sync(app, &[]);
+            state.write_queues.retain_known(|_| false);
             return;
         };
         root.repos
@@ -1405,6 +1432,11 @@ fn sync_watchers(app: &AppHandle) {
         // visible explanation.
         log::info!("{} repo(s) could not be watched; they stay on the sweep", unwatched.len());
     }
+
+    // The write queues are keyed the same way and pruned on the same event —
+    // see `WriteQueues::retain_known`. Here rather than in `adopt_repos`
+    // because the queues live on `AppState`, not on the root.
+    state.write_queues.retain_known(|id| repos.iter().any(|(repo_id, _)| repo_id == id));
 
     let mut current = state.root.lock().expect("root mutex poisoned");
     if let Some(root) = current.as_mut() {
@@ -1933,6 +1965,7 @@ mod tests {
         let interval = jittered_interval(0);
         assert!(interval.as_secs() >= 1, "base_secs is floored at 1");
     }
+
 }
 
 #[cfg(test)]

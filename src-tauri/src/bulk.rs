@@ -257,7 +257,7 @@ async fn run_bulk(app: &AppHandle, op: BulkOp, targets: Vec<Repo>) -> BulkOutcom
                 match result {
                     Ok(()) => {
                         if is_fetch {
-                            record_fetch_attempt(&app, &repo.id);
+                            record_fetch_attempt(&app, &repo.id).await;
                         }
                         BulkResult::Ok
                     }
@@ -272,26 +272,48 @@ async fn run_bulk(app: &AppHandle, op: BulkOp, targets: Vec<Repo>) -> BulkOutcom
         })
         .collect();
 
-    let mut failed = Vec::new();
-    let mut succeeded = 0;
-    let mut skipped = 0;
+    let mut results = Vec::with_capacity(tasks.len());
     for task in tasks {
         // A task that panicked is counted as skipped rather than silently
         // dropped: the three numbers have to add up to `total`, or the banner
-        // is arithmetic the user can see is wrong.
-        match task.await.unwrap_or(BulkResult::Skipped) {
-            BulkResult::Ok => succeeded += 1,
-            BulkResult::Skipped => skipped += 1,
-            BulkResult::Failed(failure) => failed.push(failure),
-        }
+        // is arithmetic the user can see is wrong. Kept here rather than in
+        // `tally` because a panic arrives as a `JoinError`, which only the
+        // await can see.
+        results.push(task.await.unwrap_or(BulkResult::Skipped));
     }
 
     // A fetch moved `refs/remotes/*` for every repo it reached, which is what
     // ahead/behind is read from (§8.2) — and the strip's own count is the
     // first thing that has to be right afterwards.
     if matches!(op, BulkOp::Fetch) {
-        fetchsweep::publish_state(app);
+        fetchsweep::publish_state(app).await;
         trigger_sweep(app, Scope::All);
+    }
+
+    tally(operation, total, results)
+}
+
+/// Fold one result per repo into the run's outcome.
+///
+/// Named and pure for the same reason `RootState::merge_sweep_results` is: the
+/// rule it carries — **`succeeded + skipped + failed.len() == total`** — is
+/// what the banner turns into a sentence, and it is invisible in the loop that
+/// produces it. A run that quietly lost a repo reads as a run that had fewer
+/// repos in it.
+///
+/// *Skipped* is counted apart from *failed* because it is not a failure:
+/// **Stop** reached those repos before anything was attempted, so nothing
+/// changed and each still carries whatever badge it already had (§5.1).
+fn tally(operation: &str, total: u32, results: Vec<BulkResult>) -> BulkOutcome {
+    let mut failed = Vec::new();
+    let mut succeeded = 0;
+    let mut skipped = 0;
+    for result in results {
+        match result {
+            BulkResult::Ok => succeeded += 1,
+            BulkResult::Skipped => skipped += 1,
+            BulkResult::Failed(failure) => failed.push(failure),
+        }
     }
 
     BulkOutcome { operation: operation.to_string(), total, succeeded, skipped, failed }
@@ -430,4 +452,81 @@ pub async fn switch_pull_all(
         return Err("None of those repositories are open any more".to_string());
     }
     Ok(run_bulk(&app, BulkOp::SwitchPull { name: name.into(), pull }, targets).await)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn failure(repo_id: &str) -> BulkFailure {
+        BulkFailure {
+            repo_id: repo_id.to_string(),
+            name: repo_id.to_string(),
+            message: "boom".to_string(),
+        }
+    }
+
+    /// The arithmetic the banner shows. Every repo dispatched has to come back
+    /// as exactly one of the three, or the run reports on fewer repos than it
+    /// touched — and the one number the user can check is the one that is
+    /// wrong.
+    #[test]
+    fn every_repo_lands_in_exactly_one_column() {
+        let outcome = tally(
+            "Pull",
+            5,
+            vec![
+                BulkResult::Ok,
+                BulkResult::Failed(failure("api")),
+                BulkResult::Skipped,
+                BulkResult::Ok,
+                BulkResult::Skipped,
+            ],
+        );
+
+        assert_eq!(outcome.succeeded, 2);
+        assert_eq!(outcome.skipped, 2);
+        assert_eq!(outcome.failed.len(), 1);
+        assert_eq!(
+            outcome.succeeded + outcome.skipped + outcome.failed.len() as u32,
+            outcome.total,
+            "the three columns do not add up to the run",
+        );
+    }
+
+    /// *Stop* is the case this exists for: it lands on a run where most repos
+    /// never started, and a tally that folded those into failures would raise
+    /// a banner naming repos that nothing was done to.
+    #[test]
+    fn a_stopped_run_reports_skips_rather_than_failures() {
+        let outcome = tally("Fetch", 4, vec![BulkResult::Ok, BulkResult::Skipped, BulkResult::Skipped, BulkResult::Skipped]);
+
+        assert_eq!(outcome.skipped, 3);
+        assert!(outcome.failed.is_empty(), "a repo Stop got to first was reported as a failure");
+    }
+
+    /// The failures carry their own name and message rather than an id the
+    /// frontend looks up later — by the time the banner renders, a rescan may
+    /// have removed the row it would have read (§5.1).
+    #[test]
+    fn a_failure_carries_what_the_banner_needs_to_name_it() {
+        let outcome = tally("Pull", 1, vec![BulkResult::Failed(failure("api"))]);
+
+        let reported = &outcome.failed[0];
+        assert_eq!(reported.repo_id, "api");
+        assert_eq!(reported.name, "api");
+        assert_eq!(reported.message, "boom");
+        assert_eq!(outcome.operation, "Pull");
+    }
+
+    /// A run with nothing to do is still a run, and still has to add up.
+    #[test]
+    fn an_empty_run_is_not_a_failure() {
+        let outcome = tally("Fetch", 0, Vec::new());
+
+        assert_eq!(outcome.total, 0);
+        assert_eq!(outcome.succeeded, 0);
+        assert_eq!(outcome.skipped, 0);
+        assert!(outcome.failed.is_empty());
+    }
 }

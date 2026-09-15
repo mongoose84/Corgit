@@ -480,4 +480,69 @@ mod tests {
     fn a_silent_merge_failure_still_says_something() {
         assert_eq!(merge_message("", "  \n"), "git merge failed");
     }
+
+    use crate::testrepo::TempRepo;
+
+    /// `switch_remote_tracking` decides between creating a tracking branch and
+    /// falling back to a plain switch by looking for the words "already
+    /// exists" in git's stderr. A fixture cannot check that — it would be
+    /// written from the same guess that produced the match. So this drives the
+    /// collision in a real repository: if git ever rewords the refusal, the
+    /// create's failure is shown to the user instead of being handled, and
+    /// this is the test that says so.
+    #[tokio::test]
+    async fn switching_to_a_remote_ref_falls_back_when_the_local_branch_exists() {
+        let (work, _origin) = repo_with_a_pushed_feature_branch("branch-fallback");
+        work.git(&["switch", "--quiet", "main"]);
+
+        // `feature` now exists both locally and as `origin/feature` — exactly
+        // the collision the fallback exists for.
+        switch_remote_tracking(work.path(), "origin/feature").await.unwrap();
+
+        assert_eq!(work.git_stdout(&["rev-parse", "--abbrev-ref", "HEAD"]), "feature");
+    }
+
+    /// The path the fallback is a fallback *from*, kept beside it so that a
+    /// change breaking the create — and quietly sending every switch through
+    /// the fallback — cannot pass by still looking like a success.
+    #[tokio::test]
+    async fn switching_to_a_remote_ref_creates_a_tracking_branch() {
+        let (work, _origin) = repo_with_a_pushed_feature_branch("branch-create");
+        work.git(&["switch", "--quiet", "main"]);
+        work.git(&["branch", "--quiet", "-D", "feature"]);
+
+        switch_remote_tracking(work.path(), "origin/feature").await.unwrap();
+
+        assert_eq!(work.git_stdout(&["rev-parse", "--abbrev-ref", "HEAD"]), "feature");
+        assert_eq!(
+            work.git_stdout(&["rev-parse", "--abbrev-ref", "feature@{upstream}"]),
+            "origin/feature",
+            "the branch was created without an upstream"
+        );
+    }
+
+    /// A repo with `main` and `feature`, both pushed to an `origin` that is
+    /// itself a temp repo.
+    ///
+    /// The origin is handed back rather than dropped here: dropping a
+    /// `TempRepo` deletes its directory, and that directory is what `origin`
+    /// points at. Bound as `_origin` at each call site so it lives to the end
+    /// of the test rather than to the end of this function.
+    fn repo_with_a_pushed_feature_branch(name: &str) -> (TempRepo, TempRepo) {
+        let upstream = TempRepo::new(&format!("{name}-upstream"));
+        upstream.allow_pushes_to_checked_out_branch();
+
+        let work = TempRepo::new(name);
+        work.write("a.txt", "one\n");
+        work.commit_all("initial");
+        work.git(&["remote", "add", "origin", &upstream.remote_url()]);
+        work.git(&["push", "--quiet", "origin", "main"]);
+
+        work.git(&["switch", "--quiet", "-c", "feature"]);
+        work.write("b.txt", "two\n");
+        work.commit_all("feature work");
+        work.git(&["push", "--quiet", "origin", "feature"]);
+
+        (work, upstream)
+    }
 }

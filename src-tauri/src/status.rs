@@ -679,4 +679,158 @@ mod tests {
             "a scanned repo's core.fsmonitor program ran during the status sweep"
         );
     }
+
+    /// `parse` against output git actually produced, rather than output a
+    /// human wrote from the same understanding that produced `parse`.
+    ///
+    /// The fixture tests above cover every branch of this parser; none of them
+    /// can cover whether porcelain-v2 looks the way they say it does. One
+    /// repository carrying every record type at once is the cheapest thing
+    /// that settles it, and the four counts are deliberately all different, so
+    /// a field read from the wrong offset cannot happen to land on the right
+    /// number.
+    #[tokio::test]
+    async fn every_record_type_parses_against_real_git() {
+        let repo = TempRepo::new("status-record-types");
+        repo.write("staged.txt", "one\n");
+        repo.write("unstaged.txt", "one\n");
+        repo.write("both.txt", "one\n");
+        repo.write("gone.txt", "one\n");
+        repo.commit_all("initial");
+
+        repo.write("staged.txt", "two\n");
+        repo.git(&["add", "staged.txt"]);
+        repo.write("unstaged.txt", "two\n");
+        repo.write("both.txt", "two\n");
+        repo.git(&["add", "both.txt"]);
+        repo.write("both.txt", "three\n");
+        repo.git(&["rm", "--quiet", "gone.txt"]);
+        repo.write("new.txt", "hello\n");
+
+        let status = query(repo.path()).await.unwrap();
+
+        // staged.txt (M), both.txt (M), gone.txt (D).
+        assert_eq!(status.staged, 3, "staged side miscounted: {status:?}");
+        // unstaged.txt (M), both.txt (M).
+        assert_eq!(status.unstaged, 2, "unstaged side miscounted: {status:?}");
+        assert_eq!(status.untracked, 1, "untracked miscounted: {status:?}");
+        assert_eq!(status.conflicted, 0, "{status:?}");
+        // Five paths, one of which is changed on both sides — the case
+        // `changed_files` exists to get right.
+        assert_eq!(status.changed_files, 5, "a two-sided path was counted twice: {status:?}");
+        assert_eq!(status.branch.as_deref(), Some("main"));
+    }
+
+    /// The claim in `parse`'s `b'2'` arm — that a rename carries its original
+    /// path as a second NUL-terminated field, which must be consumed — put to
+    /// git rather than to a fixture.
+    ///
+    /// The original is named to begin with `1` on purpose: that is the byte
+    /// `parse` reads as "a changed record", so an unconsumed field would be
+    /// counted as a second changed file. The fixture test of the same shape
+    /// proves the code skips a token; this proves there is a token to skip.
+    #[tokio::test]
+    async fn a_renames_original_path_is_really_a_second_field() {
+        let repo = TempRepo::new("status-rename-original");
+        repo.write("1-old.txt", "one\n");
+        repo.commit_all("initial");
+
+        repo.git(&["mv", "1-old.txt", "renamed.txt"]);
+
+        let status = query(repo.path()).await.unwrap();
+
+        assert_eq!(status.changed_files, 1, "the original path was read as a record: {status:?}");
+        assert_eq!(status.staged, 1, "{status:?}");
+        assert_eq!(status.unstaged, 0, "{status:?}");
+    }
+
+    /// `branch.ab`'s `+N -M`, from a branch that has genuinely diverged from
+    /// its upstream. Both numbers drive visible decisions — ahead gates Push,
+    /// behind gates Pull (§5.1) — and they are read by splitting on a sign
+    /// character, so a swap or a dropped sign would still parse.
+    #[tokio::test]
+    async fn ahead_and_behind_come_back_from_a_real_upstream() {
+        let upstream = TempRepo::new("status-upstream");
+        upstream.allow_pushes_to_checked_out_branch();
+
+        let work = TempRepo::new("status-work");
+        work.write("a.txt", "one\n");
+        work.commit_all("c1");
+        work.git(&["remote", "add", "origin", &upstream.remote_url()]);
+        work.git(&["push", "--quiet", "-u", "origin", "main"]);
+
+        work.write("a.txt", "two\n");
+        work.commit_all("c2");
+        work.git(&["push", "--quiet", "origin", "main"]);
+
+        // Rewind the local branch past the commit just pushed, then build
+        // *two* on top. Deliberately lopsided: with one commit each side the
+        // two numbers are equal, and a parser that swapped the signs — or read
+        // both from the same field — would pass anyway.
+        work.git(&["reset", "--hard", "--quiet", "HEAD~1"]);
+        work.write("b.txt", "other\n");
+        work.commit_all("c3");
+        work.write("c.txt", "another\n");
+        work.commit_all("c4");
+
+        let status = query(work.path()).await.unwrap();
+
+        assert_eq!(status.upstream.as_deref(), Some("origin/main"), "{status:?}");
+        assert_eq!(status.ahead, 2, "{status:?}");
+        assert_eq!(status.behind, 1, "{status:?}");
+    }
+
+    /// `(initial)` — git's literal, where an oid would be. `header` compares
+    /// against it exactly, and a missed match would abbreviate the word itself
+    /// to `(initia` and paint it as a commit.
+    #[tokio::test]
+    async fn an_unborn_branch_reports_no_head_but_keeps_its_name() {
+        let repo = TempRepo::new("status-unborn");
+
+        let status = query(repo.path()).await.unwrap();
+
+        assert_eq!(status.head, None, "(initial) was read as an oid: {status:?}");
+        assert_eq!(status.branch.as_deref(), Some("main"), "{status:?}");
+    }
+
+    /// `(detached)` — the same kind of match on the other header.
+    #[tokio::test]
+    async fn a_detached_head_reports_no_branch_but_keeps_its_oid() {
+        let repo = TempRepo::new("status-detached");
+        repo.write("a.txt", "one\n");
+        repo.commit_all("initial");
+        repo.git(&["checkout", "--quiet", "--detach"]);
+
+        let status = query(repo.path()).await.unwrap();
+
+        assert_eq!(status.branch, None, "(detached) was read as a branch name: {status:?}");
+        assert_eq!(status.head.as_deref().map(str::len), Some(7), "no abbreviated oid: {status:?}");
+    }
+
+    /// `u` records, reached the only way they arise: a merge git could not
+    /// resolve. `conflicted` is what stops Pull being offered on a repo that
+    /// cannot take one (§5.1), so a miscount here offers an action guaranteed
+    /// to fail.
+    #[tokio::test]
+    async fn a_real_merge_conflict_is_counted_as_conflicted() {
+        let repo = TempRepo::new("status-conflict");
+        repo.write("shared.txt", "base\n");
+        repo.commit_all("initial");
+
+        repo.git(&["switch", "--quiet", "-c", "feature"]);
+        repo.write("shared.txt", "feature\n");
+        repo.commit_all("feature side");
+
+        repo.git(&["switch", "--quiet", "main"]);
+        repo.write("shared.txt", "main\n");
+        repo.commit_all("main side");
+
+        let merge = repo.try_git(&["merge", "--no-edit", "feature"]);
+        assert!(!merge.status.success(), "the merge was supposed to conflict");
+
+        let status = query(repo.path()).await.unwrap();
+
+        assert_eq!(status.conflicted, 1, "{status:?}");
+        assert_eq!(status.changed_files, 1, "a conflicted path was counted twice: {status:?}");
+    }
 }

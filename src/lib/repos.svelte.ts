@@ -291,7 +291,13 @@ function upstreamBranch(upstream: string): string {
   return slash === -1 ? upstream : upstream.slice(slash + 1);
 }
 
-class RepoStore {
+/** Exported only so a test can build a throwaway instance; the application has
+ *  exactly one store, the `repos` singleton at the foot of this file. A second
+ *  live instance would give §9.3's "Rust owns the truth" two claimants on this
+ *  side of the IPC boundary, which is the thing this file exists to avoid.
+ *  Inert to construct — no constructor, and the event listeners are registered
+ *  by `start()`, which returns early outside Tauri. */
+export class RepoStore {
   root = $state<string | null>(null);
   repos = $state<Repo[]>([]);
   statuses = $state<Record<string, RepoStatus>>({});
@@ -403,7 +409,13 @@ class RepoStore {
     // Mirrored server-side for §9.5 persistence and the hot-set watchers
     // (§6). Not for the Repository menu any more — that reads `selectedId`
     // straight off this store (§4.1).
-    void invoke('set_selected_repo', { repoId: id }).catch(() => {});
+    //
+    // Guarded like every other command rather than relying on the `.catch()`:
+    // outside Tauri `invoke` rejects rather than throwing, so this was already
+    // harmless, but "harmless because something downstream swallows it" is not
+    // the same as not being called. `start`, `refresh` and `openFolder` all
+    // decide this at the top; this one now agrees with them.
+    if (inTauri) void invoke('set_selected_repo', { repoId: id }).catch(() => {});
   }
 
   async togglePin(id: string): Promise<void> {
@@ -502,6 +514,16 @@ class RepoStore {
   async loadFiles(): Promise<void> {
     const id = this.selectedId;
     if (!id) {
+      this.files = null;
+      this.filesError = null;
+      return;
+    }
+
+    // No backend, so there are no files — as opposed to a failure to read
+    // them. Without this the rejected `invoke` lands in the `catch` below and
+    // `filesError` becomes "ReferenceError: window is not defined", which is
+    // the store inventing git data it cannot have (see `tauri.ts`).
+    if (!inTauri) {
       this.files = null;
       this.filesError = null;
       return;
@@ -1080,7 +1102,16 @@ class RepoStore {
     }
   }
 
-  private applyRoot(view: RootView): void {
+  /* The four `apply*` methods below are the only places an event from Rust
+   * becomes state on this side, and they are public rather than private for
+   * one reason: they are the seam worth testing. Each is synchronous, takes a
+   * plain object, and touches nothing but `$state` — no DOM, no IPC, no mock —
+   * while the invariants they carry (statuses XOR errors, `isNewRoot`, the
+   * stale-root drop) fail silently when they fail at all. `repos.svelte.test.ts`
+   * pins them. Nothing outside this file and that test may call them: events
+   * arrive through the listeners `start()` registers. */
+
+  applyRoot(view: RootView): void {
     // A selection is meaningless once the repo it names may be gone.
     const isNewRoot = view.path !== this.root;
     if (isNewRoot) {
@@ -1102,7 +1133,7 @@ class RepoStore {
     if (isNewRoot && view.lastSelected) this.select(view.lastSelected);
   }
 
-  private applySweep(event: SweepEvent): void {
+  applySweep(event: SweepEvent): void {
     // Results for a folder this window no longer shows.
     if (event.root !== this.root) return;
 
@@ -1112,14 +1143,14 @@ class RepoStore {
     this.sweeping = false;
   }
 
-  private applyFetchSweep(event: FetchSweepEvent): void {
+  applyFetchSweep(event: FetchSweepEvent): void {
     if (event.root !== this.root) return;
 
     this.lastFetchAt = event.lastFetchAt;
     this.authNeeded = new Set(event.authNeeded);
   }
 
-  private applyRepoStatus(event: RepoStatusEvent): void {
+  applyRepoStatus(event: RepoStatusEvent): void {
     if (event.root !== this.root) return;
 
     // Carried on the event rather than fetched: `repo_files` would re-run the

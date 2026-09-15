@@ -58,6 +58,29 @@ impl WriteQueues {
     pub fn try_write(&self, repo_id: &str) -> Option<OwnedRwLockWriteGuard<()>> {
         self.get(repo_id).try_write_owned().ok()
     }
+
+    /// Drop the queues for repos the open root no longer contains.
+    ///
+    /// `get` inserts for every id it is *asked* about, including the status
+    /// sweep's per-tick `try_read`, so without this the map keeps an entry for
+    /// every repo any root ever held — `inflight.rs` removes at zero and says
+    /// why ("a root can be swapped ... a map that only ever grows would keep
+    /// every repo ever written to"), and this is the same argument applied to
+    /// its sibling. Bytes rather than megabytes; a consistency fix.
+    ///
+    /// **`strong_count` is the safety condition, not an optimisation.** Every
+    /// outstanding guard is an `Owned*` one, which holds its own `Arc` clone,
+    /// so a count of 1 means the map is the only owner and nothing is using
+    /// this queue — including anything merely *waiting* on it, since a waiter
+    /// has cloned the `Arc` too. Dropping an entry that someone still held
+    /// would let the next `get` mint a second `RwLock` for the same repo, and
+    /// two locks are no lock at all: §7 rule 1's one-write-at-a-time would be
+    /// silently gone. The check and the removal share `locks`, which `get`
+    /// also takes, so no caller can arrive between them.
+    pub fn retain_known(&self, known: impl Fn(&str) -> bool) {
+        let mut locks = self.locks.lock().expect("write-queue mutex poisoned");
+        locks.retain(|id, lock| known(id) || Arc::strong_count(lock) > 1);
+    }
 }
 
 #[cfg(test)]
@@ -106,5 +129,52 @@ mod tests {
     async fn an_idle_repo_permits_try_write() {
         let queues = WriteQueues::default();
         assert!(queues.try_write("repo-1").is_some());
+    }
+
+    #[tokio::test]
+    async fn an_idle_queue_for_a_departed_repo_is_dropped() {
+        let queues = WriteQueues::default();
+        drop(queues.write("repo-gone").await);
+
+        queues.retain_known(|id| id == "repo-kept");
+
+        assert_eq!(queues.len(), 0, "a queue nobody holds outlived its repo");
+    }
+
+    #[tokio::test]
+    async fn a_queue_for_a_repo_still_in_the_root_is_kept() {
+        let queues = WriteQueues::default();
+        drop(queues.write("repo-kept").await);
+
+        queues.retain_known(|id| id == "repo-kept");
+
+        assert_eq!(queues.len(), 1);
+    }
+
+    /// The safety condition, and the reason `retain_known` looks at
+    /// `strong_count` rather than just at the id. Dropping a queue somebody
+    /// still holds would let the next caller mint a *second* `RwLock` for the
+    /// same repo — and two locks are no lock: §7 rule 1's one-write-at-a-time
+    /// would be gone, silently, with both writers thinking they had it.
+    #[tokio::test]
+    async fn a_held_queue_survives_even_when_its_repo_is_gone() {
+        let queues = WriteQueues::default();
+        let guard = queues.write("repo-gone").await;
+
+        queues.retain_known(|_| false);
+
+        assert_eq!(queues.len(), 1, "a write in flight had its queue pulled out from under it");
+        // And the queue the next caller gets is still the one being held.
+        assert!(queues.try_read("repo-gone").is_none());
+
+        drop(guard);
+        queues.retain_known(|_| false);
+        assert_eq!(queues.len(), 0, "the queue outlived the write that saved it");
+    }
+
+    impl WriteQueues {
+        fn len(&self) -> usize {
+            self.locks.lock().expect("write-queue mutex poisoned").len()
+        }
     }
 }

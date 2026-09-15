@@ -167,26 +167,7 @@ async fn sweep(app: AppHandle, generation: u64, repos: Vec<Repo>) {
 
     let outcome = {
         let mut current = state.root.lock().expect("root mutex poisoned");
-        match current.as_mut() {
-            Some(root) if root.generation == generation => {
-                root.merge_sweep_results(&statuses, &errors);
-                Outcome::Publish(
-                    SweepEvent {
-                        root: root.path.clone(),
-                        statuses: root.statuses.clone(),
-                        errors: root.errors.clone(),
-                        elapsed_ms,
-                    },
-                    root.last_fetch_at.clone(),
-                )
-            }
-            // The root was replaced while we were out, so these results
-            // describe a folder nobody is looking at any more. The sweep the
-            // new root asked for was turned away by the guard above, which
-            // makes redoing it our job — otherwise its rows never fill in.
-            Some(root) => Outcome::Restart(root.generation, root.repos.clone()),
-            None => Outcome::Nothing,
-        }
+        decide(current.as_mut(), generation, &statuses, &errors, elapsed_ms)
     };
 
     match outcome {
@@ -198,7 +179,7 @@ async fn sweep(app: AppHandle, generation: u64, repos: Vec<Repo>) {
             // first. Errors are deliberately not cached — a repo that failed
             // this round keeps whatever the *previous* successful sweep or
             // cache load left behind, until it succeeds again.
-            persist_cache(&app, &event.root, event.statuses.clone(), last_fetch_at);
+            persist_cache(&app, &event.root, event.statuses.clone(), last_fetch_at).await;
 
             if let Err(err) = app.emit(SWEEP_EVENT, event) {
                 log::warn!("could not publish sweep results ({err})");
@@ -271,6 +252,46 @@ async fn sweep(app: AppHandle, generation: u64, repos: Vec<Repo>) {
             }
             state.sweeping.store(false, Ordering::SeqCst);
         }
+    }
+}
+
+/// Which of the three a finished sweep has come back to.
+///
+/// Named and pure for the same reason `RootState::merge_sweep_results` is —
+/// and it is the half of the generation counter that has no other way of being
+/// checked. Two of the three branches only ever run when a root was swapped
+/// *while a sweep was in flight*, which is a race no test can arrange through
+/// `sweep` itself, and the more dangerous one is silent: results merged into
+/// the wrong root paint one folder's rows with another's answers.
+///
+/// Takes the root rather than the `AppState` so the caller keeps the lock
+/// exactly as long as it did before: decide under the lock, act after it.
+fn decide(
+    current: Option<&mut crate::RootState>,
+    generation: u64,
+    statuses: &HashMap<String, RepoStatus>,
+    errors: &HashMap<String, String>,
+    elapsed_ms: u64,
+) -> Outcome {
+    match current {
+        Some(root) if root.generation == generation => {
+            root.merge_sweep_results(statuses, errors);
+            Outcome::Publish(
+                SweepEvent {
+                    root: root.path.clone(),
+                    statuses: root.statuses.clone(),
+                    errors: root.errors.clone(),
+                    elapsed_ms,
+                },
+                root.last_fetch_at.clone(),
+            )
+        }
+        // The root was replaced while we were out, so these results describe a
+        // folder nobody is looking at any more. The sweep the new root asked
+        // for was turned away by the re-entrancy guard, which makes redoing it
+        // our job — otherwise its rows never fill in.
+        Some(root) => Outcome::Restart(root.generation, root.repos.clone()),
+        None => Outcome::Nothing,
     }
 }
 
@@ -449,7 +470,7 @@ async fn finish_stragglers(app: AppHandle, generation: u64, stragglers: Vec<Stat
                 .map(|root| (root.path.clone(), root.statuses.clone(), root.last_fetch_at.clone()))
         };
         if let Some((root_path, statuses, last_fetch_at)) = snapshot {
-            persist_cache(&app, &root_path, statuses, last_fetch_at);
+            persist_cache(&app, &root_path, statuses, last_fetch_at).await;
         }
     }
 
@@ -524,7 +545,7 @@ pub(crate) async fn emit_repo_status(app: &AppHandle, repo_id: &str, path: &Path
     };
 
     let (root_path, statuses, last_fetch_at) = published;
-    persist_cache(app, &root_path, statuses, last_fetch_at);
+    persist_cache(app, &root_path, statuses, last_fetch_at).await;
 
     let event = RepoStatusEvent {
         root: root_path,
@@ -558,5 +579,97 @@ mod tests {
             SWEEP_PATIENCE >= Duration::from_secs(2),
             "a full pass over 69 repos costs ~1.2 s; splitting that one is noise, not news",
         );
+    }
+
+    use std::collections::HashSet;
+
+    fn repo(id: &str) -> crate::Repo {
+        crate::Repo { id: id.to_string(), name: id.to_string(), path: PathBuf::from(id) }
+    }
+
+    fn root_at(generation: u64, repos: &[&str]) -> crate::RootState {
+        crate::RootState {
+            generation,
+            path: PathBuf::from("root"),
+            repos: repos.iter().map(|id| repo(id)).collect(),
+            statuses: HashMap::new(),
+            errors: HashMap::new(),
+            last_fetch_at: HashMap::new(),
+            auth_needed: HashSet::new(),
+            unwatched: HashSet::new(),
+            pins: HashSet::new(),
+            selected: None,
+        }
+    }
+
+    fn status_on(branch: &str) -> RepoStatus {
+        RepoStatus { branch: Some(branch.to_string()), ..Default::default() }
+    }
+
+    /// The ordinary case: the root the sweep was started for is still the one
+    /// open, so its results are merged in and published.
+    #[test]
+    fn results_for_the_current_root_are_published() {
+        let mut root = root_at(7, &["api"]);
+        let statuses = HashMap::from([("api".to_string(), status_on("main"))]);
+
+        let outcome = decide(Some(&mut root), 7, &statuses, &HashMap::new(), 42);
+
+        match outcome {
+            Outcome::Publish(event, _) => {
+                assert_eq!(event.elapsed_ms, 42);
+                assert_eq!(event.statuses["api"].branch.as_deref(), Some("main"));
+            }
+            _ => panic!("the open root's own results were not published"),
+        }
+        // Merged into the root as well as into the event — the next sweep
+        // starts from this, and the cache is written from it.
+        assert_eq!(root.statuses["api"].branch.as_deref(), Some("main"));
+    }
+
+    /// The race the generation counter exists for, and the dangerous one: the
+    /// user opened another folder while this sweep was out. Publishing here
+    /// would paint one folder's rows with another folder's answers — silently,
+    /// because both are plausible repo states.
+    #[test]
+    fn results_for_a_replaced_root_are_never_merged_into_the_new_one() {
+        let mut root = root_at(8, &["billing"]);
+        let statuses = HashMap::from([("api".to_string(), status_on("main"))]);
+
+        let outcome = decide(Some(&mut root), 7, &statuses, &HashMap::new(), 42);
+
+        assert!(
+            matches!(outcome, Outcome::Restart(8, _)),
+            "a stale sweep's results were applied to the root that replaced it",
+        );
+        assert!(root.statuses.is_empty(), "the new root took the old root's statuses");
+    }
+
+    /// And the restart carries the *new* root's generation and repos, not the
+    /// stale ones — the sweep the new root asked for was turned away by the
+    /// re-entrancy guard, so redoing it is this sweep's job. Get this wrong
+    /// and the new folder's rows never fill in at all.
+    #[test]
+    fn the_restart_is_aimed_at_the_root_that_replaced_it() {
+        let mut root = root_at(8, &["billing"]);
+
+        let outcome = decide(Some(&mut root), 7, &HashMap::new(), &HashMap::new(), 0);
+
+        match outcome {
+            Outcome::Restart(generation, repos) => {
+                assert_eq!(generation, 8);
+                assert_eq!(repos, vec![repo("billing")]);
+            }
+            _ => panic!("a replaced root did not ask for a restart"),
+        }
+    }
+
+    /// The folder was closed while the sweep was out. Nothing to publish and
+    /// nothing to restart — and in particular not a restart, which would spawn
+    /// a sweep over a root that is gone.
+    #[test]
+    fn results_for_a_closed_root_are_dropped() {
+        let outcome = decide(None, 7, &HashMap::new(), &HashMap::new(), 0);
+        assert!(matches!(outcome, Outcome::Nothing));
     }
 }

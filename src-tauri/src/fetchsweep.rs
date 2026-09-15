@@ -140,7 +140,7 @@ async fn fetch_sweep(app: AppHandle, generation: u64, repos: Vec<Repo>) {
     };
 
     if let Some((root_path, statuses, last_fetch_at, auth_needed)) = published {
-        persist_cache(&app, &root_path, statuses, last_fetch_at.clone());
+        persist_cache(&app, &root_path, statuses, last_fetch_at.clone()).await;
 
         let event = FetchSweepEvent { root: root_path, last_fetch_at, auth_needed, elapsed_ms };
         if let Err(err) = app.emit(FETCH_SWEEP_EVENT, event) {
@@ -219,7 +219,7 @@ async fn fetch_many(write_queues: Arc<WriteQueues>, repos: Vec<Repo>) -> (Vec<St
 /// §13) — shared by the manual `fetch_repo` command. Persists immediately,
 /// mirroring `emit_repo_status`'s per-write cache save: a manual fetch is a
 /// user action, not a batch the fetch sweep already throttles.
-pub(crate) fn record_fetch_attempt(app: &AppHandle, repo_id: &str) {
+pub(crate) async fn record_fetch_attempt(app: &AppHandle, repo_id: &str) {
     let state = app.state::<AppState>();
     let published = {
         let mut current = state.root.lock().expect("root mutex poisoned");
@@ -229,7 +229,7 @@ pub(crate) fn record_fetch_attempt(app: &AppHandle, repo_id: &str) {
         (root.path.clone(), root.statuses.clone(), root.last_fetch_at.clone())
     };
     let (root_path, statuses, last_fetch_at) = published;
-    persist_cache(app, &root_path, statuses, last_fetch_at);
+    persist_cache(app, &root_path, statuses, last_fetch_at).await;
 }
 
 
@@ -244,7 +244,7 @@ pub(crate) fn record_fetch_attempt(app: &AppHandle, repo_id: &str) {
 /// how the row's ⚿ badge ends up with two ways to be set that disagree.
 /// `elapsed_ms` is zero — the run's own timing belongs to the strip, and the
 /// repo list's header readout is the *status* sweep's number (§1).
-pub(crate) fn publish_state(app: &AppHandle) {
+pub(crate) async fn publish_state(app: &AppHandle) {
     let state = app.state::<AppState>();
     let published = {
         let current = state.root.lock().expect("root mutex poisoned");
@@ -252,7 +252,7 @@ pub(crate) fn publish_state(app: &AppHandle) {
         (root.path.clone(), root.statuses.clone(), root.last_fetch_at.clone(), root.auth_needed.clone())
     };
     let (root_path, statuses, last_fetch_at, auth_needed) = published;
-    persist_cache(app, &root_path, statuses, last_fetch_at.clone());
+    persist_cache(app, &root_path, statuses, last_fetch_at.clone()).await;
 
     let event = FetchSweepEvent { root: root_path, last_fetch_at, auth_needed, elapsed_ms: 0 };
     if let Err(err) = app.emit(FETCH_SWEEP_EVENT, event) {

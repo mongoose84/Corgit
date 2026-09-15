@@ -126,6 +126,14 @@ impl RepoWatchers {
 
         watchers.retain(|id, _| repos.iter().any(|(repo_id, _)| repo_id == id));
 
+        // The throttle state goes with them. It deliberately survives
+        // `clear()` — a blur must not hand every repo a free pass through the
+        // interval it was already subject to — but that argument is about the
+        // *same* repos coming back, and a root swap (§9.1) brings different
+        // ones. Pruned here rather than in `clear` because this is the call
+        // that knows which repos there are now.
+        self.retain_reads(|id| repos.iter().any(|(repo_id, _)| repo_id == id));
+
         let mut unwatchable = Vec::new();
         for (id, path) in repos {
             if watchers.contains_key(id) {
@@ -147,6 +155,13 @@ impl RepoWatchers {
     /// about how often a repo is read, and an alt-tab is not a reason to
     /// forget that. A deferred read still waiting finds its repo unwatched and
     /// stands down — see `finish_deferred`.
+    /// Its own method only so a test can reach it — `sync` needs an
+    /// `AppHandle`, and the rule being checked here is about the throttle map,
+    /// not about watching anything.
+    fn retain_reads(&self, known: impl Fn(&str) -> bool) {
+        self.reads.lock().expect("reads mutex poisoned").retain(|id, _| known(id));
+    }
+
     pub fn clear(&self) {
         self.watchers.lock().expect("watchers mutex poisoned").clear();
     }
@@ -383,5 +398,43 @@ mod tests {
             matches!(watchers.claim("repo-a"), Claim::After(_)),
             "a blur is not a reason to forget a recent read",
         );
+    }
+
+    /// The other half of the rule above. A blur keeps the throttle because the
+    /// same repos are coming back; a root swap (§9.1) brings different ones,
+    /// and holding their entries forever is the growth `inflight.rs` argues
+    /// against for its own map.
+    ///
+    /// **Covers the rule, not the wiring.** This calls `retain_reads`; what it
+    /// cannot check is that `sync` still calls it, because `sync` takes an
+    /// `AppHandle` and there is no usable mock for one here (see the note on
+    /// `write_and_refresh` in the audit — `tauri::test`'s `MockRuntime` builds
+    /// but its test binary will not load on Windows). Deleting the call from
+    /// `sync` leaves every test in this file green, and that is a known hole
+    /// rather than an oversight.
+    #[test]
+    fn a_root_swap_forgets_the_throttle() {
+        let watchers = RepoWatchers::default();
+        assert!(matches!(watchers.claim("repo-a"), Claim::Now));
+
+        watchers.retain_reads(|id| id == "repo-b");
+
+        assert!(
+            matches!(watchers.claim("repo-a"), Claim::Now),
+            "a repo the open root no longer holds kept its throttle entry",
+        );
+    }
+
+    /// And a repo that is still there keeps it — otherwise `sync` running on
+    /// every focus-gain would hand every repo a free pass on every alt-tab,
+    /// which is the thing `clear` not touching this map exists to prevent.
+    #[test]
+    fn a_repo_still_in_the_root_keeps_its_throttle() {
+        let watchers = RepoWatchers::default();
+        assert!(matches!(watchers.claim("repo-a"), Claim::Now));
+
+        watchers.retain_reads(|id| id == "repo-a");
+
+        assert!(matches!(watchers.claim("repo-a"), Claim::After(_)));
     }
 }

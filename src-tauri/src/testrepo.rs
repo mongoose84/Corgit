@@ -45,8 +45,16 @@ impl TempRepo {
     /// templates cannot drop hooks into a repository this test then runs git
     /// in.
     pub fn new(name: &str) -> Self {
+        // The counter restarts at zero in every test process, so it keeps
+        // concurrent tests apart but hands *consecutive runs* the same
+        // directory names. `Drop` is best-effort by necessity (see below), so
+        // a run that could not delete a directory leaves the next run's
+        // `remove_dir_all` to fail on a handle Windows has not released — a
+        // failure that lands in whichever test drew that number. The process
+        // id costs nothing and means a name is never reused at all.
         let unique = NEXT.fetch_add(1, Ordering::SeqCst);
-        let path = std::env::temp_dir().join(format!("corgit-test-{name}-{unique}"));
+        let path =
+            std::env::temp_dir().join(format!("corgit-test-{name}-{}-{unique}", std::process::id()));
         let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(&path).expect("could not create the test directory");
 
@@ -66,16 +74,58 @@ impl TempRepo {
     /// Run git in this repo, panicking with its stderr on failure — a failed
     /// *setup* command is a broken test, not a result to assert on.
     pub fn git(&self, args: &[&str]) {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(&self.path)
-            .output()
-            .unwrap_or_else(|err| panic!("could not run git {args:?}: {err}"));
+        let output = self.try_git(args);
         assert!(
             output.status.success(),
             "git {args:?} failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
+    }
+
+    /// The same, for the setup steps that are *supposed* to fail: `git merge`
+    /// exits non-zero on a conflict, and a conflict is precisely the state
+    /// some tests need to reach. Only the exit status differs from [`git`] —
+    /// a git that could not be spawned at all is still a broken test.
+    ///
+    /// [`git`]: TempRepo::git
+    pub fn try_git(&self, args: &[&str]) -> std::process::Output {
+        Command::new("git")
+            .args(args)
+            .current_dir(&self.path)
+            .output()
+            .unwrap_or_else(|err| panic!("could not run git {args:?}: {err}"))
+    }
+
+    /// Git's own answer to a question, trimmed — for asserting on repository
+    /// state that Corgit's own parsers are not the thing under test. Using
+    /// `rev-parse` to check where HEAD ended up keeps a test of `switch`
+    /// independent of whether `status::parse` is also correct.
+    pub fn git_stdout(&self, args: &[&str]) -> String {
+        let output = self.try_git(args);
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    /// This repo's path in the form git accepts as a remote URL. Windows
+    /// backslashes are legal in a path and not in a URL, and git reads a
+    /// forward-slashed local path as a local path on every platform.
+    pub fn remote_url(&self) -> String {
+        self.path.to_string_lossy().replace('\\', "/")
+    }
+
+    /// Let another repo push to this one's checked-out branch.
+    ///
+    /// Git refuses by default, and rightly — it would desynchronise the
+    /// worktree from HEAD. These tests only ever use the pushed-to repo as a
+    /// place for refs to live, and never look at its files, so the refusal is
+    /// protecting something nobody is reading. Cheaper than a second kind of
+    /// `TempRepo` that inits `--bare`.
+    pub fn allow_pushes_to_checked_out_branch(&self) {
+        self.git(&["config", "receive.denyCurrentBranch", "ignore"]);
     }
 
     pub fn write(&self, rel: &str, contents: &str) {
