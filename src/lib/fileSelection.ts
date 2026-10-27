@@ -1,7 +1,7 @@
 /**
  * Multi-select for the middle pane's file lists (SPEC.md §5.2).
  *
- * Kept here rather than inline in `CommitPane` because the interesting part is
+ * Kept here rather than inline in `ChangesList` because the interesting part is
  * not the rendering: it is what a modifier click does to a set, which is the
  * part that is worth testing and the part that got the pane's earlier tick
  * column removed. The pane holds one value of this type; every click replaces

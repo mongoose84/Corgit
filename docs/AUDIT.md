@@ -2,7 +2,7 @@
 
 A three-step audit — security, then architecture, then test coverage — run over three
 sessions, 11-09-2026 to 15-09-2026, against `branch_search_functionality` @ `ee5b9a4`.
-All three steps were surveyed in full; what remains is implementation of carried findings.
+All three steps were surveyed in full, and every carried finding is closed (27-10-2026).
 
 `file:line` references below are **as of `ee5b9a4`** and have drifted since — A1 alone moved
 a third of `lib.rs` into new modules. Use them to find the code, not to cite it.
@@ -26,11 +26,14 @@ in the mutations.
 | S1 | High   | Command injection via `cmd /C` in `open_in_vscode`             | Done         |
 | S2 | Medium | A swept repo's `.git/config` is executed code                  | Done         |
 | S3 | Medium | `discard` globbed its pathspecs                                | Done         |
+| S4 | Low    | Credential URLs could reach the on-disk log                    | Done         |
+| S5 | Low    | `Path::join` let a frontend path escape the repo root          | Done         |
+| S6 | Low    | Ref names and hashes could be parsed as git options            | Done         |
 | A1 | High   | `lib.rs` was five subsystems in one 2,997-line module          | Done         |
 | A3 | Medium | `hash_root` used `DefaultHasher`                               | Done         |
 | A4 | Low    | The sweep fsynced on an async worker every tick                | Done         |
 | A5 | Low    | Two per-repo maps grew unbounded                               | Done         |
-| A6 | Medium | `GraphPane.svelte` was A1 on the frontend                      | Done, not runtime-verified; siblings open |
+| A6 | Medium | `GraphPane.svelte` was A1 on the frontend                      | Done         |
 | G1 | Medium | The commit pane could not show a rename                        | Done         |
 | T1 | High   | Not one test ever ran git                                      | Done         |
 | T2 | Medium | `lib.rs`'s subsystems were untested                            | Done         |
@@ -38,16 +41,13 @@ in the mutations.
 
 Tests at close of session 3: 202 Rust (plus 2 `#[ignore]`d benches), 220 frontend.
 Baseline at the start was 159 and 209. After A3's tails (27-10-2026): 209 Rust; after the
-mock-runtime harness (same day): 215; after `run_bulk` (same day): 218.
+mock-runtime harness (same day): 215; after `run_bulk` (same day): 218; after S4–S6
+(same day): 234.
 
 ## Open
 
-### A6 — `RepoList.svelte` and `CommitPane.svelte`
-
-At 611 and 860 lines, both are on the trajectory GraphPane was on. Untouched. Also: A6's
-`<BranchFind>` extraction is the one closed item **not verified at runtime** — there are
-no component tests and the app was not driven. It rests on `svelte-check` (0 errors / 0
-warnings over 395 files), the test suite, `vite build`, and inspection.
+Nothing carried. What was deliberately left is under each step's *Not carried*, and one
+cosmetic note under *Turned up along the way*.
 
 ## Step 1 — Security
 
@@ -89,12 +89,74 @@ so `report[1].txt` is a character class. Discard destroys uncommitted work with 
 discard. Reproduced against real git first — discarding `report[1].txt` also reverted
 `report1.txt`. Mutation-verified.
 
-### Deferred (low / info — recorded, not carried)
+S4–S6 were first recorded as low/info and deferred; all three were closed on 27-10-2026.
+One threat model covers them, and it is what makes them low rather than nothing: the
+frontend is the only thing between a typed or clicked string and argv or the filesystem,
+so each is reachable only by something that can make the webview send what the UI never
+would. They are defence in depth around that boundary — and S6 turned out to be the
+deepest of them.
 
-- **S4** credential URLs in the on-disk log (`git.rs` non-zero-exit warn, `lib.rs:2611`).
-- **S5** `Path::join` with an absolute input escapes the repo root (`lib.rs:729`, `:799`,
-  `diff.rs:145`).
-- **S6** branch names reach `switch` / `branch` / `merge` without `--`.
+### S4. Low — credential URLs could reach the on-disk log (done)
+
+`git.rs`'s two `log::warn!`s write argv and, on a non-zero exit, the whole stderr. Corgit's
+own argv never carries a URL (fetch, pull and push name the remote), and git strips the
+userinfo from URLs it prints itself — checked against 2.53. But the same stderr carries
+whatever hooks, credential helpers and LFS print, which git does not rewrite, and the log
+is a file that Help ▸ Open Log Folder invites the user to attach to a bug report.
+
+**Fixed:** both lines are built by `killed_line` / `non_zero_line` and passed through
+`redact_credentials`, which strips the whole userinfo of every `scheme://userinfo@host` —
+username included, since a GitHub-style token is routinely the username. The log only:
+what the user is shown keeps git's stderr whole (§13, CLAUDE.md). 5 tests; 4 mutations
+(either line unredacted, redacting only `user:pass@`, redacting only the first URL), all
+caught.
+
+### S5. Low — `Path::join` let a frontend path escape the repo root (done)
+
+The untracked-file diff, Open in VS Code and Reveal in File Explorer each joined a
+frontend-supplied path onto the repo root. `join` with an absolute argument *replaces* the
+base, and on Windows so do a root-relative path (keeps only the drive) and a
+drive-relative one (`C:x`); `..` needs no special form. The diff is the one that matters —
+it reads the file and returns its contents, so it was a read of any file on the machine.
+
+**Fixed:** `repopath::join` admits only `Normal` and `.` components, refusing the rest
+rather than cleaning them up — git never emits any of them, so such a path did not come
+from a file row. Lexical, deliberately: an untracked symlink inside the repo is a real row
+git reports, and what it may show is a separate question. 5 tests; 4 mutations (the diff
+bypassing it, and admitting `..`, a root, or a prefix), all caught. The two `lib.rs` call
+sites are not mutation-tested — under mutation they would launch VS Code or Explorer from
+the test run — and rest on the helper's tests plus inspection.
+
+### S6. Low — ref names and hashes could be parsed as git options (done)
+
+Recorded as "branch names reach `switch` / `branch` / `merge` without `--`". Both halves
+were reproduced against git 2.53 before fixing, and the second was not in the original
+note at all:
+- `switch --guess --detach` — a branch name of `--detach` — **detached HEAD**.
+- `diff-tree` and `show` given `--output=<path>` in the hash slot **wrote that file**.
+  Both run on the read path, from `graph::details` and the commit-file diff, so a hash
+  the frontend sent could write anywhere — undoing what S2 established for that path.
+
+**Fixed:** `git::END_OF_OPTIONS` (`--end-of-options`) before every positional ref or hash
+the frontend supplies: `switch`, `branch` create/delete, `merge`, `diff-tree`, `show`.
+Not `--`, which in `diff-tree`/`show`/`checkout` also starts pathspecs and so cannot sit
+before a revision that is followed by a path. Option *values* (`-c <name>`) need nothing —
+git takes them literally and rejects `--orphan` as a branch name on its own. This raises
+the effective git floor from 2.23 (`switch`/`restore`) to 2.24; SPEC §3 now says so.
+
+6 real-git tests through the public functions, each using a name git would *accept* as an
+option, so the call does something different without the marker. 11 mutations; 9 caught.
+The two survivors are `switch_remote_tracking`'s, and survive correctly: an option-shaped
+`remote_ref` makes an option-shaped `-c` value, which git rejects first, so neither marker
+is reachable. They stay for uniformity, with a comment saying exactly that. One test was
+wrong on its first draft: it claimed `branch -d --list` lists and exits 0. It errors, as
+every option there does, so delete's test now pins the *message* — unguarded, git says
+"branch name required" about a command Corgit never meant to run.
+
+The mutation harness had a hole of its own, found on the S4 sweep: it reported a mutation
+that failed to *compile* as SURVIVED whenever the error had no `error[E…]` code. It now
+requires a `test result` line, and the only two earlier SURVIVED verdicts were re-run to
+confirm they compiled.
 
 ## Step 2 — Architecture
 
@@ -171,7 +233,7 @@ next `get` mint a *second* `RwLock` for the same repo, and two locks are no lock
 outstanding guard is an `Owned*` one holding its own clone, waiters included), under the
 same mutex as `get`. There is a test for exactly that.
 
-### A6. Medium — `GraphPane.svelte` is A1 on the frontend (done; siblings under Open)
+### A6. Medium — `GraphPane.svelte` is A1 on the frontend (done)
 
 1,388 lines, six independent concerns. The branch-search feature was the tell: its pure
 logic went to `branchSearch.ts` with tests, but ~160 lines of UI state went into GraphPane
@@ -186,6 +248,39 @@ header button paints from it), `revealRef` (pages and selection are the graph's)
 because the close has to happen *between* them — closing returns 186 px to the scroll
 container, and centring against the shorter viewport is wrong every time a jump had to
 read pages.
+
+**Siblings, 27-10-2026.** Same rule — ownership, not line count — and it gave one cut each:
+- `CommitPane.svelte` 860 → 316, `<ChangesList>` 591. The compose box and the file lists
+  met in exactly one place, `busy`, which crosses as a bindable the way BranchFind's
+  `open` does. ChangesList owns the selection, ↑/↓ and its held-key coalesce, the menu,
+  the ignore entries and the discard/delete dialog. The pane keeps the loading and error
+  states, since they replace the lists rather than living in them. One behaviour change,
+  deliberate: the menu and dialog now unmount with the list, so a repo whose files stop
+  being readable no longer leaves a confirmation up over rows that are gone. One scoped-CSS
+  trap: `.link` had been silently inheriting `cursor: pointer` and its disabled colour
+  from the pane's base `button` rule, and now says both itself.
+- `RepoList.svelte` 611 → 426, `<RootStrip>` 209. The strip is the one part of the pane
+  scoped to the folder — it reads the bulk run and the behind count, never the filter,
+  pins or rows. The bands stayed: they are the list's own chrome.
+
+**Runtime-verified, 27-10-2026** — closing the gap BranchFind was left with. The dev app
+was driven over CDP (`WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=…`,
+then `Runtime.evaluate` dispatching real DOM events) against `make-demo-root.sh`'s root:
+- BranchFind: header button and Ctrl+F open it focused; hits filter and count ("2 of
+  4"); Enter jumps, closes, and leaves the target selected inside the viewport; Escape
+  closes; reopening keeps the query selected; a repo switch closes it and clears the
+  query.
+- ChangesList: click selects and opens the diff; ↓ crosses from Staged into Changes
+  moving focus and diff; ctrl-click extends; the mixed-selection menu reads *Stage 2
+  files / Discard 1 (skipping untracked) / Delete 1 / Ignore 1 (skipping tracked)*;
+  Discard's dialog lists the one tracked row and Escape closes it; row `+`, *unstage
+  all* and *stage all* land; `busy` crosses both ways (a row's stage disables the
+  textarea, the header's Fetch disables the rows).
+- RootStrip: *Pull all* walked `Pulling… 0 of 1 | Stop` → `1 of 1` → `Nothing to pull`,
+  with the bar drawn and the button disabled after.
+
+Opening the demo root also exercised A3's prune live — two legacy-keyed cache files went.
+The app data was backed up first and restored afterwards.
 
 ### Not carried
 
@@ -322,6 +417,13 @@ guarded now, for consistency rather than because a test needed it.
 - **T5** — `menu.rs` has 0 tests; neither CI job measures coverage.
 
 ## Turned up along the way
+
+### Bulk strip reads "0 of 0" for one round trip (not carried)
+
+Seen while verifying A6. `runBulk` sets `{ total: 0 }` before invoking, on purpose — the
+click must acknowledge itself before the backend's first progress event (§13) — so the
+strip says *Pulling… 0 of 0* until that event lands. Cosmetic and one IPC hop long; a
+label that drops the count while `total === 0` would fix it.
 
 ### G1. Medium — the commit pane cannot show a rename (done)
 

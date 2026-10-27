@@ -11,7 +11,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use crate::git;
+use crate::{git, repopath};
 
 /// Which two sides to compare (§5.4). The frontend picks this from the section
 /// the file row was clicked in, because that is the only thing that knows it:
@@ -136,7 +136,7 @@ pub async fn file(repo: &Path, path: &str, source: &DiffSource) -> Result<FileDi
         DiffSource::Commit { hash } => {
             let mut args = vec!["diff-tree", "--no-commit-id", "-p", "-r"];
             args.extend_from_slice(&common);
-            args.extend_from_slice(&[hash.as_str(), "--", path]);
+            args.extend_from_slice(&[git::END_OF_OPTIONS, hash.as_str(), "--", path]);
             args
         }
         DiffSource::Untracked => unreachable!("handled above"),
@@ -155,8 +155,12 @@ pub async fn file(repo: &Path, path: &str, source: &DiffSource) -> Result<FileDi
 /// which `git::read` correctly reports as a failure. Reading the file and
 /// calling every line an addition is both simpler and honest: that *is* the
 /// diff against nothing.
+///
+/// The one place a frontend-supplied path is *read* and its contents sent
+/// back, so the join goes through `repopath` — a bare `repo.join` would read
+/// any file on the machine given an absolute path (S5).
 async fn read_untracked(repo: &Path, path: &str) -> Result<FileDiff, String> {
-    let full = repo.join(path);
+    let full = repopath::join(repo, path)?;
 
     // Checked before reading, not after: the line cap below would still mean
     // pulling a 2 GB build artefact through memory first.
@@ -491,6 +495,37 @@ mod tests {
     }
 
     use crate::testrepo::TempRepo;
+
+    /// S5, end to end. An untracked file's diff is the file's contents, so a
+    /// path that escapes the repo is a read of anything on the machine — here
+    /// a real file in a *different* repo, named absolutely. `repopath`'s own
+    /// tests pin the rule; this one pins that the diff goes through it.
+    #[tokio::test]
+    async fn an_untracked_diff_cannot_read_outside_the_repo() {
+        let repo = TempRepo::new("diff-s5");
+        let elsewhere = TempRepo::new("diff-s5-elsewhere");
+        elsewhere.write("secret.txt", "not yours\n");
+        let outside = elsewhere.path().join("secret.txt");
+
+        let result = file(repo.path(), &outside.to_string_lossy(), &DiffSource::Untracked).await;
+
+        assert!(result.is_err(), "read a file outside the repo: {result:?}");
+    }
+
+    /// S6 — the same `--output=<path>` hole as `graph::details`, reached from
+    /// a commit row's file diff instead of its file list.
+    #[tokio::test]
+    async fn a_commit_hash_is_never_read_as_a_flag() {
+        let repo = TempRepo::new("diff-s6");
+        repo.write("a.txt", "one\n");
+        repo.commit_all("initial");
+
+        let target = repo.path().join("written-by-a-flag");
+        let source = DiffSource::Commit { hash: format!("--output={}", target.display()) };
+
+        assert!(file(repo.path(), "a.txt", &source).await.is_err());
+        assert!(!target.exists(), "git wrote a file named by the hash argument");
+    }
 
     /// `--no-textconv`, against a repository that actually configures one.
     ///

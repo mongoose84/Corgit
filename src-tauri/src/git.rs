@@ -4,6 +4,7 @@
 //! global in-flight cap lives in one place, and so does the Windows-specific
 //! "don't flash a console window" flag.
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::OnceLock;
@@ -227,6 +228,25 @@ pub async fn read(cwd: &Path, args: &[&str]) -> Result<Output, String> {
 /// entries are load-bearing and neither is visibly so at a call site.
 const READ_CONFIG: &[&str] = &["--no-optional-locks", "-c", "core.fsmonitor=false"];
 
+/// Goes immediately before any ref name or commit the frontend supplied, in
+/// every command that takes one positionally. Without it git parses that
+/// argument as an option whenever it starts with `-`, and the frontend is the
+/// only thing standing between a typed or clicked string and argv. Both were
+/// reproduced against git 2.53 before this existed: `switch --guess --detach`
+/// detached HEAD with `--detach` in the branch slot, and `diff-tree`/`show`
+/// given `--output=<path>` in the hash slot **wrote that file** — on the read
+/// path, which S2 had otherwise made safe to point at any repo.
+///
+/// `--end-of-options` (git 2.24) rather than `--`, because `--` is not one
+/// thing: it ends options *and* starts pathspecs in `diff-tree`, `show` and
+/// `checkout`, so it cannot sit before a revision that is followed by a path.
+/// This one means "no more options" in every parse-options command, and
+/// nothing else.
+///
+/// Option *values* do not need it — `-c <name>` takes the next argument
+/// literally, and git then rejects `--orphan` as a branch name on its own.
+pub const END_OF_OPTIONS: &str = "--end-of-options";
+
 /// Run a mutating command through the documented `git` entry point (§3) — the
 /// one credential helpers, hooks and LFS expect. Nothing that stages, commits,
 /// fetches, pulls or pushes may take the `read` shortcut.
@@ -336,7 +356,7 @@ async fn run_in(
         // triggered it, but a fetch killed by the background sweep (§6) has no
         // one watching, and "which repo, which command" is exactly what you
         // would want to know afterwards.
-        log::warn!("killed `git {}` in {} after {:?}", args.join(" "), cwd.display(), budget);
+        log::warn!("{}", killed_line(args, cwd, budget));
         return Err(timed_out_message(budget));
     };
     let output = waited?;
@@ -364,15 +384,73 @@ async fn run_in(
     // (`problems.rs`) is fed from where an error is returned instead, and so
     // stays free of failures nobody needed to know about.
     if !output.ok {
-        log::warn!(
-            "`git {}` in {} exited non-zero: {}",
-            args.join(" "),
-            cwd.display(),
-            output.stderr.trim()
-        );
+        log::warn!("{}", non_zero_line(args, cwd, &output.stderr));
     }
 
     Ok(output)
+}
+
+// The two log lines, built here rather than inline so a test can read exactly
+// what reaches the file. Both go through `redact_credentials` (S4): the log is
+// a file on disk that Help ▸ Open Log Folder (§4.1) invites the user to attach
+// to a bug report, and it outlives the session that wrote it.
+
+fn killed_line(args: &[&str], cwd: &Path, budget: Duration) -> String {
+    redact_credentials(&format!("killed `git {}` in {} after {budget:?}", args.join(" "), cwd.display()))
+        .into_owned()
+}
+
+fn non_zero_line(args: &[&str], cwd: &Path, stderr: &str) -> String {
+    redact_credentials(&format!("`git {}` in {} exited non-zero: {}", args.join(" "), cwd.display(), stderr.trim()))
+        .into_owned()
+}
+
+/// Strips the userinfo out of every `scheme://userinfo@host` in `text` —
+/// `https://alice:token@host/x` becomes `https://<redacted>@host/x`.
+///
+/// Git already does this to URLs it prints itself (checked against 2.53:
+/// "unable to access 'https://host/x.git/'" with the credentials gone), which
+/// is why this is not belt-and-braces over git so much as cover for everything
+/// else that writes to the same stderr: hooks, credential helpers, LFS, a
+/// `url.<base>.insteadOf` rewrite echoed back by a server. None of those are
+/// git's to sanitise, and §3 is clear that Corgit runs all of them.
+///
+/// The whole userinfo goes, username included, rather than only a password
+/// after `:` — a GitHub-style token is routinely *the username*
+/// (`https://ghp_…@github.com`), so keeping the "user" half would keep the
+/// secret. Only the authority is touched: an `@` later in the path is a path.
+///
+/// The log only. What the *user* is shown keeps git's stderr whole (§13,
+/// CLAUDE.md) — it is their own credential on their own screen, and a
+/// redacted error is a harder one to act on.
+fn redact_credentials(text: &str) -> Cow<'_, str> {
+    const REDACTED: &str = "<redacted>";
+    let mut out = String::new();
+    let mut copied = 0;
+    let mut search = 0;
+
+    while let Some(found) = text[search..].find("://") {
+        let authority_start = search + found + "://".len();
+        // Ends where a URL's host part can end in running text: a path, a
+        // query, whitespace, or the quote or bracket git and tools wrap URLs in.
+        let authority_len = text[authority_start..]
+            .find(|c: char| c.is_whitespace() || "/?#'\"<>()[]".contains(c))
+            .unwrap_or(text.len() - authority_start);
+        let authority = &text[authority_start..authority_start + authority_len];
+
+        if let Some(at) = authority.rfind('@') {
+            out.push_str(&text[copied..authority_start]);
+            out.push_str(REDACTED);
+            copied = authority_start + at;
+        }
+        search = authority_start + authority_len;
+    }
+
+    if copied == 0 {
+        return Cow::Borrowed(text);
+    }
+    out.push_str(&text[copied..]);
+    Cow::Owned(out)
 }
 
 /// Phrased as something Corgit did rather than something git reported, because
@@ -393,6 +471,55 @@ mod tests {
     /// ever leaves this message the frontend silently stops translating a
     /// timeout — it degrades to raw text with no Retry action, which is easy
     /// to miss by eye and impossible to miss here.
+    /// S4, at the level that matters: the line that is written to the log
+    /// file. Stderr from a credential helper or hook is the realistic source —
+    /// git strips its own URLs — so the URL arrives inside running text.
+    #[test]
+    fn a_logged_failure_never_carries_a_credential() {
+        let stderr = "remote: error: could not reach 'https://alice:s3cr3t@git.example.com/team/repo.git'\n";
+        let line = non_zero_line(&["push"], Path::new("C:/repo"), stderr);
+
+        assert!(!line.contains("s3cr3t") && !line.contains("alice"), "{line}");
+        assert!(line.contains("https://<redacted>@git.example.com/team/repo.git"), "{line}");
+    }
+
+    /// The other line, for the argv half. Corgit never puts a URL in argv
+    /// today; this keeps that from being the only thing standing between a
+    /// future `fetch <url>` and the log.
+    #[test]
+    fn a_logged_kill_never_carries_a_credential() {
+        let line = killed_line(&["fetch", "https://tok@host/r.git"], Path::new("C:/repo"), NETWORK_TIMEOUT);
+        assert!(!line.contains("tok@"), "{line}");
+    }
+
+    /// A token in the username slot is still a token.
+    #[test]
+    fn a_username_alone_is_redacted_too() {
+        assert_eq!(redact_credentials("https://ghp_abc123@github.com/o/r"), "https://<redacted>@github.com/o/r");
+    }
+
+    #[test]
+    fn every_url_in_the_text_is_redacted() {
+        assert_eq!(
+            redact_credentials("from https://a:b@h1/x to ssh://c@h2:22/y"),
+            "from https://<redacted>@h1/x to ssh://<redacted>@h2:22/y"
+        );
+    }
+
+    /// Only the authority: an `@` in a path, or in text that is not a URL at
+    /// all, is left exactly as it was.
+    #[test]
+    fn text_with_no_userinfo_is_untouched() {
+        for text in [
+            "error: failed to push some refs to 'https://github.com/o/r@v2.git'",
+            "Author: Jeppe <jeppe@example.com>",
+            "https://host",
+            "",
+        ] {
+            assert!(matches!(redact_credentials(text), Cow::Borrowed(_)), "{text}");
+        }
+    }
+
     #[test]
     fn a_timeout_message_stays_translatable_by_the_frontend() {
         let message = timed_out_message(NETWORK_TIMEOUT);

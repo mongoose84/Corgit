@@ -333,8 +333,7 @@
     color: var(--status-dirty);
   }
 
-  /* Same treatment as the conflict banner's buttons (CommitPane.svelte) —
-     neutral, not the accent, which is reserved for selection and primary
+  /* Neutral, not the accent, which is reserved for selection and primary
      actions (§11 rule 3). Opening an external editor is neither. */
   .vscode {
     flex: 0 0 auto;

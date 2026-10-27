@@ -15,6 +15,7 @@ mod menu;
 mod mockapp;
 mod problems;
 mod remote;
+mod repopath;
 mod roots;
 mod settings;
 mod status;
@@ -763,8 +764,9 @@ async fn open_in_vscode(
     if let Some(file) = file {
         // Joined here rather than trusted from the frontend: `file` is a
         // repo-relative path out of `git status`, and the repo root is the
-        // only thing that can turn it into something VS Code can open.
-        let target = path.join(&file);
+        // only thing that can turn it into something VS Code can open — via
+        // `repopath`, which refuses anything git could not have reported (S5).
+        let target = repopath::join(&path, &file)?;
         let target = target.to_string_lossy();
         command.arg("-g");
         match line {
@@ -823,8 +825,8 @@ async fn open_in_terminal(repo_id: String, app: AppHandle) -> Result<(), String>
 /// log folder — there is no portable "reveal this file".
 ///
 /// `path` is repo-relative, straight off `git status`, so the repo root is what
-/// turns it into something the shell can open — the same join `open_in_vscode`
-/// does, and for the same reason.
+/// turns it into something the shell can open — the same `repopath::join`
+/// `open_in_vscode` does, and for the same reason.
 ///
 /// A deleted file has nothing to select, and `explorer` given a path that does
 /// not exist silently opens Documents instead, which reads as the app having
@@ -834,7 +836,7 @@ async fn open_in_terminal(repo_id: String, app: AppHandle) -> Result<(), String>
 #[tauri::command]
 async fn reveal_in_explorer(repo_id: String, path: String, app: AppHandle) -> Result<(), String> {
     let root = repo_path(&app, &repo_id)?;
-    let target = root.join(&path);
+    let target = repopath::join(&root, &path)?;
 
     if target.exists() {
         return reveal_existing(&target);

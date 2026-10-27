@@ -132,6 +132,12 @@ Resolve `git` from PATH at startup. If absent, show a blocking first-run screen 
 download link rather than failing per-operation. Record the version — `core.fsmonitor`
 support (§6) needs ≥ 2.37.
 
+The floor for everything else is **2.24**, and it is not checked at startup: `switch` and
+`restore` (§8.3, §8.6) arrived in 2.23, and `--end-of-options` — which every ref name or
+hash the frontend supplies goes behind, so it can never be read as a flag — in 2.24.
+Anything older fails per operation with git's own "unknown option" text. Git for Windows
+2.24 shipped in November 2019.
+
 **"At startup" means started at startup, not waited for.** The probe is a process spawn,
 and process spawn is the one startup cost with no upper bound worth trusting: an
 anti-malware scan of a rarely-run binary, a revocation check with no route to its

@@ -244,7 +244,7 @@ pub struct CommitFileEntry {
 /// actually asking: "what did this merge bring in", not "how was it resolved".
 pub async fn details(repo: &Path, hash: &str) -> Result<CommitDetails, String> {
     let files_args = diff_tree_args(hash);
-    let show_args = ["show", "-s", "--format=%H%x1f%an%x1f%ae%x1f%ct%x1f%B", hash];
+    let show_args = ["show", "-s", "--format=%H%x1f%an%x1f%ae%x1f%ct%x1f%B", git::END_OF_OPTIONS, hash];
     let (files_result, meta_result) =
         tokio::join!(git::read(repo, &files_args), git::read(repo, &show_args));
 
@@ -264,7 +264,7 @@ pub async fn details(repo: &Path, hash: &str) -> Result<CommitDetails, String> {
 /// Its own function, and tested, for the same reason `branch::create_args` is:
 /// the flags *are* the behaviour here, and three of them look droppable to
 /// anyone who only ever selects an ordinary commit while checking.
-fn diff_tree_args(hash: &str) -> [&str; 11] {
+fn diff_tree_args(hash: &str) -> [&str; 12] {
     [
         "diff-tree",
         "--no-commit-id",
@@ -287,6 +287,9 @@ fn diff_tree_args(hash: &str) -> [&str; 11] {
         "--numstat",
         "-r",
         "-z",
+        // S6: `hash` comes from the frontend, and `--output=<path>` here
+        // writes that file. See `END_OF_OPTIONS`.
+        git::END_OF_OPTIONS,
         hash,
     ]
 }
@@ -627,6 +630,24 @@ mod tests {
     }
 
     use crate::testrepo::TempRepo;
+
+    /// S6, and the worst of it: `diff-tree` and `show` both take
+    /// `--output=<path>`, and both run here on a hash the frontend sent. The
+    /// read path is the one S2 made safe to point at any repo, so a write
+    /// arriving through it would undo that. Both commands are checked by one
+    /// assertion — either alone left unguarded writes the file.
+    #[tokio::test]
+    async fn a_commit_hash_is_never_read_as_a_flag() {
+        let repo = TempRepo::new("graph-s6");
+        repo.write("a.txt", "one\n");
+        repo.commit_all("initial");
+
+        let target = repo.path().join("written-by-a-flag");
+        let hostile = format!("--output={}", target.display());
+
+        assert!(details(repo.path(), &hostile).await.is_err());
+        assert!(!target.exists(), "git wrote a file named by the hash argument");
+    }
 
     /// The positional zip, on the case `details`' doc comment singles out: a
     /// merge, where `-m --first-parent` is the only reason `diff-tree` prints

@@ -21,10 +21,10 @@
 
 use std::path::Path;
 
-use crate::git;
+use crate::git::{self, END_OF_OPTIONS};
 
 pub async fn switch_local(repo: &Path, branch: &str) -> Result<(), String> {
-    let output = git::write(repo, &["switch", branch]).await?;
+    let output = git::write(repo, &["switch", END_OF_OPTIONS, branch]).await?;
     if !output.ok {
         return Err(full_message(&output.stderr));
     }
@@ -37,7 +37,13 @@ pub async fn switch_local(repo: &Path, branch: &str) -> Result<(), String> {
 pub async fn switch_remote_tracking(repo: &Path, remote_ref: &str) -> Result<(), String> {
     let local = local_name(remote_ref);
 
-    let create = git::write(repo, &["switch", "-c", &local, "--track", remote_ref]).await?;
+    // `END_OF_OPTIONS` in both commands below for uniformity rather than
+    // because a test can show it doing anything: any option-shaped
+    // `remote_ref` yields an option-shaped `local`, which git rejects as the
+    // `-c` value before it reads the rest — so the create fails on the name,
+    // and that failure is not "already exists", so the fallback never runs.
+    // Mutation-checked, and both deletions survive for exactly that reason.
+    let create = git::write(repo, &["switch", "-c", &local, "--track", END_OF_OPTIONS, remote_ref]).await?;
     if create.ok {
         return Ok(());
     }
@@ -47,7 +53,7 @@ pub async fn switch_remote_tracking(repo: &Path, remote_ref: &str) -> Result<(),
 
     // A local branch of that name already exists elsewhere in the graph —
     // just switch to it, the same as double-clicking its own local badge would.
-    let fallback = git::write(repo, &["switch", &local]).await?;
+    let fallback = git::write(repo, &["switch", END_OF_OPTIONS, &local]).await?;
     if !fallback.ok {
         return Err(full_message(&fallback.stderr));
     }
@@ -80,7 +86,7 @@ pub async fn switch_to(repo: &Path, name: &str) -> Result<(), String> {
 }
 
 fn switch_args(name: &str) -> Vec<&str> {
-    vec!["switch", "--guess", name]
+    vec!["switch", "--guess", END_OF_OPTIONS, name]
 }
 
 /// New branch at `start_point` (a ref name or commit hash — whatever the graph
@@ -112,9 +118,9 @@ pub async fn create(repo: &Path, name: &str, start_point: &str, checkout: bool) 
 
 fn create_args<'a>(name: &'a str, start_point: &'a str, checkout: bool) -> Vec<&'a str> {
     if checkout {
-        vec!["switch", "--no-track", "-c", name, start_point]
+        vec!["switch", "--no-track", "-c", name, END_OF_OPTIONS, start_point]
     } else {
-        vec!["branch", "--no-track", name, start_point]
+        vec!["branch", "--no-track", END_OF_OPTIONS, name, start_point]
     }
 }
 
@@ -247,7 +253,7 @@ pub async fn delete(repo: &Path, name: &str, force: bool) -> Result<(), String> 
 }
 
 fn delete_args(name: &str, force: bool) -> Vec<&str> {
-    vec!["branch", if force { "-D" } else { "-d" }, name]
+    vec!["branch", if force { "-D" } else { "-d" }, END_OF_OPTIONS, name]
 }
 
 /// Same whole-stderr rule as [`full_message`] (§13). The "not fully merged"
@@ -286,7 +292,7 @@ pub async fn merge(repo: &Path, source: &str) -> Result<(), String> {
 }
 
 fn merge_args(source: &str) -> Vec<&str> {
-    vec!["merge", "--no-edit", source]
+    vec!["merge", "--no-edit", END_OF_OPTIONS, source]
 }
 
 /// The one failure in this file that has to read stdout as well as stderr,
@@ -324,14 +330,17 @@ mod tests {
 
     #[test]
     fn creating_without_checkout_leaves_head_alone() {
-        assert_eq!(create_args("feature-x", "main", false), ["branch", "--no-track", "feature-x", "main"]);
+        assert_eq!(
+            create_args("feature-x", "main", false),
+            ["branch", "--no-track", "--end-of-options", "feature-x", "main"]
+        );
     }
 
     #[test]
     fn creating_with_checkout_is_one_atomic_switch() {
         assert_eq!(
             create_args("feature-x", "main", true),
-            ["switch", "--no-track", "-c", "feature-x", "main"]
+            ["switch", "--no-track", "-c", "feature-x", "--end-of-options", "main"]
         );
     }
 
@@ -361,9 +370,12 @@ mod tests {
     fn creating_from_head_names_no_branch() {
         assert_eq!(
             create_args("fix/auth", "HEAD", true),
-            ["switch", "--no-track", "-c", "fix/auth", "HEAD"]
+            ["switch", "--no-track", "-c", "fix/auth", "--end-of-options", "HEAD"]
         );
-        assert_eq!(create_args("fix/auth", "HEAD", false), ["branch", "--no-track", "fix/auth", "HEAD"]);
+        assert_eq!(
+            create_args("fix/auth", "HEAD", false),
+            ["branch", "--no-track", "--end-of-options", "fix/auth", "HEAD"]
+        );
     }
 
     /// The porcelain would mark the checked-out branch with `* `, and this
@@ -407,7 +419,7 @@ mod tests {
     /// remote-only row in a run into a failure the dialog said would not happen.
     #[test]
     fn switching_asks_git_to_resolve_the_name() {
-        assert_eq!(switch_args("develop"), ["switch", "--guess", "develop"]);
+        assert_eq!(switch_args("develop"), ["switch", "--guess", "--end-of-options", "develop"]);
     }
 
     #[test]
@@ -431,12 +443,12 @@ mod tests {
 
     #[test]
     fn a_plain_delete_is_the_safe_one() {
-        assert_eq!(delete_args("feature-x", false), ["branch", "-d", "feature-x"]);
+        assert_eq!(delete_args("feature-x", false), ["branch", "-d", "--end-of-options", "feature-x"]);
     }
 
     #[test]
     fn a_forced_delete_is_the_capital_one() {
-        assert_eq!(delete_args("feature-x", true), ["branch", "-D", "feature-x"]);
+        assert_eq!(delete_args("feature-x", true), ["branch", "-D", "--end-of-options", "feature-x"]);
     }
 
     /// The frontend decides whether to offer *Delete anyway* by looking for
@@ -456,7 +468,7 @@ mod tests {
 
     #[test]
     fn merging_never_opens_an_editor() {
-        assert_eq!(merge_args("feature-x"), ["merge", "--no-edit", "feature-x"]);
+        assert_eq!(merge_args("feature-x"), ["merge", "--no-edit", "--end-of-options", "feature-x"]);
     }
 
     /// The case that made `merge_message` read stdout at all: git puts the
@@ -519,6 +531,71 @@ mod tests {
             "origin/feature",
             "the branch was created without an upstream"
         );
+    }
+
+    // S6: a name the frontend supplies is a name, never a flag. Each case uses
+    // a name that git would *accept* as an option, so without
+    // `END_OF_OPTIONS` the call does something — succeeds, or fails for a
+    // different reason — and the assertion sees it. A name git rejects as an
+    // option anyway would pass with the marker deleted, which is the trap
+    // T1 recorded twice.
+
+    /// The one reproduced before the fix: `--detach` in the branch slot
+    /// detached HEAD.
+    #[tokio::test]
+    async fn a_switch_target_is_never_read_as_a_flag() {
+        let repo = repo_with_one_commit("s6-switch");
+
+        assert!(switch_to(repo.path(), "--detach").await.is_err());
+        assert!(switch_local(repo.path(), "--detach").await.is_err());
+
+        assert_eq!(repo.git_stdout(&["rev-parse", "--abbrev-ref", "HEAD"]), "main", "HEAD was detached");
+    }
+
+    /// `--quiet` as the start point: unguarded, both commands take it as a
+    /// flag, default the start point to HEAD, and create the branch anyway.
+    #[tokio::test]
+    async fn a_start_point_is_never_read_as_a_flag() {
+        let repo = repo_with_one_commit("s6-create");
+
+        for checkout in [true, false] {
+            assert!(create(repo.path(), "made", "--quiet", checkout).await.is_err());
+            assert!(
+                repo.try_git(&["rev-parse", "--verify", "--quiet", "refs/heads/made"]).stdout.is_empty(),
+                "a branch was created from a flag (checkout: {checkout})"
+            );
+        }
+    }
+
+    /// Unguarded, `merge --no-edit --squash` is a squash merge of the
+    /// upstream — refused here only because there is none.
+    #[tokio::test]
+    async fn a_merge_source_is_never_read_as_a_flag() {
+        let repo = repo_with_one_commit("s6-merge");
+
+        let message = merge(repo.path(), "--squash").await.unwrap_err();
+        assert!(message.contains("not something we can merge"), "{message}");
+    }
+
+    /// The one case here where an unguarded flag cannot *do* anything: with a
+    /// single positional, `branch -d <flag>` fails whatever the flag is
+    /// (checked: `--list`, `--quiet`, `-v`, `--force`). What the marker changes
+    /// is the failure — unguarded the user is told "branch name required" or
+    /// shown git's usage text, which is git describing a command Corgit never
+    /// meant to run. Guarded, git names the branch it could not find.
+    #[tokio::test]
+    async fn a_branch_to_delete_is_never_read_as_a_flag() {
+        let repo = repo_with_one_commit("s6-delete");
+
+        let message = delete(repo.path(), "--quiet", false).await.unwrap_err();
+        assert!(message.contains("'--quiet' not found"), "{message}");
+    }
+
+    fn repo_with_one_commit(name: &str) -> TempRepo {
+        let repo = TempRepo::new(name);
+        repo.write("a.txt", "one\n");
+        repo.commit_all("initial");
+        repo
     }
 
     /// A repo with `main` and `feature`, both pushed to an `origin` that is

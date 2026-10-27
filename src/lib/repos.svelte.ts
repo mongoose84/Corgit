@@ -560,7 +560,7 @@ export class RepoStore {
    *  Untracked paths must never reach here: git has nothing to restore them
    *  from, so the command would fail on the pathspec — and because git rejects
    *  a pathspec list wholesale rather than per path, one stray untracked entry
-   *  would take a whole multi-file discard down with it. `CommitPane` is what
+   *  would take a whole multi-file discard down with it. `ChangesList` is what
    *  keeps them out. */
   async discardPaths(paths: string[]): Promise<boolean> {
     return this.write('discard_paths', { paths }, 'Discard');
@@ -576,7 +576,7 @@ export class RepoStore {
    *  **Tracked paths must never reach here.** `git clean` would skip them
    *  rather than delete them, which is deliberate belt-and-braces in
    *  `commit::delete_untracked` — but a menu entry that silently did nothing
-   *  to half a selection is its own bug. `CommitPane` filters to `?` rows, the
+   *  to half a selection is its own bug. `ChangesList` filters to `?` rows, the
    *  exact mirror of what it does for `discardPaths`. */
   async deletePaths(paths: string[]): Promise<boolean> {
     return this.write('delete_paths', { paths }, 'Delete');
@@ -591,7 +591,7 @@ export class RepoStore {
    *  Tracked paths must never reach here. Git keeps tracking what it already
    *  tracks, so a `.gitignore` line for one changes nothing at all — the row
    *  stays exactly where it was, and the menu entry that produced it lied.
-   *  `CommitPane` is what keeps them out, the same way it keeps untracked
+   *  `ChangesList` is what keeps them out, the same way it keeps untracked
    *  paths out of `discardPaths`. */
   async ignorePatterns(patterns: string[]): Promise<boolean> {
     return this.write('append_gitignore', { patterns }, 'Ignore');
