@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 
 use notify_debouncer_mini::notify::{RecommendedWatcher, RecursiveMode};
 use notify_debouncer_mini::{new_debouncer, DebounceEventResult, Debouncer};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Manager, Runtime};
 
 use crate::sweep::emit_repo_status;
 
@@ -121,7 +121,7 @@ impl RepoWatchers {
     /// anything and must stay on the sweep interval (§6) — a network share or
     /// a linked worktree is a normal case here, not an error path, and
     /// silently treating one as watched is how a row goes stale for good.
-    pub fn sync(&self, app: &AppHandle, repos: &[(String, PathBuf)]) -> Vec<String> {
+    pub fn sync<R: Runtime>(&self, app: &AppHandle<R>, repos: &[(String, PathBuf)]) -> Vec<String> {
         let mut watchers = self.watchers.lock().expect("watchers mutex poisoned");
 
         watchers.retain(|id, _| repos.iter().any(|(repo_id, _)| repo_id == id));
@@ -150,18 +150,18 @@ impl RepoWatchers {
         unwatchable
     }
 
+    /// Its own method so the rule can be tested without watching anything —
+    /// the rule is about the throttle map. That `sync` still calls it is
+    /// checked separately, in `mockapp.rs`, against a mock app.
+    fn retain_reads(&self, known: impl Fn(&str) -> bool) {
+        self.reads.lock().expect("reads mutex poisoned").retain(|id, _| known(id));
+    }
+
     /// Drops every watcher outright — the root was replaced or closed, or the
     /// window lost focus (§6). `reads` survives deliberately: the throttle is
     /// about how often a repo is read, and an alt-tab is not a reason to
     /// forget that. A deferred read still waiting finds its repo unwatched and
     /// stands down — see `finish_deferred`.
-    /// Its own method only so a test can reach it — `sync` needs an
-    /// `AppHandle`, and the rule being checked here is about the throttle map,
-    /// not about watching anything.
-    fn retain_reads(&self, known: impl Fn(&str) -> bool) {
-        self.reads.lock().expect("reads mutex poisoned").retain(|id, _| known(id));
-    }
-
     pub fn clear(&self) {
         self.watchers.lock().expect("watchers mutex poisoned").clear();
     }
@@ -227,7 +227,7 @@ impl RepoWatchers {
 /// the watch (a network share, a permissions failure). The caller puts these
 /// back on the sweep rather than surfacing an error: it is a documented scope
 /// limit (§6), and the row still updates, just on the slower path.
-fn start(app: AppHandle, repo_id: String, repo_path: PathBuf) -> Option<Debouncer<RecommendedWatcher>> {
+fn start<R: Runtime>(app: AppHandle<R>, repo_id: String, repo_path: PathBuf) -> Option<Debouncer<RecommendedWatcher>> {
     let git_dir = repo_path.join(".git");
     if !git_dir.is_dir() {
         return None;
@@ -405,13 +405,10 @@ mod tests {
     /// and holding their entries forever is the growth `inflight.rs` argues
     /// against for its own map.
     ///
-    /// **Covers the rule, not the wiring.** This calls `retain_reads`; what it
-    /// cannot check is that `sync` still calls it, because `sync` takes an
-    /// `AppHandle` and there is no usable mock for one here (see the note on
-    /// `write_and_refresh` in the audit — `tauri::test`'s `MockRuntime` builds
-    /// but its test binary will not load on Windows). Deleting the call from
-    /// `sync` leaves every test in this file green, and that is a known hole
-    /// rather than an oversight.
+    /// **Covers the rule, not the wiring.** This calls `retain_reads` directly;
+    /// that `sync` still calls it is `mockapp.rs`'s
+    /// `a_root_swap_prunes_the_queues_and_throttles_of_dropped_repos`, which
+    /// fails if the call is deleted.
     #[test]
     fn a_root_swap_forgets_the_throttle() {
         let watchers = RepoWatchers::default();
@@ -436,5 +433,18 @@ mod tests {
         watchers.retain_reads(|id| id == "repo-a");
 
         assert!(matches!(watchers.claim("repo-a"), Claim::After(_)));
+    }
+
+    /// For `mockapp.rs`, which checks `sync` still calls `retain_reads` — the
+    /// half `a_root_swap_forgets_the_throttle` cannot reach. `claim` stays
+    /// private; this is the narrowest way to seed and inspect the map.
+    impl RepoWatchers {
+        pub(crate) fn note_read(&self, repo_id: &str) {
+            let _ = self.claim(repo_id);
+        }
+
+        pub(crate) fn throttles(&self, repo_id: &str) -> bool {
+            self.reads.lock().expect("reads mutex poisoned").contains_key(repo_id)
+        }
     }
 }

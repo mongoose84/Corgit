@@ -173,7 +173,9 @@ mod tests {
     }
 
     impl WriteQueues {
-        fn len(&self) -> usize {
+        /// `pub(crate)` for `mockapp.rs`, which checks the prune is still
+        /// *called* — the half these tests cannot reach.
+        pub(crate) fn len(&self) -> usize {
             self.locks.lock().expect("write-queue mutex poisoned").len()
         }
     }

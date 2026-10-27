@@ -11,6 +11,8 @@ mod graph;
 mod ignore;
 mod inflight;
 mod menu;
+#[cfg(test)]
+mod mockapp;
 mod problems;
 mod remote;
 mod roots;
@@ -29,7 +31,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager, State, WindowEvent};
+use tauri::{AppHandle, Emitter, Manager, Runtime, State, WindowEvent};
 use tauri_plugin_dialog::DialogExt;
 
 use crate::cache::RootCache;
@@ -119,6 +121,34 @@ struct AppState {
     /// (§4.1); the rest of what a menu needs — the recent roots, whether a
     /// repo is selected — the frontend already has.
     pane_visibility: Mutex<menu::PaneVisibility>,
+}
+
+impl AppState {
+    /// Everything but the directories, the settings and the git probe starts
+    /// empty — no root is open, nothing is sweeping, nothing is watched.
+    ///
+    /// Its own function so the mock-runtime tests build the state the app
+    /// builds rather than a copy of it: a field added here and not there would
+    /// otherwise be a test passing against a struct the app never runs with.
+    fn new(config_dir: PathBuf, cache_dir: PathBuf, settings: Settings, git: Arc<tokio::sync::OnceCell<GitInfo>>) -> Self {
+        Self {
+            config_dir,
+            cache_dir,
+            settings: Mutex::new(settings),
+            git,
+            root: Mutex::new(None),
+            sweeping: AtomicBool::new(false),
+            ticker: Mutex::new(None),
+            fetch_sweeping: AtomicBool::new(false),
+            bulk_cancelled: AtomicBool::new(false),
+            fetch_ticker: Mutex::new(None),
+            write_queues: Arc::new(WriteQueues::default()),
+            in_flight: Arc::new(inflight::InFlightWrites::default()),
+            watchers: watch::RepoWatchers::default(),
+            // No repo is open yet, so the panes default to visible.
+            pane_visibility: Mutex::new(menu::PaneVisibility::default()),
+        }
+    }
 }
 
 /// One window, one root (§9.1).
@@ -485,7 +515,7 @@ fn refresh_root(app: AppHandle) -> Result<RootView, String> {
 
 /// Resolve a repo id against the currently open root's repo list — every
 /// mutating command and `repo_files` starts here.
-fn repo_path(app: &AppHandle, repo_id: &str) -> Result<PathBuf, String> {
+fn repo_path<R: Runtime>(app: &AppHandle<R>, repo_id: &str) -> Result<PathBuf, String> {
     let state = app.state::<AppState>();
     let current = state.root.lock().expect("root mutex poisoned");
     let root = current.as_ref().ok_or_else(|| "No folder is open".to_string())?;
@@ -1269,13 +1299,13 @@ struct WriteEndEvent {
 /// future dropped because the window closed mid-write — every one of those
 /// has to clear the row, and a `Drop` impl is the only version of that which
 /// cannot be forgotten by a future write command.
-struct WriteMarker {
-    app: AppHandle,
+struct WriteMarker<R: Runtime> {
+    app: AppHandle<R>,
     repo_id: String,
 }
 
-impl WriteMarker {
-    fn begin(app: &AppHandle, repo_id: &str, operation: &str) -> Self {
+impl<R: Runtime> WriteMarker<R> {
+    fn begin(app: &AppHandle<R>, repo_id: &str, operation: &str) -> Self {
         if app.state::<AppState>().in_flight.begin(repo_id) {
             let event = WriteBeginEvent { repo_id: repo_id.to_string(), operation: operation.to_string() };
             if let Err(err) = app.emit(WRITE_BEGIN_EVENT, event) {
@@ -1286,7 +1316,7 @@ impl WriteMarker {
     }
 }
 
-impl Drop for WriteMarker {
+impl<R: Runtime> Drop for WriteMarker<R> {
     fn drop(&mut self) {
         if self.app.state::<AppState>().in_flight.end(&self.repo_id) {
             let event = WriteEndEvent { repo_id: self.repo_id.clone() };
@@ -1311,8 +1341,8 @@ impl Drop for WriteMarker {
 /// happening on screen, which is precisely the case the indicator exists for.
 /// It lives until this function returns, so the status refresh below is inside
 /// the window too — the row must not go quiet while it is still being redrawn.
-async fn write_and_refresh<F, Fut>(
-    app: &AppHandle,
+async fn write_and_refresh<R: Runtime, F, Fut>(
+    app: &AppHandle<R>,
     repo_id: String,
     operation: &str,
     op: F,
@@ -1368,8 +1398,8 @@ where
 /// them, which is exactly the ordering it had when this was synchronous. The
 /// caller waits on a blocking pool thread instead of blocking a worker — the
 /// point is which thread stalls, not whether anyone waits.
-async fn persist_cache(
-    app: &AppHandle,
+async fn persist_cache<R: Runtime>(
+    app: &AppHandle<R>,
     root_path: &Path,
     statuses: HashMap<String, RepoStatus>,
     last_fetch_at: HashMap<String, i64>,
@@ -1404,7 +1434,7 @@ fn now_unix() -> i64 {
 /// and selection no longer call it: they used to define the watched set, and
 /// now every repo is in it regardless (§6), so a pin toggle costs nothing here
 /// where it used to cost a watcher teardown and rebuild.
-fn sync_watchers(app: &AppHandle) {
+fn sync_watchers<R: Runtime>(app: &AppHandle<R>) {
     let state = app.state::<AppState>();
 
     let repos: Vec<(String, PathBuf)> = {
@@ -1562,7 +1592,7 @@ fn jittered_interval(base_secs: u64) -> Duration {
 /// is pruned to match (§9.5). After the settings lock is released: the prune
 /// is a directory walk and needs only the list, not the lock. `roots/` is
 /// never pruned — see `roots.rs`.
-fn remember_root(app: &AppHandle, root: &Path) {
+fn remember_root<R: Runtime>(app: &AppHandle<R>, root: &Path) {
     let state = app.state::<AppState>();
     let recent = {
         let mut settings = state.settings.lock().expect("settings mutex poisoned");
@@ -1669,23 +1699,7 @@ pub fn run() {
                 log::info!("startup: git probe {} ms", probed.elapsed().as_millis());
             });
 
-            app.manage(AppState {
-                config_dir,
-                cache_dir,
-                settings: Mutex::new(settings),
-                git,
-                root: Mutex::new(None),
-                sweeping: AtomicBool::new(false),
-                ticker: Mutex::new(None),
-                fetch_sweeping: AtomicBool::new(false),
-                bulk_cancelled: AtomicBool::new(false),
-                fetch_ticker: Mutex::new(None),
-                write_queues: Arc::new(WriteQueues::default()),
-                in_flight: Arc::new(inflight::InFlightWrites::default()),
-                watchers: watch::RepoWatchers::default(),
-                // No repo is open yet, so the panes default to visible.
-                pane_visibility: Mutex::new(menu::PaneVisibility::default()),
-            });
+            app.manage(AppState::new(config_dir, cache_dir, settings, git));
 
             // Focus gating (§6): a window is focused when created, and Tauri
             // does not replay that as a `Focused(true)` event, so the ticker
@@ -2080,19 +2094,5 @@ mod bench {
                 println!("           {id}: {err}");
             }
         }
-    }
-}
-#[cfg(test)]
-mod mock_runtime {
-    /// Not a test of Corgit — a test that tests *can* drive Corgit. Every
-    /// `AppHandle`-shaped hole in docs/AUDIT.md (T2, A5's wiring) waits on
-    /// `tauri::test::mock_app`, and for a long time a test binary containing
-    /// one would not even start on Windows (`STATUS_ENTRYPOINT_NOT_FOUND`).
-    /// `build.rs` explains the cause. Should that regress, this fails alone
-    /// and by name, rather than as every mock-runtime test dying at once with
-    /// a loader error that says nothing about why.
-    #[test]
-    fn a_mock_app_can_start() {
-        let _app = tauri::test::mock_app();
     }
 }

@@ -25,7 +25,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 use crate::discovery::Repo;
 use crate::status::{self, FileChanges, RepoStatus};
@@ -483,7 +483,7 @@ async fn finish_stragglers(app: AppHandle, generation: u64, stragglers: Vec<Stat
 /// what a full sweep does for all of them. `pub(crate)` so `watch.rs`'s
 /// debounced FS-watcher callbacks (§6) can call it directly, the same way
 /// `write_and_refresh` does after every mutating command.
-pub(crate) async fn emit_repo_status(app: &AppHandle, repo_id: &str, path: &Path) {
+pub(crate) async fn emit_repo_status<R: Runtime>(app: &AppHandle<R>, repo_id: &str, path: &Path) {
     let state = app.state::<AppState>();
 
     // Whether the middle pane is looking at this repo decides how much of the

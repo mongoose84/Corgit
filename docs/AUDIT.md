@@ -29,15 +29,16 @@ in the mutations.
 | A1 | High   | `lib.rs` was five subsystems in one 2,997-line module          | Done         |
 | A3 | Medium | `hash_root` used `DefaultHasher`                               | Done         |
 | A4 | Low    | The sweep fsynced on an async worker every tick                | Done         |
-| A5 | Low    | Two per-repo maps grew unbounded                               | Done, wiring untested |
+| A5 | Low    | Two per-repo maps grew unbounded                               | Done         |
 | A6 | Medium | `GraphPane.svelte` was A1 on the frontend                      | Done, not runtime-verified; siblings open |
 | G1 | Medium | The commit pane could not show a rename                        | Done         |
 | T1 | High   | Not one test ever ran git                                      | Done         |
-| T2 | Medium | `lib.rs`'s subsystems are untested                             | **Partial** — unblocked |
+| T2 | Medium | `lib.rs`'s subsystems are untested                             | **Partial** — `run_bulk` left |
 | T3 | Medium | The store `apply*` methods were testable but untested          | Done         |
 
 Tests at close of session 3: 202 Rust (plus 2 `#[ignore]`d benches), 220 frontend.
-Baseline at the start was 159 and 209. After A3's tails (27-10-2026): 209 Rust.
+Baseline at the start was 159 and 209. After A3's tails (27-10-2026): 209 Rust; after the
+mock-runtime harness (same day): 215.
 
 ## Open
 
@@ -60,15 +61,12 @@ needed an `AppHandle`, which is exactly why none had tests.
   *while a sweep is in flight*, which no test can arrange through `sweep` itself, and the
   dangerous one is silent (one folder's rows painted with another's answers).
 
-**Still open:** `write_and_refresh`'s publish-regardless rule, `run_bulk`'s concurrency cap
-and Stop. These are orchestration, not decisions — there is no value to assert on, only
-the fact that `emit_repo_status` sits outside the `if`, or that a semaphore is acquired.
-The only honest test runs the function with a real handle.
-
-**Where to start.** `tauri::test`'s `MockRuntime` needs the write path generic over
-`R: Runtime`. That is **seven signatures and one `Drop` impl**, and it compiled first time.
-The first attempt (15-09-2026) was backed out because the test binary would not *load* on
-Windows — `STATUS_ENTRYPOINT_NOT_FOUND (0xc0000139)`.
+**The rest is orchestration, not decisions** — there is no value to assert on, only the
+fact that `emit_repo_status` sits outside the `if`, or that a semaphore is acquired. The
+only honest test runs the function with a real handle, via `tauri::test`'s `MockRuntime`.
+The first attempt (15-09-2026) made the write path generic and compiled first time, but
+was backed out because the test binary would not *load* on Windows —
+`STATUS_ENTRYPOINT_NOT_FOUND (0xc0000139)`.
 
 **Loader fixed 27-10-2026.** The note's diagnosis ("a WebView2 linking problem") was
 wrong. The binary imports `TaskDialogIndirect` from `comctl32.dll`, which only exists in
@@ -77,15 +75,30 @@ through `rustc-link-arg-bins` — binaries only, never test executables. `build.
 turns tauri-build's manifest off and embeds the same file (`windows-app-manifest.xml`,
 tauri-build's default verbatim) via `/MANIFEST:EMBED` on `rustc-link-arg`, which reaches
 every target. Verified: the probe failed with 0xc0000139 before and passes after; the
-app executable still carries the manifest. `mock_runtime::a_mock_app_can_start` stays as
-the canary. **Next:** genericise the write path over `R: Runtime` and write the tests.
+app executable still carries the manifest. `mockapp::a_mock_app_can_start` stays as the
+canary.
 
-### A5 — the prune calls are untested
+**Mock-runtime harness, 27-10-2026.** `src/mockapp.rs`: a `mock_app` with the real
+`AppState` managed on it. `AppState::new` was pulled out of `setup` so the tests build
+the state the app builds, not a copy that can drift. Generic over `R: Runtime`:
+`write_and_refresh`, `repo_path`, `WriteMarker`, `persist_cache`, `sync_watchers`,
+`remember_root`, `sweep::emit_repo_status`, `RepoWatchers::sync`, `watch::start` — no
+call site changed, since `AppHandle` defaults to the real runtime. 5 tests, 7 mutations,
+all caught, each by the test aimed at it:
+- `write_and_refresh` publishes after a failed write — the op stages a file *then* fails,
+  and both `RootState` and the `status:repo` event must show it staged. Catches publishing
+  only on success, and publishing before the op.
+- A failed write still sends `write:end` — the row would otherwise spin forever (§13).
+- `sync_watchers` prunes the write queues and throttle entries of a dropped repo, on a
+  root swap and on a close — closes A5's wiring hole.
+- `remember_root` prunes the cache of a root pushed off the recent list — closes A3's.
+One test was wrong on its first draft (it wrote a cache file before that root was on the
+recent list, so an earlier prune rightly took it); `open_root`'s order is now the test's.
 
-`retain_reads` and `retain_known` are themselves tested, but nothing covers that `sync` /
-`sync_watchers` still *call* them — deleting either call leaves every test green. Same
-`AppHandle` blocker as T2. Recorded in the test's own comment. A3's `cache::prune` call
-from `remember_root` is in the same position.
+**Still open: `run_bulk`'s concurrency cap and Stop.** Not reachable with real git: local
+fetches finish too fast for four to ever overlap, so a cap test would pass with the cap
+deleted. It needs an op whose timing the test controls, which means `run_bulk` taking
+something other than `BulkOp` — a change to its shape, kept out of the harness change.
 
 ### A6 — `RepoList.svelte` and `CommitPane.svelte`
 
@@ -186,8 +199,8 @@ same reason the files are separate:
 7 tests; all 7 mutations caught, each by the test written for it. One mutation
 (dropping `#[serde(default)]`) passed on the first sweep — correctly, since serde reads
 a missing `Option` as `None` anyway; the real hazard there is a `ROOTS_VERSION` bump, and
-the pre-field test catches that. The call from `remember_root` is untested — the same
-`AppHandle` blocker as T2.
+the pre-field test catches that. The call from `remember_root` is covered by
+`mockapp.rs` (see T2).
 
 ### A4. Low — the sweep fsyncs on an async worker every tick (done)
 
@@ -201,7 +214,7 @@ than fired and forgotten — overlapping saves for one root were always normal (
 `record_fetch_attempt` and `publish_state` into `async`; both were already called from
 async contexts. No test — it is about which thread blocks, not what the code decides.
 
-### A5. Low — two per-repo maps grow unbounded (done; wiring under Open)
+### A5. Low — two per-repo maps grow unbounded (done)
 
 `inflight.rs` removes at zero and explains why. Its siblings didn't: `WriteQueues.locks`
 inserted for every id asked about (including the sweep's per-tick `try_read`) and never
