@@ -13,6 +13,9 @@
 //! via `AppState::new` — the constructor `setup` uses, so these run against the
 //! state the app runs with. It needs `build.rs`'s manifest handling to start at
 //! all on Windows; `a_mock_app_can_start` is the canary for that.
+//!
+//! The harness is `pub(crate)` so tests can live beside the code they cover —
+//! `bulk.rs` uses it for the run's cap and Stop.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -27,16 +30,16 @@ use crate::settings::Settings;
 use crate::testrepo::TempRepo;
 use crate::{AppState, Repo, RootState};
 
-struct Harness {
+pub(crate) struct Harness {
     app: App<MockRuntime>,
-    dir: PathBuf,
+    pub(crate) dir: PathBuf,
 }
 
 impl Harness {
     /// A mock app with a fresh `AppState` whose config and cache directories
     /// are this test's own, so `roots/` and `cache/` writes land somewhere
     /// disposable rather than in the developer's real profile.
-    fn new(name: &str) -> Self {
+    pub(crate) fn new(name: &str) -> Self {
         let dir = std::env::temp_dir().join(format!("corgit-test-mockapp-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("could not create the test directory");
@@ -51,17 +54,17 @@ impl Harness {
         Self { app, dir }
     }
 
-    fn handle(&self) -> &AppHandle<MockRuntime> {
+    pub(crate) fn handle(&self) -> &AppHandle<MockRuntime> {
         self.app.handle()
     }
 
-    fn state(&self) -> tauri::State<'_, AppState> {
+    pub(crate) fn state(&self) -> tauri::State<'_, AppState> {
         self.app.state::<AppState>()
     }
 
     /// Installs `repos` as the open root, the way `open_root` would minus the
     /// scan — the tests choose exactly which repos exist.
-    fn open(&self, repos: Vec<Repo>) {
+    pub(crate) fn open(&self, repos: Vec<Repo>) {
         let root = RootState {
             generation: 1,
             path: self.dir.join("root"),
@@ -99,7 +102,7 @@ impl Drop for Harness {
     }
 }
 
-fn repo(id: &str, path: &Path) -> Repo {
+pub(crate) fn repo(id: &str, path: &Path) -> Repo {
     Repo { id: id.to_string(), name: id.to_string(), path: path.to_path_buf() }
 }
 

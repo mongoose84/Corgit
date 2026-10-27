@@ -21,7 +21,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 use crate::discovery::Repo;
 use crate::sweep;
@@ -219,7 +219,7 @@ async fn fetch_many(write_queues: Arc<WriteQueues>, repos: Vec<Repo>) -> (Vec<St
 /// §13) — shared by the manual `fetch_repo` command. Persists immediately,
 /// mirroring `emit_repo_status`'s per-write cache save: a manual fetch is a
 /// user action, not a batch the fetch sweep already throttles.
-pub(crate) async fn record_fetch_attempt(app: &AppHandle, repo_id: &str) {
+pub(crate) async fn record_fetch_attempt<R: Runtime>(app: &AppHandle<R>, repo_id: &str) {
     let state = app.state::<AppState>();
     let published = {
         let mut current = state.root.lock().expect("root mutex poisoned");
@@ -244,7 +244,7 @@ pub(crate) async fn record_fetch_attempt(app: &AppHandle, repo_id: &str) {
 /// how the row's ⚿ badge ends up with two ways to be set that disagree.
 /// `elapsed_ms` is zero — the run's own timing belongs to the strip, and the
 /// repo list's header readout is the *status* sweep's number (§1).
-pub(crate) async fn publish_state(app: &AppHandle) {
+pub(crate) async fn publish_state<R: Runtime>(app: &AppHandle<R>) {
     let state = app.state::<AppState>();
     let published = {
         let current = state.root.lock().expect("root mutex poisoned");

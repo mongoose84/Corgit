@@ -90,7 +90,7 @@ pub(crate) enum Scope {
 /// Sweep the currently open root, if any — a no-op with no root open. Shared
 /// by the focus-gained handler and the periodic ticker, both of which sweep
 /// whatever is open rather than a fixed repo list captured at start time.
-pub(crate) fn trigger_sweep(app: &AppHandle, scope: Scope) {
+pub(crate) fn trigger_sweep<R: Runtime>(app: &AppHandle<R>, scope: Scope) {
     let state = app.state::<AppState>();
     let current = state.root.lock().expect("root mutex poisoned");
     let Some(root) = current.as_ref() else { return };
@@ -116,12 +116,12 @@ pub(crate) fn trigger_sweep(app: &AppHandle, scope: Scope) {
     start_sweep(app, generation, repos);
 }
 
-pub(crate) fn start_sweep(app: &AppHandle, generation: u64, repos: Vec<Repo>) {
+pub(crate) fn start_sweep<R: Runtime>(app: &AppHandle<R>, generation: u64, repos: Vec<Repo>) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move { sweep(app, generation, repos).await });
 }
 
-async fn sweep(app: AppHandle, generation: u64, repos: Vec<Repo>) {
+async fn sweep<R: Runtime>(app: AppHandle<R>, generation: u64, repos: Vec<Repo>) {
     let (write_queues, reconcile) = {
         let state = app.state::<AppState>();
         if state.sweeping.swap(true, Ordering::SeqCst) {
@@ -407,7 +407,7 @@ pub(crate) const RECONCILE_EVERY: u32 = 5;
 /// (§5.2). Carrying the status the read already produced rather than calling
 /// `emit_repo_status` matters for the same reason `query_with_files` exists —
 /// re-reading would spend another process to learn what is in hand.
-async fn finish_stragglers(app: AppHandle, generation: u64, stragglers: Vec<StatusTask>) {
+async fn finish_stragglers<R: Runtime>(app: AppHandle<R>, generation: u64, stragglers: Vec<StatusTask>) {
     let state = app.state::<AppState>();
     let mut published = 0usize;
 

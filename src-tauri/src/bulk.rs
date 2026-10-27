@@ -16,12 +16,13 @@
 //! has no cap of its own — it is a fan-out read that happens to serve the same
 //! screens, and filing it here would make "bulk" mean two things.
 
-use std::path::Path;
+use std::future::Future;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 
 use crate::discovery::Repo;
 use crate::fetchsweep::{self, record_fetch_attempt};
@@ -199,6 +200,35 @@ pub struct BulkFailure {
 /// this hand-rolls that sequence is the moment the two drift apart.
 async fn run_bulk(app: &AppHandle, op: BulkOp, targets: Vec<Repo>) -> BulkOutcome {
     let operation = op.label();
+    let is_fetch = matches!(op, BulkOp::Fetch);
+    run_each(app, operation, is_fetch, targets, move |path| {
+        let op = op.clone();
+        async move { op.run(&path).await }
+    })
+    .await
+}
+
+/// The run itself, with the git call passed in — the seam `BulkOp`'s comment
+/// argues against, kept one level *below* it. Every command still names a
+/// `BulkOp`; nothing outside this file can hand a closure in.
+///
+/// It exists for the tests. The cap and Stop are about *timing* — four in
+/// flight and no fifth, a queue that stops while the running four finish —
+/// and a real git call cannot be made to hold still: local fetches finish
+/// before a fifth would have queued, so a test against `BulkOp` passes with
+/// the cap deleted. `mockapp.rs` passes an op it can hold open instead.
+async fn run_each<R, F, Fut>(
+    app: &AppHandle<R>,
+    operation: &'static str,
+    is_fetch: bool,
+    targets: Vec<Repo>,
+    run: F,
+) -> BulkOutcome
+where
+    R: Runtime,
+    F: Fn(PathBuf) -> Fut + Clone + Send + 'static,
+    Fut: Future<Output = Result<(), String>> + Send + 'static,
+{
     let total = targets.len() as u32;
     app.state::<AppState>().bulk_cancelled.store(false, Ordering::SeqCst);
     emit_bulk_progress(app, operation, 0, 0, total);
@@ -218,7 +248,7 @@ async fn run_bulk(app: &AppHandle, op: BulkOp, targets: Vec<Repo>) -> BulkOutcom
             let semaphore = semaphore.clone();
             let done = done.clone();
             let running = running.clone();
-            let op = op.clone();
+            let run = run.clone();
             tauri::async_runtime::spawn(async move {
                 let Ok(_permit) = semaphore.acquire().await else {
                     return BulkResult::Skipped;
@@ -239,12 +269,7 @@ async fn run_bulk(app: &AppHandle, op: BulkOp, targets: Vec<Repo>) -> BulkOutcom
                 let started = running.fetch_add(1, Ordering::SeqCst) + 1;
                 emit_bulk_progress(&app, operation, done.load(Ordering::SeqCst), started, total);
 
-                // Read before `op` is moved into the closure below. Only the
-                // fetch bookkeeping needs it, and it is one bit rather than a
-                // second clone of the op.
-                let is_fetch = matches!(op, BulkOp::Fetch);
-                let result =
-                    write_and_refresh(&app, repo.id.clone(), operation, |path| async move { op.run(&path).await }).await;
+                let result = write_and_refresh(&app, repo.id.clone(), operation, run).await;
 
                 // Progress counts *completions*, including failures: the strip
                 // is telling the user how much of the run is left, not how
@@ -285,7 +310,7 @@ async fn run_bulk(app: &AppHandle, op: BulkOp, targets: Vec<Repo>) -> BulkOutcom
     // A fetch moved `refs/remotes/*` for every repo it reached, which is what
     // ahead/behind is read from (§8.2) — and the strip's own count is the
     // first thing that has to be right afterwards.
-    if matches!(op, BulkOp::Fetch) {
+    if is_fetch {
         fetchsweep::publish_state(app).await;
         trigger_sweep(app, Scope::All);
     }
@@ -332,11 +357,11 @@ enum BulkResult {
 /// already in flight finish, because there is no way to abandon a `git pull`
 /// part-way through that does not leave a tree someone has to repair by hand.
 #[tauri::command]
-pub fn stop_bulk(app: AppHandle) {
+pub fn stop_bulk<R: Runtime>(app: AppHandle<R>) {
     app.state::<AppState>().bulk_cancelled.store(true, Ordering::SeqCst);
 }
 
-fn emit_bulk_progress(app: &AppHandle, operation: &str, done: u32, running: u32, total: u32) {
+fn emit_bulk_progress<R: Runtime>(app: &AppHandle<R>, operation: &str, done: u32, running: u32, total: u32) {
     let event = BulkProgress { operation: operation.to_string(), done, running, total };
     if let Err(err) = app.emit(BULK_PROGRESS_EVENT, event) {
         log::warn!("could not publish bulk progress ({err})");
@@ -351,7 +376,7 @@ fn emit_bulk_progress(app: &AppHandle, operation: &str, done: u32, running: u32,
 /// it. A bulk fetch never prompts (see [`BulkOp::run`]), so a repo that failed
 /// on auth has learned nothing new — clearing its badge there would hide the
 /// one thing the run actually discovered about it.
-fn record_bulk_fetch_failure(app: &AppHandle, repo_id: &str, auth_failed: bool) {
+fn record_bulk_fetch_failure<R: Runtime>(app: &AppHandle<R>, repo_id: &str, auth_failed: bool) {
     let state = app.state::<AppState>();
     let mut current = state.root.lock().expect("root mutex poisoned");
     let Some(root) = current.as_mut() else { return };
@@ -528,5 +553,134 @@ mod tests {
         assert_eq!(outcome.succeeded, 0);
         assert_eq!(outcome.skipped, 0);
         assert!(outcome.failed.is_empty());
+    }
+
+    // ---- The run itself, against a mock app (see `mockapp.rs`). ----
+
+    use std::sync::atomic::AtomicU32;
+    use std::time::{Duration, Instant};
+
+    use crate::mockapp::{repo, Harness};
+
+    /// An op the test can hold open. Each call counts itself in, records the
+    /// highest number ever in at once, then waits until the test opens the
+    /// gate. One permit is enough to release everyone: each waiter returns
+    /// its permit as it leaves, so the next one through takes it.
+    struct Gate {
+        active: AtomicU32,
+        peak: AtomicU32,
+        open: tokio::sync::Semaphore,
+    }
+
+    impl Gate {
+        fn new() -> Arc<Self> {
+            Arc::new(Self { active: AtomicU32::new(0), peak: AtomicU32::new(0), open: tokio::sync::Semaphore::new(0) })
+        }
+
+        fn op(self: &Arc<Self>) -> impl Fn(PathBuf) -> std::pin::Pin<Box<dyn Future<Output = Result<(), String>> + Send>> + Clone + Send + 'static {
+            let gate = self.clone();
+            move |_path| {
+                let gate = gate.clone();
+                Box::pin(async move {
+                    let now = gate.active.fetch_add(1, Ordering::SeqCst) + 1;
+                    gate.peak.fetch_max(now, Ordering::SeqCst);
+                    drop(gate.open.acquire().await.expect("gate closed"));
+                    gate.active.fetch_sub(1, Ordering::SeqCst);
+                    Ok(())
+                })
+            }
+        }
+
+        fn release(&self) {
+            self.open.add_permits(1);
+        }
+
+        /// Blocks the test thread until `n` ops are inside the gate. A timeout
+        /// rather than a bare loop, so a run that never gets there fails the
+        /// test instead of hanging it.
+        fn wait_for(&self, n: u32) {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while self.active.load(Ordering::SeqCst) < n {
+                assert!(Instant::now() < deadline, "only {} ops ever started", self.active.load(Ordering::SeqCst));
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+    }
+
+    /// `count` repos in the open root. The paths have no repository behind
+    /// them; the status refresh after each op fails, which `write_and_refresh`
+    /// records and carries on from — none of that is what these tests are
+    /// about, and it keeps them free of git setup.
+    fn open_repos(h: &Harness, count: usize) -> Vec<Repo> {
+        let repos: Vec<Repo> = (0..count).map(|n| repo(&format!("r{n}"), &h.dir.join(format!("r{n}")))).collect();
+        h.open(repos.clone());
+        repos
+    }
+
+    fn start(h: &Harness, gate: &Arc<Gate>, targets: Vec<Repo>) -> tauri::async_runtime::JoinHandle<BulkOutcome> {
+        let app = h.handle().clone();
+        let op = gate.op();
+        tauri::async_runtime::spawn(async move { run_each(&app, "Test", false, targets, op).await })
+    }
+
+    /// §7 rule 4: a run takes at most four of the global eight, so whatever the
+    /// user clicks next is not stuck behind it. Held open with ten queued, the
+    /// run must reach four in flight — and stay there. Asserting the peak is
+    /// *exactly* the cap catches both a cap that went up and a run that
+    /// serialised by accident.
+    #[test]
+    fn a_run_never_has_more_than_the_cap_in_flight() {
+        let h = Harness::new("bulk-cap");
+        let gate = Gate::new();
+        let targets = open_repos(&h, 10);
+
+        let run = start(&h, &gate, targets);
+        gate.wait_for(BULK_CONCURRENCY as u32);
+        // Long enough for a fifth to have started if one could: every task was
+        // spawned at once and is only waiting on its permit.
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(gate.active.load(Ordering::SeqCst), BULK_CONCURRENCY as u32, "more than the cap started");
+
+        gate.release();
+        let outcome = tauri::async_runtime::block_on(run).unwrap();
+
+        assert_eq!(gate.peak.load(Ordering::SeqCst), BULK_CONCURRENCY as u32);
+        assert_eq!(outcome.succeeded, 10);
+    }
+
+    /// §5.1's Stop, and all it can promise: the repos already running finish —
+    /// a `git pull` cannot be abandoned half-way — and the ones still queued
+    /// never start, coming back as *skipped* rather than failed.
+    #[test]
+    fn stop_lets_the_running_finish_and_skips_the_queued() {
+        let h = Harness::new("bulk-stop");
+        let gate = Gate::new();
+        let targets = open_repos(&h, 6);
+
+        let run = start(&h, &gate, targets);
+        gate.wait_for(BULK_CONCURRENCY as u32);
+        stop_bulk(h.handle().clone());
+        gate.release();
+        let outcome = tauri::async_runtime::block_on(run).unwrap();
+
+        assert_eq!(outcome.succeeded, BULK_CONCURRENCY as u32, "a repo already running did not finish");
+        assert_eq!(outcome.skipped, 6 - BULK_CONCURRENCY as u32, "a queued repo started after Stop");
+        assert!(outcome.failed.is_empty());
+    }
+
+    /// The flag is cleared when a run *starts*, not when one ends — otherwise
+    /// a Stop pressed after the last repo landed (or with no run going at all)
+    /// would silently skip every repo of the next run.
+    #[test]
+    fn a_stop_before_a_run_does_not_carry_into_it() {
+        let h = Harness::new("bulk-stale-stop");
+        let gate = Gate::new();
+        let targets = open_repos(&h, 3);
+
+        stop_bulk(h.handle().clone());
+        gate.release();
+        let outcome = tauri::async_runtime::block_on(start(&h, &gate, targets)).unwrap();
+
+        assert_eq!(outcome.succeeded, 3, "an earlier Stop skipped a run it was not pressed during");
     }
 }
