@@ -2082,3 +2082,17 @@ mod bench {
         }
     }
 }
+#[cfg(test)]
+mod mock_runtime {
+    /// Not a test of Corgit — a test that tests *can* drive Corgit. Every
+    /// `AppHandle`-shaped hole in docs/AUDIT.md (T2, A5's wiring) waits on
+    /// `tauri::test::mock_app`, and for a long time a test binary containing
+    /// one would not even start on Windows (`STATUS_ENTRYPOINT_NOT_FOUND`).
+    /// `build.rs` explains the cause. Should that regress, this fails alone
+    /// and by name, rather than as every mock-runtime test dying at once with
+    /// a loader error that says nothing about why.
+    #[test]
+    fn a_mock_app_can_start() {
+        let _app = tauri::test::mock_app();
+    }
+}

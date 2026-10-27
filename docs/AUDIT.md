@@ -33,7 +33,7 @@ in the mutations.
 | A6 | Medium | `GraphPane.svelte` was A1 on the frontend                      | Done, not runtime-verified; siblings open |
 | G1 | Medium | The commit pane could not show a rename                        | Done         |
 | T1 | High   | Not one test ever ran git                                      | Done         |
-| T2 | Medium | `lib.rs`'s subsystems are untested                             | **Partial**  |
+| T2 | Medium | `lib.rs`'s subsystems are untested                             | **Partial** — unblocked |
 | T3 | Medium | The store `apply*` methods were testable but untested          | Done         |
 
 Tests at close of session 3: 202 Rust (plus 2 `#[ignore]`d benches), 220 frontend.
@@ -67,10 +67,18 @@ The only honest test runs the function with a real handle.
 
 **Where to start.** `tauri::test`'s `MockRuntime` needs the write path generic over
 `R: Runtime`. That is **seven signatures and one `Drop` impl**, and it compiled first time.
-The blocker is one step further on: the test binary will not *load* on Windows —
-`STATUS_ENTRYPOINT_NOT_FOUND (0xc0000139)`, a WebView2 linking problem, not a code one.
-The attempt (tests, a `testapp.rs`, the dev-dependency, the genericised signatures) was
-backed out rather than left as churn. Solving the loader also unblocks A5's wiring holes.
+The first attempt (15-09-2026) was backed out because the test binary would not *load* on
+Windows — `STATUS_ENTRYPOINT_NOT_FOUND (0xc0000139)`.
+
+**Loader fixed 27-10-2026.** The note's diagnosis ("a WebView2 linking problem") was
+wrong. The binary imports `TaskDialogIndirect` from `comctl32.dll`, which only exists in
+Common Controls v6, and only an app manifest selects v6. tauri-build embeds that manifest
+through `rustc-link-arg-bins` — binaries only, never test executables. `build.rs` now
+turns tauri-build's manifest off and embeds the same file (`windows-app-manifest.xml`,
+tauri-build's default verbatim) via `/MANIFEST:EMBED` on `rustc-link-arg`, which reaches
+every target. Verified: the probe failed with 0xc0000139 before and passes after; the
+app executable still carries the manifest. `mock_runtime::a_mock_app_can_start` stays as
+the canary. **Next:** genericise the write path over `R: Runtime` and write the tests.
 
 ### A5 — the prune calls are untested
 
