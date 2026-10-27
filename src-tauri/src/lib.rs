@@ -1044,7 +1044,7 @@ fn set_selected_repo(repo_id: Option<String>, app: AppHandle) -> Result<(), Stri
 /// the other half on disk.
 fn persist_root_settings(app: &AppHandle, root_path: &Path, pins: HashSet<String>, last_selected: Option<String>) {
     let state = app.state::<AppState>();
-    let settings = roots::RootSettings { version: roots::ROOTS_VERSION, pins, last_selected };
+    let settings = roots::RootSettings { pins, last_selected, ..Default::default() };
     if let Err(err) = roots::save(&state.config_dir, root_path, &settings) {
         // `error`, not `warn`: unlike the status cache this file is the only
         // copy of the user's pins (§9.5 rule 5), so a failed write here is
@@ -1557,17 +1557,27 @@ fn jittered_interval(base_secs: u64) -> Duration {
 /// that submenu from `settings.data.recentRoots`, which the frontend refreshes
 /// on the same open this is called from — so the list now follows without
 /// being pushed.
+///
+/// Also the one moment a root can fall off the list, so it is where `cache/`
+/// is pruned to match (§9.5). After the settings lock is released: the prune
+/// is a directory walk and needs only the list, not the lock. `roots/` is
+/// never pruned — see `roots.rs`.
 fn remember_root(app: &AppHandle, root: &Path) {
     let state = app.state::<AppState>();
-    let mut settings = state.settings.lock().expect("settings mutex poisoned");
+    let recent = {
+        let mut settings = state.settings.lock().expect("settings mutex poisoned");
 
-    settings.recent_roots.retain(|recent| recent != root);
-    settings.recent_roots.insert(0, root.to_path_buf());
-    settings.recent_roots.truncate(MAX_RECENT_ROOTS);
+        settings.recent_roots.retain(|recent| recent != root);
+        settings.recent_roots.insert(0, root.to_path_buf());
+        settings.recent_roots.truncate(MAX_RECENT_ROOTS);
 
-    if let Err(err) = settings::save(&state.config_dir, &settings) {
-        log::warn!("could not save recent roots ({err})");
-    }
+        if let Err(err) = settings::save(&state.config_dir, &settings) {
+            log::warn!("could not save recent roots ({err})");
+        }
+        settings.recent_roots.clone()
+    };
+
+    cache::prune(&state.cache_dir, &recent);
 }
 
 /// Routes a second launch into the running process rather than starting a

@@ -12,6 +12,11 @@
 //! belongs to the window and a window belongs to a root. With one window (§9.2)
 //! that no longer holds — geometry would be global, not per-root — so it was
 //! dropped from the spec rather than stored in the wrong file.
+//!
+//! Never pruned, unlike `cache/`. A root that falls off the recent list may
+//! still be reopened through *Open Folder…*, and its pins have no other copy
+//! (rule 5) — whereas the files are a few hundred bytes each. What the hashed
+//! name gives up instead is recorded inside the file: see `RootSettings::root`.
 
 use std::collections::HashSet;
 use std::fs;
@@ -30,11 +35,21 @@ pub struct RootSettings {
     pub version: u32,
     pub pins: HashSet<String>,
     pub last_selected: Option<String>,
+    /// The folder this file belongs to, written by [`save`] and never read
+    /// back. The file name is a hash, so without this an orphan in `roots/`
+    /// is unidentifiable — to a user deciding what to delete, and to any
+    /// future prune that wants to ask whether the folder still exists.
+    ///
+    /// Informational only: `load` keys by the path it was *asked* for, never
+    /// by this one, so a file copied between names cannot redirect pins. No
+    /// version bump — files written before it simply read as `None`, and gain
+    /// it on their next save.
+    pub root: Option<PathBuf>,
 }
 
 impl Default for RootSettings {
     fn default() -> Self {
-        Self { version: ROOTS_VERSION, pins: HashSet::new(), last_selected: None }
+        Self { version: ROOTS_VERSION, pins: HashSet::new(), last_selected: None, root: None }
     }
 }
 
@@ -112,8 +127,13 @@ pub fn load(config_dir: &Path, root: &Path) -> RootSettings {
 
 /// Atomic write (§9.5 rule 1) — see [`atomicfile`]. Pins can be toggled faster
 /// than a save completes, so two of these overlapping is ordinary.
+///
+/// Stamps `root` from the argument rather than trusting the caller's field:
+/// the recorded path is only worth having if it is the one the file name was
+/// hashed from.
 pub fn save(config_dir: &Path, root: &Path, settings: &RootSettings) -> std::io::Result<()> {
-    let json = serde_json::to_vec_pretty(settings)
+    let stamped = RootSettings { root: Some(root.to_path_buf()), ..settings.clone() };
+    let json = serde_json::to_vec_pretty(&stamped)
         .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
 
     atomicfile::write(&path(config_dir, root), &json)
@@ -237,6 +257,41 @@ mod tests {
         fs::create_dir_all(dir.0.join("roots")).unwrap();
 
         assert!(load(&dir.0, Path::new(r"C:\dev\code")).pins.is_empty());
+    }
+
+    /// The point of the field: the file names its own folder, so an orphan in
+    /// `roots/` can be traced without reversing a hash. Read as raw JSON, not
+    /// through `load`, because nothing in the app reads it back — the
+    /// on-disk file is the whole of the behaviour.
+    #[test]
+    fn a_saved_file_records_its_root() {
+        let dir = TempDir::new("corgit-test-roots-records-root");
+        let root = Path::new(r"C:\dev\code");
+
+        // Deliberately wrong on the way in: the stamp must come from the key.
+        let settings = RootSettings { root: Some(PathBuf::from(r"C:\elsewhere")), ..Default::default() };
+        save(&dir.0, root, &settings).unwrap();
+
+        let raw: serde_json::Value = serde_json::from_str(&fs::read_to_string(path(&dir.0, root)).unwrap()).unwrap();
+        assert_eq!(raw["root"], r"C:\dev\code");
+    }
+
+    /// Every file on disk today predates the field. They must keep their pins.
+    ///
+    /// What this actually guards is the version: adding an `Option` field is
+    /// free under serde, but bumping `ROOTS_VERSION` to mark it — the reflex
+    /// `CACHE_VERSION`'s comment encourages for the cache — would make `load`
+    /// discard every existing pins file. Mutation-checked against exactly that.
+    #[test]
+    fn a_file_written_before_the_root_field_still_loads() {
+        let dir = TempDir::new("corgit-test-roots-no-root-field");
+        let root = Path::new(r"C:\dev\code");
+        fs::create_dir_all(dir.0.join("roots")).unwrap();
+        fs::write(path(&dir.0, root), br#"{"version":1,"pins":["repo-1"],"lastSelected":"repo-1"}"#).unwrap();
+
+        let loaded = load(&dir.0, root);
+        assert!(loaded.pins.contains("repo-1"));
+        assert_eq!(loaded.root, None);
     }
 
     #[test]

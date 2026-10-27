@@ -27,7 +27,7 @@ in the mutations.
 | S2 | Medium | A swept repo's `.git/config` is executed code                  | Done         |
 | S3 | Medium | `discard` globbed its pathspecs                                | Done         |
 | A1 | High   | `lib.rs` was five subsystems in one 2,997-line module          | Done         |
-| A3 | Medium | `hash_root` used `DefaultHasher`                               | Done, 2 tails open |
+| A3 | Medium | `hash_root` used `DefaultHasher`                               | Done         |
 | A4 | Low    | The sweep fsynced on an async worker every tick                | Done         |
 | A5 | Low    | Two per-repo maps grew unbounded                               | Done, wiring untested |
 | A6 | Medium | `GraphPane.svelte` was A1 on the frontend                      | Done, not runtime-verified; siblings open |
@@ -37,7 +37,7 @@ in the mutations.
 | T3 | Medium | The store `apply*` methods were testable but untested          | Done         |
 
 Tests at close of session 3: 202 Rust (plus 2 `#[ignore]`d benches), 220 frontend.
-Baseline at the start was 159 and 209.
+Baseline at the start was 159 and 209. After A3's tails (27-10-2026): 209 Rust.
 
 ## Open
 
@@ -76,7 +76,8 @@ backed out rather than left as churn. Solving the loader also unblocks A5's wiri
 
 `retain_reads` and `retain_known` are themselves tested, but nothing covers that `sync` /
 `sync_watchers` still *call* them — deleting either call leaves every test green. Same
-`AppHandle` blocker as T2. Recorded in the test's own comment.
+`AppHandle` blocker as T2. Recorded in the test's own comment. A3's `cache::prune` call
+from `remember_root` is in the same position.
 
 ### A6 — `RepoList.svelte` and `CommitPane.svelte`
 
@@ -84,12 +85,6 @@ At 611 and 860 lines, both are on the trajectory GraphPane was on. Untouched. Al
 `<BranchFind>` extraction is the one closed item **not verified at runtime** — there are
 no component tests and the app was not driven. It rests on `svelte-check` (0 errors / 0
 warnings over 395 files), the test suite, `vite build`, and inspection.
-
-### A3 — two tails
-
-The hash itself is fixed. Still open from the original note: splitting the two call sites
-so an orphan in `roots/` is identifiable (the roots file arguably wants a sanitised path,
-not a hash), and pruning `roots/` / `cache/` for roots never reopened.
 
 ## Step 1 — Security
 
@@ -152,7 +147,7 @@ convention, not by a boundary.
 2,038. `publish_fetch_state` moved bulk → fetchsweep so `FetchSweepEvent` has one builder.
 Tickers and focus stayed in `lib.rs` as wiring, since they start both sweeps.
 
-### A3. Medium — `hash_root` uses `DefaultHasher` (done; tails under Open)
+### A3. Medium — `hash_root` uses `DefaultHasher` (done)
 
 `cache.rs:47-53`. The std docs say the algorithm "is not specified, and so it and its
 hashes should not be relied upon over releases" (it has changed before: SipHash-2-4 →
@@ -168,6 +163,23 @@ path (copy → atomic write → best-effort remove; a current file always wins o
 legacy one). The cache is deliberately *not* migrated — a re-key there costs one cold
 sweep, which `CACHE_VERSION`'s own comment already argues is acceptable. 6 tests; 3
 mutations all caught.
+
+**Tails, closed 27-10-2026** (§9.5 rule 6). The two halves got opposite answers, for the
+same reason the files are separate:
+- `cache/` is pruned. `cache::prune` runs from `remember_root` — the one moment a root can
+  fall off the 10-entry recent list — and deletes every `*.json` not keyed by a recent
+  root. Legacy-keyed cache files go too, even for a recent root: the cache was never
+  migrated, so nothing reads them. Temps are left to `prune_stale_temps`.
+- `roots/` is **not** pruned — a product call: a folder off the recent list may still be
+  reopened through *Open Folder…*, its pins have no other copy, and the files are a few
+  hundred bytes. Instead each file records the `root` it was hashed from, stamped by
+  `save` from its argument rather than trusted from the caller. No version bump, so
+  existing files load unchanged and gain the field on their next save.
+7 tests; all 7 mutations caught, each by the test written for it. One mutation
+(dropping `#[serde(default)]`) passed on the first sweep — correctly, since serde reads
+a missing `Option` as `None` anyway; the real hazard there is a `ROOTS_VERSION` bump, and
+the pre-field test catches that. The call from `remember_root` is untested — the same
+`AppHandle` blocker as T2.
 
 ### A4. Low — the sweep fsyncs on an async worker every tick (done)
 

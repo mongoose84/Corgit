@@ -1554,7 +1554,7 @@ per-window along with the rest of the root state if multi-window ships — §9.2
 | File | Location (Tauri) | Contents |
 | --- | --- | --- |
 | `settings.json` | `app_config_dir` | Global: pane widths, the diff view's column split (§5.4), scan depth, sweep intervals, recent roots |
-| `roots/<hash>.json` | `app_config_dir` | Per root: pins, last selected repo |
+| `roots/<hash>.json` | `app_config_dir` | Per root: pins, last selected repo, and the root's own path |
 | `cache/<hash>.json` | `app_cache_dir` | Per root: branch, dirty, ahead/behind, `last_fetch_at` |
 
 `<hash>` is a short hash of the canonicalised root path. **Cache and pins must be per-root**
@@ -1573,6 +1573,12 @@ Rules:
    never show the user an error.
 4. **Debounced writes** — every 30 s and on quit, not on every status change.
 5. Deleting the cache must never lose pins. Hence two files.
+6. **`cache/` is bounded by the recent-roots list; `roots/` is not.** Each time a root is
+   opened, cache files for roots no longer on the list are deleted — reopening one through
+   *Open Folder…* costs a single cold sweep. Pins are never pruned: a folder off the recent
+   list may still come back, and its pins have no other copy. Instead each `roots/` file
+   records the path it was hashed from, so an orphan can be identified without reversing
+   the hash.
 
 ---
 

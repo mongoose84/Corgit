@@ -9,9 +9,13 @@
 //! Keyed by a hash of the canonicalised root path, one file per root — a
 //! single shared `cache.json` would have two windows on different roots
 //! overwrite each other's state (§9.2, §9.5).
+//!
+//! Bounded by the recent-roots list: [`prune`] drops the file of every root
+//! that has fallen off it. `roots/` is deliberately not pruned the same way —
+//! see `roots.rs`.
 
 use std::collections::hash_map::DefaultHasher;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -113,6 +117,37 @@ pub fn load(cache_dir: &Path, root: &Path) -> RootCache {
         _ => {
             let _ = fs::remove_file(&target);
             RootCache::default()
+        }
+    }
+}
+
+/// Deletes every cache file not belonging to one of `keep` — in practice the
+/// recent-roots list, which is the only way back to a root from the UI.
+///
+/// Without this `cache/` only ever grows: one file per folder ever opened,
+/// each holding a status for every repo under it. The cost of being wrong is
+/// what makes it safe to be blunt — a root reopened through *Open Folder…*
+/// after its file went pays one cold sweep, the same as a first open (rule 3).
+///
+/// Files under the pre-FNV key go too, even for a root in `keep`. Unlike
+/// `roots/`, the cache was never migrated across the key change, so nothing
+/// will ever read them again; they are exactly the orphans this exists for.
+///
+/// Only `*.json` is considered. `atomicfile`'s in-flight temps end in `.tmp`
+/// and belong to `prune_stale_temps`, which knows how old is too old; deleting
+/// one here could race a save of a root that is still open.
+pub fn prune(cache_dir: &Path, keep: &[PathBuf]) {
+    let Ok(entries) = fs::read_dir(cache_dir) else { return };
+    let keep: HashSet<String> = keep.iter().map(|root| hash_root(root)).collect();
+
+    for entry in entries.flatten() {
+        let file = entry.path();
+        if file.extension().map_or(true, |ext| ext != "json") {
+            continue;
+        }
+        let Some(stem) = file.file_stem().and_then(|stem| stem.to_str()) else { continue };
+        if !keep.contains(stem) {
+            let _ = fs::remove_file(&file);
         }
     }
 }
@@ -268,6 +303,71 @@ mod tests {
     fn the_legacy_key_is_not_the_current_key() {
         let root = Path::new(r"C:\dev\code");
         assert_ne!(hash_root(root), legacy_hash_root(root));
+    }
+
+    fn empty_cache() -> RootCache {
+        RootCache { version: CACHE_VERSION, ..Default::default() }
+    }
+
+    #[test]
+    fn prune_keeps_recent_roots_and_drops_the_rest() {
+        let dir = TempDir::new("corgit-test-cache-prune");
+        let (recent, dropped) = (Path::new(r"C:\dev\recent"), Path::new(r"C:\dev\dropped"));
+        save(&dir.0, recent, &empty_cache()).unwrap();
+        save(&dir.0, dropped, &empty_cache()).unwrap();
+
+        prune(&dir.0, &[recent.to_path_buf()]);
+
+        assert!(path(&dir.0, recent).exists(), "a recent root's cache was deleted");
+        assert!(!path(&dir.0, dropped).exists(), "a dropped root's cache survived");
+    }
+
+    /// The recent list is stored as whatever casing the folder was opened
+    /// with; the key is case-folded. Matching on anything but the key would
+    /// throw away the open root's own cache.
+    #[test]
+    fn prune_matches_roots_by_key_not_by_spelling() {
+        let dir = TempDir::new("corgit-test-cache-prune-case");
+        save(&dir.0, Path::new(r"C:\Dev\Code"), &empty_cache()).unwrap();
+
+        prune(&dir.0, &[PathBuf::from(r"c:\dev\code")]);
+
+        assert!(path(&dir.0, Path::new(r"C:\dev\code")).exists());
+    }
+
+    /// Never migrated, so never read: a legacy-keyed file is an orphan even
+    /// when its root is recent.
+    #[test]
+    fn prune_drops_legacy_keyed_files_even_for_a_recent_root() {
+        let dir = TempDir::new("corgit-test-cache-prune-legacy");
+        let root = Path::new(r"C:\dev\code");
+        fs::create_dir_all(&dir.0).unwrap();
+        let legacy = dir.0.join(format!("{}.json", legacy_hash_root(root)));
+        fs::write(&legacy, b"{}").unwrap();
+
+        prune(&dir.0, &[root.to_path_buf()]);
+
+        assert!(!legacy.exists());
+    }
+
+    /// A temp belongs to a save that may still be in flight; it is
+    /// `prune_stale_temps`' to judge, not this function's.
+    #[test]
+    fn prune_leaves_temp_files_alone() {
+        let dir = TempDir::new("corgit-test-cache-prune-temps");
+        fs::create_dir_all(&dir.0).unwrap();
+        let temp = dir.0.join("deadbeefdeadbeef.999.0.tmp");
+        fs::write(&temp, b"{}").unwrap();
+
+        prune(&dir.0, &[]);
+
+        assert!(temp.exists(), "an in-flight temp was deleted");
+    }
+
+    /// First launch: no cache directory yet.
+    #[test]
+    fn prune_of_a_missing_directory_is_a_no_op() {
+        prune(&std::env::temp_dir().join("corgit-test-cache-prune-absent"), &[]);
     }
 
     #[test]
