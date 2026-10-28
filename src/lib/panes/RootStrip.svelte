@@ -4,7 +4,7 @@
    * *Pull all* and the behind count at rest, the bulk run's progress and its
    * Stop while one is going.
    *
-   * Cut out of RepoList (A6) because it is the one part of that pane that
+   * Cut out of RepoList because it is the one part of that pane that
    * scopes to the *folder* rather than to the rows: it reads the bulk run and
    * the behind count, never the filter, the pins or the list itself. That is
    * the same boundary the comment on its placement always drew ("this strip

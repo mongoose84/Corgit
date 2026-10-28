@@ -235,7 +235,7 @@ const READ_CONFIG: &[&str] = &["--no-optional-locks", "-c", "core.fsmonitor=fals
 /// reproduced against git 2.53 before this existed: `switch --guess --detach`
 /// detached HEAD with `--detach` in the branch slot, and `diff-tree`/`show`
 /// given `--output=<path>` in the hash slot **wrote that file** — on the read
-/// path, which S2 had otherwise made safe to point at any repo.
+/// path, which `READ_CONFIG` otherwise makes safe to point at any repo.
 ///
 /// `--end-of-options` (git 2.24) rather than `--`, because `--` is not one
 /// thing: it ends options *and* starts pathspecs in `diff-tree`, `show` and
@@ -391,7 +391,7 @@ async fn run_in(
 }
 
 // The two log lines, built here rather than inline so a test can read exactly
-// what reaches the file. Both go through `redact_credentials` (S4): the log is
+// what reaches the file. Both go through `redact_credentials`: the log is
 // a file on disk that Help ▸ Open Log Folder (§4.1) invites the user to attach
 // to a bug report, and it outlives the session that wrote it.
 
@@ -471,7 +471,7 @@ mod tests {
     /// ever leaves this message the frontend silently stops translating a
     /// timeout — it degrades to raw text with no Retry action, which is easy
     /// to miss by eye and impossible to miss here.
-    /// S4, at the level that matters: the line that is written to the log
+    /// Redaction, at the level that matters: the line that is written to the log
     /// file. Stderr from a credential helper or hook is the realistic source —
     /// git strips its own URLs — so the URL arrives inside running text.
     #[test]

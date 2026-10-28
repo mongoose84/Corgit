@@ -1,4 +1,4 @@
-//! Turning a repo-relative path from the frontend into one on disk (audit S5).
+//! Turning a repo-relative path from the frontend into one on disk.
 //!
 //! Every path a file row carries is relative to its repo — it came out of
 //! `git status` — and three commands join one onto the repo root: the
@@ -46,7 +46,7 @@ mod tests {
         assert_eq!(join(root(), "./notes.txt").unwrap(), root().join("./notes.txt"));
     }
 
-    /// The case S5 was written about: `join` with an absolute argument
+    /// The case this module exists for: `join` with an absolute argument
     /// discards the repo root entirely.
     #[test]
     fn an_absolute_path_is_refused() {

@@ -13,10 +13,9 @@ use std::path::PathBuf;
 /// `rustc-link-arg-bins` — the app binary only. Test executables are not bins,
 /// so any test that pulls the dialog code in (every `tauri::test::mock_app`
 /// does) builds a binary that cannot start. That was the wall the first
-/// `MockRuntime` attempt at T2 hit (docs/AUDIT.md). `rustc-link-arg` reaches
-/// every linked target, tests included, so the manifest now does too — and
-/// the shipped executable ends up with the same manifest it always had, by a
-/// different route.
+/// `MockRuntime` attempt hit. `rustc-link-arg` reaches every linked target,
+/// tests included, so the manifest now does too — and the shipped executable
+/// ends up with the same manifest it always had, by a different route.
 ///
 /// MSVC only: `/MANIFEST:EMBED` is a `link.exe` flag, and MSVC is the only
 /// Windows toolchain this project builds with.

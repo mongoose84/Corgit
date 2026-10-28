@@ -5,8 +5,8 @@
    * ↑/↓ with its held-key coalesce, the right-click menu, and the
    * discard/delete confirmation.
    *
-   * Cut out of CommitPane for the reason BranchFind was cut out of GraphPane
-   * (A6): the pane had two concerns sharing one `<script>`, and they met in
+   * Cut out of CommitPane for the reason BranchFind was cut out of GraphPane:
+   * the pane had two concerns sharing one `<script>`, and they met in
    * exactly one place. The compose box above never reads the selection, the
    * menu or the keyboard; these lists never read the message. What they share
    * is `busy` — one write at a time from this pane, whichever half started

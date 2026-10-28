@@ -6,8 +6,8 @@
 //! function and pin that. What is left here cannot be pulled out, because it
 //! is not a decision. `write_and_refresh` publishing a status after a failed
 //! write is nothing more than where a call sits relative to an `if`, and that a
-//! prune is still *called* is only true of the caller. Each was a known hole in
-//! docs/AUDIT.md (T2, A5, A3) for as long as no test could build an app.
+//! prune is still *called* is only true of the caller. Each was untested for
+//! as long as no test could build an app.
 //!
 //! The app is `tauri::test::mock_app` with the real `AppState` managed on it
 //! via `AppState::new` — the constructor `setup` uses, so these run against the
@@ -174,7 +174,7 @@ fn a_failed_write_still_ends_its_busy_marker() {
     assert_eq!(ended.lock().unwrap().len(), 1, "a failed write left its row marked busy");
 }
 
-/// A5's wiring: `WriteQueues::retain_known` and `RepoWatchers::retain_reads`
+/// Root-swap wiring: `WriteQueues::retain_known` and `RepoWatchers::retain_reads`
 /// are tested in their own files, and this checks `sync_watchers` still calls
 /// both. A root swap that drops a repo must drop its queue and its throttle
 /// entry; a repo that stays keeps both.
@@ -221,7 +221,7 @@ fn closing_the_root_prunes_every_queue_and_throttle() {
     assert!(!state.watchers.throttles("r"), "a closed root's throttle entry survived");
 }
 
-/// A3's wiring: `cache::prune` is tested in `cache.rs`, and this checks
+/// Cache-prune wiring: `cache::prune` is tested in `cache.rs`, and this checks
 /// `remember_root` still calls it. Opening enough new roots pushes the first
 /// off the recent list, and its cache file must go with it — while the
 /// newest root, still on the list, keeps its own.

@@ -533,12 +533,12 @@ mod tests {
         );
     }
 
-    // S6: a name the frontend supplies is a name, never a flag. Each case uses
+    // A name the frontend supplies is a name, never a flag. Each case uses
     // a name that git would *accept* as an option, so without
     // `END_OF_OPTIONS` the call does something — succeeds, or fails for a
     // different reason — and the assertion sees it. A name git rejects as an
-    // option anyway would pass with the marker deleted, which is the trap
-    // T1 recorded twice.
+    // option anyway would pass with the marker deleted — a test that cannot
+    // fail.
 
     /// The one reproduced before the fix: `--detach` in the branch slot
     /// detached HEAD.

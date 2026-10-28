@@ -287,7 +287,7 @@ fn diff_tree_args(hash: &str) -> [&str; 12] {
         "--numstat",
         "-r",
         "-z",
-        // S6: `hash` comes from the frontend, and `--output=<path>` here
+        // `hash` comes from the frontend, and `--output=<path>` here
         // writes that file. See `END_OF_OPTIONS`.
         git::END_OF_OPTIONS,
         hash,
@@ -631,9 +631,9 @@ mod tests {
 
     use crate::testrepo::TempRepo;
 
-    /// S6, and the worst of it: `diff-tree` and `show` both take
+    /// The worst case for `END_OF_OPTIONS`: `diff-tree` and `show` both take
     /// `--output=<path>`, and both run here on a hash the frontend sent. The
-    /// read path is the one S2 made safe to point at any repo, so a write
+    /// read path is the one `READ_CONFIG` makes safe to point at any repo, so a write
     /// arriving through it would undo that. Both commands are checked by one
     /// assertion — either alone left unguarded writes the file.
     #[tokio::test]

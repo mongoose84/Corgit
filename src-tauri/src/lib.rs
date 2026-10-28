@@ -765,7 +765,7 @@ async fn open_in_vscode(
         // Joined here rather than trusted from the frontend: `file` is a
         // repo-relative path out of `git status`, and the repo root is the
         // only thing that can turn it into something VS Code can open — via
-        // `repopath`, which refuses anything git could not have reported (S5).
+        // `repopath`, which refuses anything git could not have reported.
         let target = repopath::join(&path, &file)?;
         let target = target.to_string_lossy();
         command.arg("-g");

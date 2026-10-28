@@ -158,7 +158,7 @@ pub async fn file(repo: &Path, path: &str, source: &DiffSource) -> Result<FileDi
 ///
 /// The one place a frontend-supplied path is *read* and its contents sent
 /// back, so the join goes through `repopath` — a bare `repo.join` would read
-/// any file on the machine given an absolute path (S5).
+/// any file on the machine given an absolute path.
 async fn read_untracked(repo: &Path, path: &str) -> Result<FileDiff, String> {
     let full = repopath::join(repo, path)?;
 
@@ -496,7 +496,7 @@ mod tests {
 
     use crate::testrepo::TempRepo;
 
-    /// S5, end to end. An untracked file's diff is the file's contents, so a
+    /// The path check, end to end. An untracked file's diff is the file's contents, so a
     /// path that escapes the repo is a read of anything on the machine — here
     /// a real file in a *different* repo, named absolutely. `repopath`'s own
     /// tests pin the rule; this one pins that the diff goes through it.
@@ -512,7 +512,7 @@ mod tests {
         assert!(result.is_err(), "read a file outside the repo: {result:?}");
     }
 
-    /// S6 — the same `--output=<path>` hole as `graph::details`, reached from
+    /// The same `--output=<path>` hole as `graph::details`, reached from
     /// a commit row's file diff instead of its file list.
     #[tokio::test]
     async fn a_commit_hash_is_never_read_as_a_flag() {
