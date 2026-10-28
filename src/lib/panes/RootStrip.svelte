@@ -13,7 +13,7 @@
    * Reads `repos` directly, like every pane — there is nothing the parent
    * knows that the store does not.
    */
-  import { bulkProgressLabel, repos } from '../repos.svelte';
+  import { bulkProgressText, repos } from '../repos.svelte';
 
   const bulk = $derived(repos.bulk);
   const behind = $derived(repos.behindCount);
@@ -47,7 +47,7 @@
 <div class="root-strip">
   {#if bulk}
     <span class="summary" aria-live="polite">
-      {bulkProgressLabel(bulk.operation)}… {bulk.done} of {bulk.total}
+      {bulkProgressText(bulk)}
     </span>
     <!-- Honest about what it can do (§5.1): a `git pull` cannot be
          abandoned mid-merge without leaving a tree to repair by hand, so

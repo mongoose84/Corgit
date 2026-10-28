@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { RepoStore, type RepoStatus } from './repos.svelte';
+import { RepoStore, bulkProgressText, type RepoStatus } from './repos.svelte';
 
 /*
  * The four `apply*` methods are where an event from Rust becomes state on this
@@ -241,5 +241,19 @@ describe('applyRepoStatus', () => {
     });
 
     expect(store.files?.staged[0].path).toBe('a.txt');
+  });
+});
+
+describe('bulkProgressText', () => {
+  // The count is dropped only for the placeholder `runBulk` paints before the
+  // backend's first event — never once a real total has arrived, including
+  // the start of a run when nothing has landed yet.
+  it('leaves the count off before the first progress event', () => {
+    expect(bulkProgressText({ operation: 'Pull', done: 0, running: 0, total: 0 })).toBe('Pulling…');
+  });
+
+  it('shows the count from the first real event on, zero done included', () => {
+    expect(bulkProgressText({ operation: 'Pull', done: 0, running: 4, total: 7 })).toBe('Pulling… 0 of 7');
+    expect(bulkProgressText({ operation: 'Fetch', done: 4, running: 3, total: 7 })).toBe('Fetching… 4 of 7');
   });
 });

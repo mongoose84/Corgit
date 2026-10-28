@@ -1538,10 +1538,17 @@ and its selection are currently one set of fields for the process, and each woul
 become per-window with every command told which window is asking.
 
 Two things are built for that future and cost nothing now: write queues and the semaphore
-are already keyed by **canonicalised repo path** rather than by root, and every event
-already carries the root it describes so a receiver can ignore one it isn't showing.
-Overlapping roots — `C:\dev` and `C:\dev\microservices` — are therefore safe by
-construction whenever the second window does arrive.
+are already keyed by **canonicalised repo path** rather than by root, and the sweep events
+(`status:sweep`, `status:repo`, `fetch:sweep`) already carry the root they describe so a
+receiver can ignore one it isn't showing. The `write:*` events need no root — they name a
+repo, which is the same repo whichever root a window shows it under. Overlapping roots —
+`C:\dev` and `C:\dev\microservices` — are therefore safe by construction for status and
+writes whenever the second window does arrive.
+
+Not yet built for it: the bulk run (§5.1) is one per process — one `bulk:progress` stream
+and one Stop flag, neither naming a root — and `problem:recorded` and `pane:visibility` are
+broadcast to every window. Each needs a root or a target window before a second window
+ships.
 
 ### 9.3 Ownership
 

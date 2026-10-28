@@ -30,6 +30,8 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_dialog::DialogExt;
 
+use crate::git::GitInfo;
+
 const PANE_VISIBILITY_EVENT: &str = "pane:visibility";
 
 /// Rust-owned state for the two View-menu checkboxes (§9.3). Not persisted —
@@ -54,21 +56,54 @@ impl Default for PaneVisibility {
 ///
 /// An unknown id is logged and dropped rather than returning an error: the
 /// caller is our own menu model, so an unknown id is a bug in this repository,
-/// not something a user can provoke or a dialog can help with.
+/// not something a user can provoke or a dialog can help with. That also makes
+/// a mismatch silent — a menu item that does nothing — which is why the id
+/// table is `MenuCommand::from_id`, pinned against the frontend's own list.
 #[tauri::command]
 pub fn menu_command(app: AppHandle, id: String) {
-    match id.as_str() {
-        "close-window" => {
+    let Some(command) = MenuCommand::from_id(&id) else {
+        log::warn!("unknown menu command ({id})");
+        return;
+    };
+    match command {
+        MenuCommand::CloseWindow => {
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.close();
             }
         }
-        "exit" => app.exit(0),
-        "toggle-repo-list" => toggle_visibility(&app, |v| &mut v.repo_list),
-        "toggle-commit-pane" => toggle_visibility(&app, |v| &mut v.commit_pane),
-        "about" => show_about(&app),
-        "open-logs" => open_log_folder(&app),
-        _ => log::warn!("unknown menu command ({id})"),
+        MenuCommand::Exit => app.exit(0),
+        MenuCommand::ToggleRepoList => toggle_visibility(&app, |v| &mut v.repo_list),
+        MenuCommand::ToggleCommitPane => toggle_visibility(&app, |v| &mut v.commit_pane),
+        MenuCommand::About => show_about(&app),
+        MenuCommand::OpenLogs => open_log_folder(&app),
+    }
+}
+
+/// The items `menu_command` handles. The ids are a contract with `RUST_IDS` in
+/// `menu.svelte.ts`, which decides what is sent here rather than handled in
+/// the webview. The two lists are in different languages, so nothing but
+/// `rust_ids_match_the_frontend` keeps them the same.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MenuCommand {
+    CloseWindow,
+    Exit,
+    ToggleRepoList,
+    ToggleCommitPane,
+    About,
+    OpenLogs,
+}
+
+impl MenuCommand {
+    fn from_id(id: &str) -> Option<Self> {
+        Some(match id {
+            "close-window" => Self::CloseWindow,
+            "exit" => Self::Exit,
+            "toggle-repo-list" => Self::ToggleRepoList,
+            "toggle-commit-pane" => Self::ToggleCommitPane,
+            "about" => Self::About,
+            "open-logs" => Self::OpenLogs,
+            _ => return None,
+        })
     }
 }
 
@@ -140,17 +175,91 @@ fn show_about(app: &AppHandle) {
     let state = app.state::<crate::AppState>();
     // `get` rather than awaiting the probe: this is a synchronous menu
     // handler, and by the time anyone reaches Help ▸ About the answer has been
-    // in the cell for minutes. The unresolved arm exists so that the one case
-    // where it has not — a probe still stuck in an anti-malware scan — says so
-    // instead of claiming git is missing (§3).
-    let git_line = match state.git.get() {
+    // in the cell for minutes.
+    let message = format!("Corgit {}\n{}", env!("CARGO_PKG_VERSION"), about_git_line(state.git.get()));
+
+    app.dialog().message(message).title("About Corgit").show(|_| {});
+}
+
+/// About's git line. The unresolved arm exists so that the one case where the
+/// probe has not answered — still stuck in an anti-malware scan — says so
+/// instead of claiming git is missing (§3).
+fn about_git_line(git: Option<&GitInfo>) -> String {
+    match git {
         Some(git) => match &git.version {
             Some(version) => format!("Git {version} ({})", git.read_binary.as_deref().unwrap_or("git")),
             None => "Git not found".to_string(),
         },
         None => "Still looking for git".to_string(),
-    };
-    let message = format!("Corgit {}\n{git_line}", env!("CARGO_PKG_VERSION"));
+    }
+}
 
-    app.dialog().message(message).title("About Corgit").show(|_| {});
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The frontend's `RUST_IDS`, read out of its source. The Rust half of a
+    /// cross-language contract has no other way to see the other half, and a
+    /// mismatch either way fails silently: an id Rust dropped is logged and
+    /// ignored, and one the frontend dropped is dispatched locally, where its
+    /// `switch` has no case for it either.
+    fn frontend_rust_ids() -> Vec<String> {
+        let source = include_str!("../../src/lib/menu.svelte.ts");
+        let start = source.find("const RUST_IDS = new Set([").expect("RUST_IDS not found in menu.svelte.ts");
+        let list = &source[start..];
+        let list = &list[list.find('[').unwrap() + 1..list.find(']').unwrap()];
+        list.split(',').map(|id| id.trim().trim_matches('\'').to_string()).filter(|id| !id.is_empty()).collect()
+    }
+
+    #[test]
+    fn rust_ids_match_the_frontend() {
+        let ids = frontend_rust_ids();
+        for id in &ids {
+            assert!(MenuCommand::from_id(id).is_some(), "the frontend sends {id:?}, which menu.rs does not handle");
+        }
+
+        // The other direction: every command is reachable from some id the
+        // frontend sends, checked per command so two ids landing on one arm
+        // cannot stand in for an arm nothing reaches.
+        let reached: Vec<MenuCommand> = ids.iter().filter_map(|id| MenuCommand::from_id(id)).collect();
+        let all = [
+            MenuCommand::CloseWindow,
+            MenuCommand::Exit,
+            MenuCommand::ToggleRepoList,
+            MenuCommand::ToggleCommitPane,
+            MenuCommand::About,
+            MenuCommand::OpenLogs,
+        ];
+        for command in all {
+            assert!(reached.contains(&command), "{command:?} has no id in the frontend's RUST_IDS");
+        }
+    }
+
+    #[test]
+    fn an_unknown_id_is_not_a_command() {
+        assert_eq!(MenuCommand::from_id("open-folder"), None);
+        assert_eq!(MenuCommand::from_id(""), None);
+    }
+
+    fn git(version: Option<&str>, read_binary: Option<&str>) -> GitInfo {
+        GitInfo {
+            available: version.is_some(),
+            version: version.map(str::to_string),
+            supports_fsmonitor: true,
+            read_binary: read_binary.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn about_names_the_version_and_the_binary_the_sweep_runs() {
+        let info = git(Some("2.53.0.windows.1"), Some(r"C:\Program Files\Git\mingw64\bin\git.exe"));
+        assert_eq!(about_git_line(Some(&info)), r"Git 2.53.0.windows.1 (C:\Program Files\Git\mingw64\bin\git.exe)");
+    }
+
+    /// §3: a probe that has not answered yet is not a missing git.
+    #[test]
+    fn about_tells_a_pending_probe_from_a_missing_git() {
+        assert_eq!(about_git_line(None), "Still looking for git");
+        assert_eq!(about_git_line(Some(&git(None, None))), "Git not found");
+    }
 }

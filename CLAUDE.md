@@ -58,8 +58,13 @@ none. Read the cited section before altering the code around it.
 
 **Rust owns application state; the frontend is a view.** `repos.svelte.ts`,
 `graph.svelte.ts` and `settings.svelte.ts` are mirrors fed by Tauri events, not sources of
-truth. This is what keeps multi-window safe later (§9.2): the per-repo write queues and the
-global git semaphore are process-local, so Corgit is one process with many windows.
+truth. The per-repo write queues and the global git semaphore are process-local, which is
+why Corgit is exactly one process (§9.2) — a second one would silently double both.
+
+v1 is **one window**, and only the concurrency layer is ready for more. `AppState` holds
+one open root, one bulk run and one Stop flag for the whole process, and `bulk:progress`,
+`problem:recorded` and `pane:visibility` are broadcast without saying which root they
+belong to. A second window means making those per-window, not just opening one.
 
 **Every mutating command has one shape.** `write_and_refresh` in `lib.rs` resolves the
 repo, holds its write-queue lock for the operation, then re-reads and publishes that repo's

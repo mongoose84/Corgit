@@ -256,8 +256,14 @@ const BULK_PROGRESS_VERBS: Record<string, string> = {
   Switch: 'Switching',
 };
 
-export function bulkProgressLabel(operation: string): string {
-  return BULK_PROGRESS_VERBS[operation] ?? 'Working';
+/** The strip's whole line. The count is left off while `total` is 0: almost
+ *  always that is the placeholder `runBulk` sets so the click acknowledges
+ *  itself before the backend's first event (§13), and "0 of 0" there reads as
+ *  a run with nothing to do. The rare run that really has no targets ends in
+ *  the same instant, and its banner says so. */
+export function bulkProgressText(bulk: BulkProgressEvent): string {
+  const verb = BULK_PROGRESS_VERBS[bulk.operation] ?? 'Working';
+  return bulk.total === 0 ? `${verb}…` : `${verb}… ${bulk.done} of ${bulk.total}`;
 }
 
 /** "a", "a and b", "a, b and c" — then a count, because a banner is one line
