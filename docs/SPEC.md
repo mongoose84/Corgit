@@ -1120,9 +1120,13 @@ with one more read of that one repo. This is what makes a change reach the diff 
 there were no watchers to notice it: they are dropped on blur, so every edit made in an
 editor while Corgit is in the background arrives on the focus-gain sweep and nowhere else.
 
-**Re-entrancy guard:** a sweep never starts while one is in flight — the tick is skipped,
-not queued. At 77 repos the status sweep should finish in ~150 ms and never collide, so
-this is cheap insurance rather than an expected path. Individual repos are also skipped
+**Re-entrancy guard:** a sweep never starts while one is in flight. A tick that covers
+only the unwatched repos is skipped, not queued — the next tick is a minute away and asks
+the same question. A **full** sweep turned away is queued instead, at most one however many
+arrive, and runs over whatever root is open when the running sweep lets go. Full sweeps are
+the ones somebody needs the answer to: opening or refreshing a root, focus gain, the end of
+a fetch. Skipping one of those is not a delay but a loss — a freshly opened root would show
+cache-only rows until the next five-minute reconcile. Individual repos are also skipped
 while their write lock is held (§7).
 
 **Focus gating:** sweeps run only while the window is **focused**. On blur the tickers are

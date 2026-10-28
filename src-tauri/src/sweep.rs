@@ -9,9 +9,9 @@
 //! the command handlers they were four unrelated-looking pieces of `AppState`.
 //!
 //! The ordering rule that everything here serves: **a sweep never starts while
-//! one is in flight** (§6). `AppState::sweeping` is what enforces it, and the
-//! reason it is not simply cleared when `sweep` returns is `finish_stragglers`
-//! — publishing early moved the *event*, not the end of the sweep.
+//! one is in flight** (§6). `SweepGate` is what enforces it, and the reason it
+//! is not simply released when `sweep` returns is `finish_stragglers` —
+//! publishing early moved the *event*, not the end of the sweep.
 //!
 //! What is deliberately *not* here: the tickers and the focus gating that
 //! decide *when* to sweep. They start the fetch sweep too, so they belong to
@@ -20,7 +20,6 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -113,20 +112,117 @@ pub(crate) fn trigger_sweep<R: Runtime>(app: &AppHandle<R>, scope: Scope) {
         return;
     }
 
-    start_sweep(app, generation, repos);
+    spawn_sweep(app, generation, repos, scope == Scope::All);
 }
 
+/// A full sweep of a root someone has just opened or rescanned — always
+/// queued if one is already running, because the rows it fills in have no
+/// other way to arrive (§6).
 pub(crate) fn start_sweep<R: Runtime>(app: &AppHandle<R>, generation: u64, repos: Vec<Repo>) {
+    spawn_sweep(app, generation, repos, true);
+}
+
+fn spawn_sweep<R: Runtime>(app: &AppHandle<R>, generation: u64, repos: Vec<Repo>, queue: bool) {
+    if !app.state::<AppState>().sweep_gate.begin(queue) {
+        return;
+    }
     let app = app.clone();
     tauri::async_runtime::spawn(async move { sweep(app, generation, repos).await });
 }
 
+/// The re-entrancy guard (§6), and the one request it remembers.
+///
+/// Two flags behind one mutex rather than two atomics, because the hand-off is
+/// the whole point and two atomics cannot make it atomic. With a `running`
+/// bool and a separate `pending` one, a request can find `running` set, the
+/// sweep can clear it and check `pending` in between, and *then* the request
+/// sets `pending` — leaving a request nobody will serve, which is the bug this
+/// exists to fix arriving by a narrower door. Under one lock, `finish` either
+/// sees the request and keeps the guard for the rerun, or lets go before the
+/// request looks and the request runs itself.
+///
+/// At most one queued sweep, however many were turned away: the rerun reads
+/// the root as it is when it starts, so it answers every request made before
+/// it, and a second rerun would only ask git the same question again.
+#[derive(Default)]
+pub(crate) struct SweepGate {
+    state: std::sync::Mutex<GateState>,
+}
+
+#[derive(Default)]
+struct GateState {
+    running: bool,
+    pending: bool,
+}
+
+impl SweepGate {
+    /// `true` when the caller now holds the guard and must run the sweep.
+    ///
+    /// `queue` is whether a refusal should be remembered. A partial tick
+    /// passes `false` — skipped, not queued, since the next tick asks again in
+    /// a minute. A full sweep passes `true`: it is the answer to an open, a
+    /// refresh or a focus, and dropping it leaves those rows on the cache
+    /// until the next reconcile, five minutes away.
+    pub(crate) fn begin(&self, queue: bool) -> bool {
+        let mut gate = self.state.lock().expect("sweep gate mutex poisoned");
+        if gate.running {
+            gate.pending |= queue;
+            return false;
+        }
+        gate.running = true;
+        true
+    }
+
+    /// `true` when a sweep was queued while this one ran: the caller keeps the
+    /// guard and must run it. `false` means the guard is released.
+    fn finish(&self) -> bool {
+        let mut gate = self.state.lock().expect("sweep gate mutex poisoned");
+        if gate.pending {
+            gate.pending = false;
+            return true;
+        }
+        gate.running = false;
+        false
+    }
+}
+
+/// Ends a sweep: lets the guard go, or runs the sweep that was queued behind
+/// this one over whatever root is open *now*.
+///
+/// Every place a sweep ends comes through here — a batch with nothing still
+/// reading, the last straggler, results for a root that was replaced or
+/// closed — so a queued request cannot be dropped by whichever of those
+/// happened to be the last thing the sweep did. That last one was the bug:
+/// `finish_stragglers` used to clear a bare flag on finding its root
+/// replaced, and the new root's own sweep, turned away moments earlier, was
+/// simply gone.
+///
+/// Reading the root here rather than remembering what was asked for is what
+/// makes one queued sweep enough. A replaced root, a rescan that found a new
+/// clone, a focus gain: each is answered by sweeping the root as it now is.
+fn release<R: Runtime>(app: &AppHandle<R>) {
+    let state = app.state::<AppState>();
+    while state.sweep_gate.finish() {
+        let next = {
+            let current = state.root.lock().expect("root mutex poisoned");
+            current.as_ref().map(|root| (root.generation, root.repos.clone()))
+        };
+        if let Some((generation, repos)) = next {
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move { sweep(app, generation, repos).await });
+            return;
+        }
+        // The root closed while the request waited: nothing to sweep, so go
+        // round again — which releases the guard, or serves a request that
+        // arrived in the meantime.
+    }
+}
+
+/// Runs one sweep. The caller already holds `SweepGate`, and every path out of
+/// here ends with `release`, directly or through `finish_stragglers`.
 async fn sweep<R: Runtime>(app: AppHandle<R>, generation: u64, repos: Vec<Repo>) {
     let (write_queues, reconcile) = {
         let state = app.state::<AppState>();
-        if state.sweeping.swap(true, Ordering::SeqCst) {
-            return;
-        }
 
         // Which repo this sweep owes a *full* republish to when it lands, if
         // it is covering that repo at all. Taken here because `collect` below
@@ -185,7 +281,7 @@ async fn sweep<R: Runtime>(app: AppHandle<R>, generation: u64, repos: Vec<Repo>)
                 log::warn!("could not publish sweep results ({err})");
             }
 
-            // Cleared only now: the guard has to cover the cache write and
+            // Released only now: the guard has to cover the cache write and
             // event emit too, not just the git spawns in `collect`, or a
             // sweep triggered in that window races `cache::save` against
             // this one for the same root file (§6 — "a sweep never starts
@@ -196,9 +292,9 @@ async fn sweep<R: Runtime>(app: AppHandle<R>, generation: u64, repos: Vec<Repo>)
             // never starts while one is in flight" is what keeps a straggler
             // from being overtaken by the next tick's read of the same repo
             // and publishing the older answer second, so `finish_stragglers`
-            // owns the flag from here.
+            // owns the guard from here.
             if stragglers.is_empty() {
-                state.sweeping.store(false, Ordering::SeqCst);
+                release(&app);
             } else {
                 let app = app.clone();
                 tauri::async_runtime::spawn(async move {
@@ -231,38 +327,32 @@ async fn sweep<R: Runtime>(app: AppHandle<R>, generation: u64, repos: Vec<Repo>)
                 });
             }
         }
-        // Both remaining arms describe a root nobody is looking at, so a
-        // straggler still reading one of its repos has no one to publish to.
-        // Aborted rather than left to finish: `kill_on_drop` (§7.3) turns that
-        // into killing the git process, which is the whole point — the results
-        // are worthless and the semaphore permits are not.
-        Outcome::Restart(generation, repos) => {
+        // A root nobody is looking at, so a straggler still reading one of its
+        // repos has no one to publish to. Aborted rather than left to finish:
+        // `kill_on_drop` (§7.3) turns that into killing the git process, which
+        // is the whole point — the results are worthless and the semaphore
+        // permits are not.
+        //
+        // No restart of its own. A replaced root asked for its sweep through
+        // `open_root`, the gate queued that request when it turned it away,
+        // and `release` runs it now against the root that is open.
+        Outcome::Discard => {
             for task in stragglers {
                 task.abort();
             }
-            // Cleared before restarting, not after: `start_sweep` spawns a
-            // fresh sweep that immediately re-swaps the guard to `true`, so
-            // it must find it `false` here or the restart silently no-ops.
-            state.sweeping.store(false, Ordering::SeqCst);
-            start_sweep(&app, generation, repos);
-        }
-        Outcome::Nothing => {
-            for task in stragglers {
-                task.abort();
-            }
-            state.sweeping.store(false, Ordering::SeqCst);
+            release(&app);
         }
     }
 }
 
-/// Which of the three a finished sweep has come back to.
+/// Whether a finished sweep's results still belong to the open root.
 ///
 /// Named and pure for the same reason `RootState::merge_sweep_results` is —
 /// and it is the half of the generation counter that has no other way of being
-/// checked. Two of the three branches only ever run when a root was swapped
+/// checked. `Discard` only ever happens when a root was swapped or closed
 /// *while a sweep was in flight*, which is a race no test can arrange through
-/// `sweep` itself, and the more dangerous one is silent: results merged into
-/// the wrong root paint one folder's rows with another's answers.
+/// `sweep` itself, and getting it wrong is silent: results merged into the
+/// wrong root paint one folder's rows with another's answers.
 ///
 /// Takes the root rather than the `AppState` so the caller keeps the lock
 /// exactly as long as it did before: decide under the lock, act after it.
@@ -286,12 +376,9 @@ fn decide(
                 root.last_fetch_at.clone(),
             )
         }
-        // The root was replaced while we were out, so these results describe a
-        // folder nobody is looking at any more. The sweep the new root asked
-        // for was turned away by the re-entrancy guard, which makes redoing it
-        // our job — otherwise its rows never fill in.
-        Some(root) => Outcome::Restart(root.generation, root.repos.clone()),
-        None => Outcome::Nothing,
+        // The root was replaced or closed while we were out, so these results
+        // describe a folder nobody is looking at any more.
+        _ => Outcome::Discard,
     }
 }
 
@@ -299,8 +386,7 @@ fn decide(
 /// the root lock is held and acted on after it is released.
 enum Outcome {
     Publish(SweepEvent, HashMap<String, i64>),
-    Restart(u64, Vec<Repo>),
-    Nothing,
+    Discard,
 }
 
 /// Every repo is dispatched at once; the semaphore in `git.rs` is what
@@ -434,8 +520,9 @@ async fn finish_stragglers<R: Runtime>(app: AppHandle<R>, generation: u64, strag
                     root.path.clone()
                 }
                 // The root was replaced under us. Every straggler still out
-                // describes it, so they go the same way the `Restart` arm
-                // sends them rather than being awaited for nothing.
+                // describes it, so they go the same way the `Discard` arm
+                // sends them rather than being awaited for nothing — and the
+                // `release` below runs the new root's queued sweep.
                 _ => {
                     remaining.by_ref().for_each(|task| task.abort());
                     break;
@@ -474,7 +561,7 @@ async fn finish_stragglers<R: Runtime>(app: AppHandle<R>, generation: u64, strag
         }
     }
 
-    state.sweeping.store(false, Ordering::SeqCst);
+    release(&app);
 }
 
 /// Re-reads one repo's status outside any write lock, updates it in the open
@@ -639,37 +726,91 @@ mod tests {
         let outcome = decide(Some(&mut root), 7, &statuses, &HashMap::new(), 42);
 
         assert!(
-            matches!(outcome, Outcome::Restart(8, _)),
+            matches!(outcome, Outcome::Discard),
             "a stale sweep's results were applied to the root that replaced it",
         );
         assert!(root.statuses.is_empty(), "the new root took the old root's statuses");
     }
 
-    /// And the restart carries the *new* root's generation and repos, not the
-    /// stale ones — the sweep the new root asked for was turned away by the
-    /// re-entrancy guard, so redoing it is this sweep's job. Get this wrong
-    /// and the new folder's rows never fill in at all.
-    #[test]
-    fn the_restart_is_aimed_at_the_root_that_replaced_it() {
-        let mut root = root_at(8, &["billing"]);
-
-        let outcome = decide(Some(&mut root), 7, &HashMap::new(), &HashMap::new(), 0);
-
-        match outcome {
-            Outcome::Restart(generation, repos) => {
-                assert_eq!(generation, 8);
-                assert_eq!(repos, vec![repo("billing")]);
-            }
-            _ => panic!("a replaced root did not ask for a restart"),
-        }
-    }
-
-    /// The folder was closed while the sweep was out. Nothing to publish and
-    /// nothing to restart — and in particular not a restart, which would spawn
-    /// a sweep over a root that is gone.
+    /// The folder was closed while the sweep was out. Nothing to publish.
     #[test]
     fn results_for_a_closed_root_are_dropped() {
         let outcome = decide(None, 7, &HashMap::new(), &HashMap::new(), 0);
-        assert!(matches!(outcome, Outcome::Nothing));
+        assert!(matches!(outcome, Outcome::Discard));
+    }
+
+    #[test]
+    fn an_idle_gate_lets_a_sweep_in_and_takes_it_back() {
+        let gate = SweepGate::default();
+        assert!(gate.begin(false));
+        assert!(!gate.finish(), "nothing was queued, so there is nothing to rerun");
+        assert!(gate.begin(false), "the guard was not released");
+    }
+
+    /// The case the gate exists for: a full sweep asked for mid-sweep — the
+    /// root just opened, the window just focused — is run, not lost.
+    #[test]
+    fn a_full_sweep_turned_away_is_run_when_the_guard_is_released() {
+        let gate = SweepGate::default();
+        assert!(gate.begin(false));
+        assert!(!gate.begin(true), "two sweeps ran at once");
+
+        assert!(gate.finish(), "the queued sweep was dropped");
+        assert!(!gate.begin(false), "the guard went idle while the queued sweep was meant to hold it");
+        assert!(!gate.finish(), "the queued sweep was run twice");
+    }
+
+    /// §6's "skipped, not queued", which still holds for the partial tick: an
+    /// unwatched-only sweep turned away must not buy a full pass afterwards.
+    #[test]
+    fn a_partial_tick_turned_away_is_skipped() {
+        let gate = SweepGate::default();
+        assert!(gate.begin(true));
+        assert!(!gate.begin(false));
+        assert!(!gate.finish(), "a skipped tick queued a rerun");
+    }
+
+    /// One rerun answers every request made before it, because it reads the
+    /// root when it starts. More than one would ask git the same question again.
+    #[test]
+    fn many_requests_queue_one_rerun() {
+        let gate = SweepGate::default();
+        assert!(gate.begin(false));
+        for _ in 0..5 {
+            assert!(!gate.begin(true));
+        }
+        assert!(gate.finish());
+        assert!(!gate.finish(), "five requests queued more than one rerun");
+    }
+
+    /// The bug, end to end through the real `AppState`: a sweep is in flight
+    /// for the old root, a new root is opened and its own sweep is turned away,
+    /// and then the old sweep ends by `release`. The new root must still get
+    /// its rows. Before the gate, `finish_stragglers` cleared a bare flag here
+    /// and the new root stayed on the cache until the five-minute reconcile.
+    #[test]
+    fn a_root_opened_mid_sweep_is_swept_once_the_old_sweep_ends() {
+        let h = crate::mockapp::Harness::new("sweep-queued");
+        let git = crate::testrepo::TempRepo::new("sweep-queued");
+        let repos = vec![crate::mockapp::repo("r", git.path())];
+        h.open(repos.clone());
+
+        // The old root's sweep, still out.
+        assert!(h.state().sweep_gate.begin(false));
+        // `open_root` asking for the new one.
+        start_sweep(h.handle(), 1, repos);
+        assert!(h.state().root.lock().unwrap().as_ref().unwrap().statuses.is_empty(), "two sweeps ran at once");
+
+        release(h.handle());
+
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            let swept = h.state().root.lock().unwrap().as_ref().unwrap().statuses.contains_key("r");
+            if swept {
+                break;
+            }
+            assert!(Instant::now() < deadline, "the root opened mid-sweep was never swept");
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 }

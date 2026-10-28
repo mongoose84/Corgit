@@ -84,8 +84,8 @@ struct AppState {
     git: Arc<tokio::sync::OnceCell<GitInfo>>,
     root: Mutex<Option<RootState>>,
     /// Re-entrancy guard (§6): a sweep never starts while one is in flight.
-    /// The tick is skipped, not queued.
-    sweeping: AtomicBool,
+    /// A partial tick is skipped; a full sweep is queued — see `SweepGate`.
+    sweep_gate: sweep::SweepGate,
     /// The periodic status-sweep ticker (§6 focus gating). `Some` only while
     /// the window is focused — aborted on blur so an unfocused window truly
     /// goes idle rather than merely skipping its own ticks, and restarted
@@ -138,7 +138,7 @@ impl AppState {
             settings: Mutex::new(settings),
             git,
             root: Mutex::new(None),
-            sweeping: AtomicBool::new(false),
+            sweep_gate: sweep::SweepGate::default(),
             ticker: Mutex::new(None),
             fetch_sweeping: AtomicBool::new(false),
             bulk_cancelled: AtomicBool::new(false),
