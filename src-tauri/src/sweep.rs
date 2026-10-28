@@ -3,8 +3,8 @@
 //! through.
 //!
 //! Split out of `lib.rs` because the sweep owns a mechanism, not just a
-//! function: a re-entrancy flag, a generation counter, a patience budget, and
-//! a straggler hand-off that keeps the flag held after the event has already
+//! function: a re-entrancy gate, a generation counter, a patience budget, and
+//! a straggler hand-off that keeps the gate held after the event has already
 //! gone out. Those four only make sense read together, and interleaved with
 //! the command handlers they were four unrelated-looking pieces of `AppState`.
 //!
