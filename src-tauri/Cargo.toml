@@ -41,6 +41,11 @@ notify-debouncer-mini = "0.4"
 tauri-plugin-log = "2.9.0"
 log = "0.4.33"
 
+[dev-dependencies]
+# `tauri::test::mock_app` — tests that need a real `AppHandle` (`mockapp.rs`).
+# Dev-only: resolver 2 keeps the feature out of the shipped build.
+tauri = { version = "2.11.5", features = ["test"] }
+
 [profile.release]
 codegen-units = 1
 lto = true

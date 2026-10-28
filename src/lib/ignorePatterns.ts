@@ -1,7 +1,7 @@
 /**
  * Turning a file row into a `.gitignore` line (SPEC.md §5.2).
  *
- * Kept here rather than inline in `CommitPane` for the same reason
+ * Kept here rather than inline in `ChangesList` for the same reason
  * `fileSelection` is: the rendering is not the interesting part. The
  * interesting part is that a menu label and the line that gets appended must
  * describe the same thing, and gitignore's pattern language is not the path

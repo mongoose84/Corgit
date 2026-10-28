@@ -26,9 +26,9 @@ use std::time::{Duration, Instant};
 
 use notify_debouncer_mini::notify::{RecommendedWatcher, RecursiveMode};
 use notify_debouncer_mini::{new_debouncer, DebounceEventResult, Debouncer};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Manager, Runtime};
 
-use crate::emit_repo_status;
+use crate::sweep::emit_repo_status;
 
 /// Whether this platform gives subtree watches cheaply enough to point one at
 /// a working tree (§6). Windows does; inotify does not, and there the watch
@@ -121,10 +121,18 @@ impl RepoWatchers {
     /// anything and must stay on the sweep interval (§6) — a network share or
     /// a linked worktree is a normal case here, not an error path, and
     /// silently treating one as watched is how a row goes stale for good.
-    pub fn sync(&self, app: &AppHandle, repos: &[(String, PathBuf)]) -> Vec<String> {
+    pub fn sync<R: Runtime>(&self, app: &AppHandle<R>, repos: &[(String, PathBuf)]) -> Vec<String> {
         let mut watchers = self.watchers.lock().expect("watchers mutex poisoned");
 
         watchers.retain(|id, _| repos.iter().any(|(repo_id, _)| repo_id == id));
+
+        // The throttle state goes with them. It deliberately survives
+        // `clear()` — a blur must not hand every repo a free pass through the
+        // interval it was already subject to — but that argument is about the
+        // *same* repos coming back, and a root swap (§9.1) brings different
+        // ones. Pruned here rather than in `clear` because this is the call
+        // that knows which repos there are now.
+        self.retain_reads(|id| repos.iter().any(|(repo_id, _)| repo_id == id));
 
         let mut unwatchable = Vec::new();
         for (id, path) in repos {
@@ -140,6 +148,13 @@ impl RepoWatchers {
         }
 
         unwatchable
+    }
+
+    /// Its own method so the rule can be tested without watching anything —
+    /// the rule is about the throttle map. That `sync` still calls it is
+    /// checked separately, in `mockapp.rs`, against a mock app.
+    fn retain_reads(&self, known: impl Fn(&str) -> bool) {
+        self.reads.lock().expect("reads mutex poisoned").retain(|id, _| known(id));
     }
 
     /// Drops every watcher outright — the root was replaced or closed, or the
@@ -212,7 +227,7 @@ impl RepoWatchers {
 /// the watch (a network share, a permissions failure). The caller puts these
 /// back on the sweep rather than surfacing an error: it is a documented scope
 /// limit (§6), and the row still updates, just on the slower path.
-fn start(app: AppHandle, repo_id: String, repo_path: PathBuf) -> Option<Debouncer<RecommendedWatcher>> {
+fn start<R: Runtime>(app: AppHandle<R>, repo_id: String, repo_path: PathBuf) -> Option<Debouncer<RecommendedWatcher>> {
     let git_dir = repo_path.join(".git");
     if !git_dir.is_dir() {
         return None;
@@ -383,5 +398,53 @@ mod tests {
             matches!(watchers.claim("repo-a"), Claim::After(_)),
             "a blur is not a reason to forget a recent read",
         );
+    }
+
+    /// The other half of the rule above. A blur keeps the throttle because the
+    /// same repos are coming back; a root swap (§9.1) brings different ones,
+    /// and holding their entries forever is the growth `inflight.rs` argues
+    /// against for its own map.
+    ///
+    /// **Covers the rule, not the wiring.** This calls `retain_reads` directly;
+    /// that `sync` still calls it is `mockapp.rs`'s
+    /// `a_root_swap_prunes_the_queues_and_throttles_of_dropped_repos`, which
+    /// fails if the call is deleted.
+    #[test]
+    fn a_root_swap_forgets_the_throttle() {
+        let watchers = RepoWatchers::default();
+        assert!(matches!(watchers.claim("repo-a"), Claim::Now));
+
+        watchers.retain_reads(|id| id == "repo-b");
+
+        assert!(
+            matches!(watchers.claim("repo-a"), Claim::Now),
+            "a repo the open root no longer holds kept its throttle entry",
+        );
+    }
+
+    /// And a repo that is still there keeps it — otherwise `sync` running on
+    /// every focus-gain would hand every repo a free pass on every alt-tab,
+    /// which is the thing `clear` not touching this map exists to prevent.
+    #[test]
+    fn a_repo_still_in_the_root_keeps_its_throttle() {
+        let watchers = RepoWatchers::default();
+        assert!(matches!(watchers.claim("repo-a"), Claim::Now));
+
+        watchers.retain_reads(|id| id == "repo-a");
+
+        assert!(matches!(watchers.claim("repo-a"), Claim::After(_)));
+    }
+
+    /// For `mockapp.rs`, which checks `sync` still calls `retain_reads` — the
+    /// half `a_root_swap_forgets_the_throttle` cannot reach. `claim` stays
+    /// private; this is the narrowest way to seed and inspect the map.
+    impl RepoWatchers {
+        pub(crate) fn note_read(&self, repo_id: &str) {
+            let _ = self.claim(repo_id);
+        }
+
+        pub(crate) fn throttles(&self, repo_id: &str) -> bool {
+            self.reads.lock().expect("reads mutex poisoned").contains_key(repo_id)
+        }
     }
 }

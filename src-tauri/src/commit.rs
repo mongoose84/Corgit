@@ -124,10 +124,22 @@ async fn run_pathspec(
     if paths.is_empty() {
         return Ok(());
     }
-    let mut args: Vec<&str> = Vec::with_capacity(1 + flags.len() + paths.len());
+    // `:(literal)` for the same reason `delete_untracked` uses it, and it took
+    // too long to get here: `--` ends git's *option* parsing, not its pathspec
+    // magic, so every path below was still a glob. A file honestly named
+    // `report[1].txt` — brackets are legal on Windows — is a character class,
+    // and discarding that one row also restored `report1.txt` beside it.
+    //
+    // Discard is where this bites hardest. It destroys uncommitted work with
+    // no undo, which is the same argument `literal_pathspec` already makes for
+    // delete; stage and unstage get it too because a pathspec that means one
+    // thing in one command and something else in the next is worse than either
+    // rule applied consistently.
+    let specs: Vec<String> = paths.iter().map(|path| literal_pathspec(path)).collect();
+    let mut args: Vec<&str> = Vec::with_capacity(1 + flags.len() + specs.len());
     args.push(subcommand);
     args.extend_from_slice(flags);
-    args.extend(paths.iter().map(String::as_str));
+    args.extend(specs.iter().map(String::as_str));
     run(repo, &args).await
 }
 
@@ -208,5 +220,96 @@ mod tests {
         assert_eq!(literal_pathspec("draft*.md"), ":(literal)draft*.md");
         // A leading colon would otherwise be read as pathspec magic itself.
         assert_eq!(literal_pathspec(":weird.txt"), ":(literal):weird.txt");
+    }
+
+    // The tests below run real git. Everything above pins an argv or a string;
+    // these pin the two claims this module makes about what git *does* with
+    // them, both of which fail silently and destroy work when they are wrong.
+
+    use crate::testrepo::TempRepo;
+
+    /// `DISCARD_FLAGS`' actual promise, as opposed to its value — which the
+    /// test above already pins and which says nothing about this.
+    ///
+    /// `--worktree` restores from the **index**, so a file staged and then
+    /// edited again keeps its staged half and loses only the later edit.
+    /// Adding `--staged` would restore from HEAD instead and take both, with
+    /// no error and nothing on screen to show it happened. That is a one-word
+    /// edit away, and until now nothing in the suite would have noticed it.
+    #[tokio::test]
+    async fn discard_keeps_the_staged_half_of_a_partly_staged_file() {
+        let repo = TempRepo::new("discard-partly-staged");
+        repo.write("notes.txt", "one\n");
+        repo.commit_all("initial");
+
+        repo.write("notes.txt", "two\n");
+        repo.git(&["add", "notes.txt"]);
+        repo.write("notes.txt", "three\n");
+
+        discard(repo.path(), &["notes.txt".to_string()]).await.unwrap();
+
+        // The working tree comes back to the *staged* content, not to HEAD.
+        assert_eq!(repo.read("notes.txt"), "two\n", "discard restored from HEAD and ate the staged work");
+    }
+
+    /// The bug `:(literal)` in `run_pathspec` was added to fix, reproduced.
+    ///
+    /// `--` ends git's option parsing, not its pathspec magic, so a path was
+    /// still a glob on the way in. Brackets are legal in Windows filenames, so
+    /// `report[1].txt` is a real name and a character class at the same time —
+    /// and discarding that one row also reverted `report1.txt` sitting beside
+    /// it. Verified against git before the fix: both files came back.
+    #[tokio::test]
+    async fn discarding_one_file_never_reverts_its_glob_neighbours() {
+        let repo = TempRepo::new("discard-glob");
+        repo.write("report1.txt", "original\n");
+        repo.write("report[1].txt", "original\n");
+        repo.commit_all("initial");
+
+        repo.write("report1.txt", "edited\n");
+        repo.write("report[1].txt", "edited\n");
+
+        discard(repo.path(), &["report[1].txt".to_string()]).await.unwrap();
+
+        assert_eq!(repo.read("report[1].txt"), "original\n", "the file the user picked was not discarded");
+        assert_eq!(repo.read("report1.txt"), "edited\n", "a file nobody picked was discarded as well");
+    }
+
+    /// The same hazard on the delete path, which is worse: `git clean` unlinks
+    /// rather than restores, and an untracked file has never been in the index
+    /// so there is nothing to recover it from. `delete_untracked` has always
+    /// used `literal_pathspec`; this is the test that says why.
+    #[tokio::test]
+    async fn deleting_one_untracked_file_never_takes_its_glob_neighbours() {
+        let repo = TempRepo::new("delete-glob");
+        repo.write("keep.txt", "tracked\n");
+        repo.commit_all("initial");
+
+        repo.write("draft1.md", "one\n");
+        repo.write("draft[1].md", "two\n");
+
+        delete_untracked(repo.path(), &["draft[1].md".to_string()]).await.unwrap();
+
+        assert!(!repo.exists("draft[1].md"), "the file the user confirmed is still there");
+        assert!(repo.exists("draft1.md"), "a file nobody confirmed was deleted");
+    }
+
+    /// `delete_untracked`'s other safety property, and the reason it is `git
+    /// clean` rather than `fs::remove_file`: clean removes only what git
+    /// considers untracked, so a tracked path arriving here through a frontend
+    /// bug is skipped instead of unlinked. With `remove_file` the middle
+    /// pane's filter would be the only thing standing between a bug and
+    /// someone's committed work.
+    #[tokio::test]
+    async fn deleting_skips_a_tracked_file_rather_than_unlinking_it() {
+        let repo = TempRepo::new("delete-tracked");
+        repo.write("tracked.txt", "committed\n");
+        repo.commit_all("initial");
+
+        // A tracked path should never reach here; if one does, nothing happens.
+        let _ = delete_untracked(repo.path(), &["tracked.txt".to_string()]).await;
+
+        assert!(repo.exists("tracked.txt"), "git clean removed a tracked file");
+        assert_eq!(repo.read("tracked.txt"), "committed\n");
     }
 }

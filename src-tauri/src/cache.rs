@@ -9,9 +9,13 @@
 //! Keyed by a hash of the canonicalised root path, one file per root — a
 //! single shared `cache.json` would have two windows on different roots
 //! overwrite each other's state (§9.2, §9.5).
+//!
+//! Bounded by the recent-roots list: [`prune`] drops the file of every root
+//! that has fallen off it. `roots/` is deliberately not pruned the same way —
+//! see `roots.rs`.
 
 use std::collections::hash_map::DefaultHasher;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
@@ -44,10 +48,51 @@ pub struct RootCache {
 
 /// Shared with `roots.rs` so a root's cache file and its pins file are keyed
 /// identically — both are per-root, both hashed the same way.
+///
+/// FNV-1a, in-house, and pinned by a known-answer test so CI holds the value
+/// rather than the compiler. This was `DefaultHasher`, which std is explicit
+/// must not be relied on: the algorithm "is not specified, and so it and its
+/// hashes should not be relied upon over releases" — and it has already
+/// changed once (SipHash-2-4 -> 1-3). That is survivable for `cache/<hash>.json`,
+/// where a re-key costs one cold sweep. It is not survivable for
+/// `roots/<hash>.json`, which holds pins and last-selected: a toolchain bump
+/// would orphan every pin the user has ever set, in every root, at once and
+/// with nothing to connect the loss to. §9.5 rule 5 spends a whole second file
+/// preventing exactly that, so the key cannot be the compiler's to change.
+///
+/// Six lines and no dependency — the requirements here are stable output and
+/// a spread across sibling paths, not collision resistance against an
+/// adversary. A cache file is not a security boundary.
 pub fn hash_root(root: &Path) -> String {
-    let mut hasher = DefaultHasher::new();
     // Lower-cased so the same folder reached with different casing — which
     // Windows treats as identical — still hits one file.
+    let key = root.to_string_lossy().to_lowercase();
+
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in key.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
+}
+
+/// The pre-FNV key: `DefaultHasher` over the same lower-cased path.
+///
+/// Kept for one reason — [`roots::load`](crate::roots::load) adopts a pins
+/// file written under it, once, so that fixing [`hash_root`] does not itself
+/// inflict the loss [`hash_root`] exists to prevent. Every installed build
+/// wrote its pins under this key; changing the key without a migration would
+/// orphan all of them on upgrade, which is the bug, not a fix for it.
+///
+/// This reaches files written by a build whose `DefaultHasher` matches the one
+/// compiling *this* line, which is every build Corgit has shipped. It cannot
+/// reach a file written by a differently-compiled build — and the fact that
+/// such a file is already unreachable is the finding.
+///
+/// Deletable once no installed build predates the FNV key. Nothing else may
+/// call it: it is the old key, not a fallback.
+pub fn legacy_hash_root(root: &Path) -> String {
+    let mut hasher = DefaultHasher::new();
     root.to_string_lossy().to_lowercase().hash(&mut hasher);
     format!("{:016x}", hasher.finish())
 }
@@ -72,6 +117,37 @@ pub fn load(cache_dir: &Path, root: &Path) -> RootCache {
         _ => {
             let _ = fs::remove_file(&target);
             RootCache::default()
+        }
+    }
+}
+
+/// Deletes every cache file not belonging to one of `keep` — in practice the
+/// recent-roots list, which is the only way back to a root from the UI.
+///
+/// Without this `cache/` only ever grows: one file per folder ever opened,
+/// each holding a status for every repo under it. The cost of being wrong is
+/// what makes it safe to be blunt — a root reopened through *Open Folder…*
+/// after its file went pays one cold sweep, the same as a first open (rule 3).
+///
+/// Files under the pre-FNV key go too, even for a root in `keep`. Unlike
+/// `roots/`, the cache was never migrated across the key change, so nothing
+/// will ever read them again; they are exactly the orphans this exists for.
+///
+/// Only `*.json` is considered. `atomicfile`'s in-flight temps end in `.tmp`
+/// and belong to `prune_stale_temps`, which knows how old is too old; deleting
+/// one here could race a save of a root that is still open.
+pub fn prune(cache_dir: &Path, keep: &[PathBuf]) {
+    let Ok(entries) = fs::read_dir(cache_dir) else { return };
+    let keep: HashSet<String> = keep.iter().map(|root| hash_root(root)).collect();
+
+    for entry in entries.flatten() {
+        let file = entry.path();
+        if file.extension().map_or(true, |ext| ext != "json") {
+            continue;
+        }
+        let Some(stem) = file.file_stem().and_then(|stem| stem.to_str()) else { continue };
+        if !keep.contains(stem) {
+            let _ = fs::remove_file(&file);
         }
     }
 }
@@ -200,6 +276,98 @@ mod tests {
         let a = path(&dir.0, Path::new(r"C:\dev\Code"));
         let b = path(&dir.0, Path::new(r"C:\DEV\code"));
         assert_eq!(a, b);
+    }
+
+    /// The point of the whole exercise: these two strings are the key, and a
+    /// toolchain bump must not move them. If this test ever fails, every
+    /// installed user's pins just became unreachable — the fix is to restore
+    /// the constant, not to update the expectation.
+    #[test]
+    fn hash_root_is_pinned_to_known_answers() {
+        assert_eq!(hash_root(Path::new(r"C:\dev\code")), "1e1d7bda2697f2ec");
+        assert_eq!(hash_root(Path::new(r"C:\dev\a")), "807c970460408824");
+    }
+
+    /// Sibling paths differing in one byte must not land in one file. FNV-1a
+    /// avalanches poorly in its low bits, and these roots differ only there —
+    /// the reason to check rather than assume.
+    #[test]
+    fn sibling_roots_do_not_collide() {
+        assert_ne!(hash_root(Path::new(r"C:\dev\a")), hash_root(Path::new(r"C:\dev\b")));
+    }
+
+    /// The migration in `roots::load` is only worth its lines if the two keys
+    /// actually differ. If a toolchain ever made them agree this would pass
+    /// vacuously, so it asserts the difference directly.
+    #[test]
+    fn the_legacy_key_is_not_the_current_key() {
+        let root = Path::new(r"C:\dev\code");
+        assert_ne!(hash_root(root), legacy_hash_root(root));
+    }
+
+    fn empty_cache() -> RootCache {
+        RootCache { version: CACHE_VERSION, ..Default::default() }
+    }
+
+    #[test]
+    fn prune_keeps_recent_roots_and_drops_the_rest() {
+        let dir = TempDir::new("corgit-test-cache-prune");
+        let (recent, dropped) = (Path::new(r"C:\dev\recent"), Path::new(r"C:\dev\dropped"));
+        save(&dir.0, recent, &empty_cache()).unwrap();
+        save(&dir.0, dropped, &empty_cache()).unwrap();
+
+        prune(&dir.0, &[recent.to_path_buf()]);
+
+        assert!(path(&dir.0, recent).exists(), "a recent root's cache was deleted");
+        assert!(!path(&dir.0, dropped).exists(), "a dropped root's cache survived");
+    }
+
+    /// The recent list is stored as whatever casing the folder was opened
+    /// with; the key is case-folded. Matching on anything but the key would
+    /// throw away the open root's own cache.
+    #[test]
+    fn prune_matches_roots_by_key_not_by_spelling() {
+        let dir = TempDir::new("corgit-test-cache-prune-case");
+        save(&dir.0, Path::new(r"C:\Dev\Code"), &empty_cache()).unwrap();
+
+        prune(&dir.0, &[PathBuf::from(r"c:\dev\code")]);
+
+        assert!(path(&dir.0, Path::new(r"C:\dev\code")).exists());
+    }
+
+    /// Never migrated, so never read: a legacy-keyed file is an orphan even
+    /// when its root is recent.
+    #[test]
+    fn prune_drops_legacy_keyed_files_even_for_a_recent_root() {
+        let dir = TempDir::new("corgit-test-cache-prune-legacy");
+        let root = Path::new(r"C:\dev\code");
+        fs::create_dir_all(&dir.0).unwrap();
+        let legacy = dir.0.join(format!("{}.json", legacy_hash_root(root)));
+        fs::write(&legacy, b"{}").unwrap();
+
+        prune(&dir.0, &[root.to_path_buf()]);
+
+        assert!(!legacy.exists());
+    }
+
+    /// A temp belongs to a save that may still be in flight; it is
+    /// `prune_stale_temps`' to judge, not this function's.
+    #[test]
+    fn prune_leaves_temp_files_alone() {
+        let dir = TempDir::new("corgit-test-cache-prune-temps");
+        fs::create_dir_all(&dir.0).unwrap();
+        let temp = dir.0.join("deadbeefdeadbeef.999.0.tmp");
+        fs::write(&temp, b"{}").unwrap();
+
+        prune(&dir.0, &[]);
+
+        assert!(temp.exists(), "an in-flight temp was deleted");
+    }
+
+    /// First launch: no cache directory yet.
+    #[test]
+    fn prune_of_a_missing_directory_is_a_no_op() {
+        prune(&std::env::temp_dir().join("corgit-test-cache-prune-absent"), &[]);
     }
 
     #[test]

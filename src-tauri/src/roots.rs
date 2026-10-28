@@ -12,6 +12,11 @@
 //! belongs to the window and a window belongs to a root. With one window (§9.2)
 //! that no longer holds — geometry would be global, not per-root — so it was
 //! dropped from the spec rather than stored in the wrong file.
+//!
+//! Never pruned, unlike `cache/`. A root that falls off the recent list may
+//! still be reopened through *Open Folder…*, and its pins have no other copy
+//! (rule 5) — whereas the files are a few hundred bytes each. What the hashed
+//! name gives up instead is recorded inside the file: see `RootSettings::root`.
 
 use std::collections::HashSet;
 use std::fs;
@@ -20,7 +25,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::atomicfile;
-use crate::cache::hash_root;
+use crate::cache::{hash_root, legacy_hash_root};
 
 pub const ROOTS_VERSION: u32 = 1;
 
@@ -30,11 +35,21 @@ pub struct RootSettings {
     pub version: u32,
     pub pins: HashSet<String>,
     pub last_selected: Option<String>,
+    /// The folder this file belongs to, written by [`save`] and never read
+    /// back. The file name is a hash, so without this an orphan in `roots/`
+    /// is unidentifiable — to a user deciding what to delete, and to any
+    /// future prune that wants to ask whether the folder still exists.
+    ///
+    /// Informational only: `load` keys by the path it was *asked* for, never
+    /// by this one, so a file copied between names cannot redirect pins. No
+    /// version bump — files written before it simply read as `None`, and gain
+    /// it on their next save.
+    pub root: Option<PathBuf>,
 }
 
 impl Default for RootSettings {
     fn default() -> Self {
-        Self { version: ROOTS_VERSION, pins: HashSet::new(), last_selected: None }
+        Self { version: ROOTS_VERSION, pins: HashSet::new(), last_selected: None, root: None }
     }
 }
 
@@ -46,6 +61,46 @@ fn path(config_dir: &Path, root: &Path) -> PathBuf {
     dir(config_dir).join(format!("{}.json", hash_root(root)))
 }
 
+/// Where this root's pins lived before `hash_root` became FNV-1a.
+fn legacy_path(config_dir: &Path, root: &Path) -> PathBuf {
+    dir(config_dir).join(format!("{}.json", legacy_hash_root(root)))
+}
+
+/// Move a pins file written under the old `DefaultHasher` key to the current
+/// one, returning its contents so the caller can carry on as if it had always
+/// been there.
+///
+/// Rule 5 says pins are truth, and the whole argument for making `hash_root`
+/// stable was that a changed key silently orphans them. Changing the key
+/// *without* this would have done precisely that, once, to every existing
+/// install — a fix that ships the bug it fixes. This is the cost of having had
+/// an unstable key at all, and it is paid here rather than by the user.
+///
+/// Copy-then-remove, not `fs::rename`: the two sit in one directory so rename
+/// would normally do, but a failed remove must not be able to lose the file —
+/// leaving both copies is a harmless orphan, whereas a half-done rename is the
+/// loss. The remove is best-effort for the same reason; a stale legacy file
+/// is never read again, because the current key now resolves first.
+///
+/// `atomicfile::write` keeps §9.5 rule 1 across the migration itself: a crash
+/// mid-adoption leaves the legacy file untouched and the new one absent, so
+/// the next launch simply migrates again.
+fn adopt_legacy(config_dir: &Path, root: &Path) -> Option<String> {
+    let legacy = legacy_path(config_dir, root);
+    let target = path(config_dir, root);
+    // Belt and braces: if the two keys ever agreed, adopting would be a
+    // self-overwrite that then deletes the file it just wrote.
+    if legacy == target {
+        return None;
+    }
+
+    let raw = fs::read_to_string(&legacy).ok()?;
+    atomicfile::write(&target, raw.as_bytes()).ok()?;
+    let _ = fs::remove_file(&legacy);
+
+    Some(raw)
+}
+
 /// Pins are truth, not a cache (§9.5 rule 5) — but a corrupt file still has no
 /// other source to recover from, so this falls back to empty exactly like
 /// `settings.rs` falls back to defaults. The failure mode that rule 5 actually
@@ -53,8 +108,15 @@ fn path(config_dir: &Path, root: &Path) -> PathBuf {
 pub fn load(config_dir: &Path, root: &Path) -> RootSettings {
     atomicfile::prune_stale_temps(&dir(config_dir));
 
-    let Ok(raw) = fs::read_to_string(path(config_dir, root)) else {
-        return RootSettings::default();
+    // A miss here is either a root never opened before or one whose pins are
+    // still under the pre-FNV key; `adopt_legacy` tells the two apart, and
+    // only on the miss, so the common path stays one read.
+    let raw = match fs::read_to_string(path(config_dir, root)) {
+        Ok(raw) => raw,
+        Err(_) => match adopt_legacy(config_dir, root) {
+            Some(raw) => raw,
+            None => return RootSettings::default(),
+        },
     };
 
     match serde_json::from_str::<RootSettings>(&raw) {
@@ -65,8 +127,13 @@ pub fn load(config_dir: &Path, root: &Path) -> RootSettings {
 
 /// Atomic write (§9.5 rule 1) — see [`atomicfile`]. Pins can be toggled faster
 /// than a save completes, so two of these overlapping is ordinary.
+///
+/// Stamps `root` from the argument rather than trusting the caller's field:
+/// the recorded path is only worth having if it is the one the file name was
+/// hashed from.
 pub fn save(config_dir: &Path, root: &Path, settings: &RootSettings) -> std::io::Result<()> {
-    let json = serde_json::to_vec_pretty(settings)
+    let stamped = RootSettings { root: Some(root.to_path_buf()), ..settings.clone() };
+    let json = serde_json::to_vec_pretty(&stamped)
         .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
 
     atomicfile::write(&path(config_dir, root), &json)
@@ -133,6 +200,98 @@ mod tests {
             path(&dir.0, Path::new(r"C:\dev\a")),
             path(&dir.0, Path::new(r"C:\dev\b")),
         );
+    }
+
+    /// The migration that stops the `hash_root` fix from wiping the pins it
+    /// exists to protect. Writes a pins file under the old `DefaultHasher` key
+    /// exactly as an installed build would have, then asserts a plain `load`
+    /// returns them.
+    #[test]
+    fn pins_written_under_the_legacy_key_are_adopted() {
+        let dir = TempDir::new("corgit-test-roots-legacy");
+        let root = Path::new(r"C:\dev\code");
+        fs::create_dir_all(dir.0.join("roots")).unwrap();
+
+        let mut settings = RootSettings::default();
+        settings.pins.insert("repo-1".to_string());
+        settings.last_selected = Some("repo-1".to_string());
+        fs::write(legacy_path(&dir.0, root), serde_json::to_vec(&settings).unwrap()).unwrap();
+
+        let loaded = load(&dir.0, root);
+
+        assert!(loaded.pins.contains("repo-1"), "pins lost across the key change");
+        assert_eq!(loaded.last_selected.as_deref(), Some("repo-1"));
+        // Adopted, not merely read: the next load must hit the current key
+        // directly, and the old file must not linger to be re-adopted over a
+        // newer one.
+        assert!(path(&dir.0, root).exists(), "not rewritten under the current key");
+        assert!(!legacy_path(&dir.0, root).exists(), "legacy file left behind");
+    }
+
+    /// A root whose pins already live under the current key must not have them
+    /// replaced by a stale legacy file — the adoption is a miss-path only.
+    #[test]
+    fn a_current_file_wins_over_a_legacy_one() {
+        let dir = TempDir::new("corgit-test-roots-legacy-precedence");
+        let root = Path::new(r"C:\dev\code");
+        fs::create_dir_all(dir.0.join("roots")).unwrap();
+
+        let mut current = RootSettings::default();
+        current.pins.insert("current".to_string());
+        save(&dir.0, root, &current).unwrap();
+
+        let mut stale = RootSettings::default();
+        stale.pins.insert("stale".to_string());
+        fs::write(legacy_path(&dir.0, root), serde_json::to_vec(&stale).unwrap()).unwrap();
+
+        let loaded = load(&dir.0, root);
+
+        assert!(loaded.pins.contains("current"));
+        assert!(!loaded.pins.contains("stale"), "a stale legacy file overwrote live pins");
+    }
+
+    /// Nothing to adopt is the ordinary first-open case, not an error.
+    #[test]
+    fn no_legacy_file_still_yields_defaults() {
+        let dir = TempDir::new("corgit-test-roots-legacy-absent");
+        fs::create_dir_all(dir.0.join("roots")).unwrap();
+
+        assert!(load(&dir.0, Path::new(r"C:\dev\code")).pins.is_empty());
+    }
+
+    /// The point of the field: the file names its own folder, so an orphan in
+    /// `roots/` can be traced without reversing a hash. Read as raw JSON, not
+    /// through `load`, because nothing in the app reads it back — the
+    /// on-disk file is the whole of the behaviour.
+    #[test]
+    fn a_saved_file_records_its_root() {
+        let dir = TempDir::new("corgit-test-roots-records-root");
+        let root = Path::new(r"C:\dev\code");
+
+        // Deliberately wrong on the way in: the stamp must come from the key.
+        let settings = RootSettings { root: Some(PathBuf::from(r"C:\elsewhere")), ..Default::default() };
+        save(&dir.0, root, &settings).unwrap();
+
+        let raw: serde_json::Value = serde_json::from_str(&fs::read_to_string(path(&dir.0, root)).unwrap()).unwrap();
+        assert_eq!(raw["root"], r"C:\dev\code");
+    }
+
+    /// Every file on disk today predates the field. They must keep their pins.
+    ///
+    /// What this actually guards is the version: adding an `Option` field is
+    /// free under serde, but bumping `ROOTS_VERSION` to mark it — the reflex
+    /// `CACHE_VERSION`'s comment encourages for the cache — would make `load`
+    /// discard every existing pins file. Mutation-checked against exactly that.
+    #[test]
+    fn a_file_written_before_the_root_field_still_loads() {
+        let dir = TempDir::new("corgit-test-roots-no-root-field");
+        let root = Path::new(r"C:\dev\code");
+        fs::create_dir_all(dir.0.join("roots")).unwrap();
+        fs::write(path(&dir.0, root), br#"{"version":1,"pins":["repo-1"],"lastSelected":"repo-1"}"#).unwrap();
+
+        let loaded = load(&dir.0, root);
+        assert!(loaded.pins.contains("repo-1"));
+        assert_eq!(loaded.root, None);
     }
 
     #[test]

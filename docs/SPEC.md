@@ -132,6 +132,12 @@ Resolve `git` from PATH at startup. If absent, show a blocking first-run screen 
 download link rather than failing per-operation. Record the version — `core.fsmonitor`
 support (§6) needs ≥ 2.37.
 
+The floor for everything else is **2.24**, and it is not checked at startup: `switch` and
+`restore` (§8.3, §8.6) arrived in 2.23, and `--end-of-options` — which every ref name or
+hash the frontend supplies goes behind, so it can never be read as a flag — in 2.24.
+Anything older fails per operation with git's own "unknown option" text. Git for Windows
+2.24 shipped in November 2019.
+
 **"At startup" means started at startup, not waited for.** The probe is a process spawn,
 and process spawn is the one startup cost with no upper bound worth trusting: an
 anti-malware scan of a rarely-run binary, a revocation check with no route to its
@@ -1114,9 +1120,13 @@ with one more read of that one repo. This is what makes a change reach the diff 
 there were no watchers to notice it: they are dropped on blur, so every edit made in an
 editor while Corgit is in the background arrives on the focus-gain sweep and nowhere else.
 
-**Re-entrancy guard:** a sweep never starts while one is in flight — the tick is skipped,
-not queued. At 77 repos the status sweep should finish in ~150 ms and never collide, so
-this is cheap insurance rather than an expected path. Individual repos are also skipped
+**Re-entrancy guard:** a sweep never starts while one is in flight. A tick that covers
+only the unwatched repos is skipped, not queued — the next tick is a minute away and asks
+the same question. A **full** sweep turned away is queued instead, at most one however many
+arrive, and runs over whatever root is open when the running sweep lets go. Full sweeps are
+the ones somebody needs the answer to: opening or refreshing a root, focus gain, the end of
+a fetch. Skipping one of those is not a delay but a loss — a freshly opened root would show
+cache-only rows until the next five-minute reconcile. Individual repos are also skipped
 while their write lock is held (§7).
 
 **Focus gating:** sweeps run only while the window is **focused**. On blur the tickers are
@@ -1532,10 +1542,17 @@ and its selection are currently one set of fields for the process, and each woul
 become per-window with every command told which window is asking.
 
 Two things are built for that future and cost nothing now: write queues and the semaphore
-are already keyed by **canonicalised repo path** rather than by root, and every event
-already carries the root it describes so a receiver can ignore one it isn't showing.
-Overlapping roots — `C:\dev` and `C:\dev\microservices` — are therefore safe by
-construction whenever the second window does arrive.
+are already keyed by **canonicalised repo path** rather than by root, and the sweep events
+(`status:sweep`, `status:repo`, `fetch:sweep`) already carry the root they describe so a
+receiver can ignore one it isn't showing. The `write:*` events need no root — they name a
+repo, which is the same repo whichever root a window shows it under. Overlapping roots —
+`C:\dev` and `C:\dev\microservices` — are therefore safe by construction for status and
+writes whenever the second window does arrive.
+
+Not yet built for it: the bulk run (§5.1) is one per process — one `bulk:progress` stream
+and one Stop flag, neither naming a root — and `problem:recorded` and `pane:visibility` are
+broadcast to every window. Each needs a root or a target window before a second window
+ships.
 
 ### 9.3 Ownership
 
@@ -1554,7 +1571,7 @@ per-window along with the rest of the root state if multi-window ships — §9.2
 | File | Location (Tauri) | Contents |
 | --- | --- | --- |
 | `settings.json` | `app_config_dir` | Global: pane widths, the diff view's column split (§5.4), scan depth, sweep intervals, recent roots |
-| `roots/<hash>.json` | `app_config_dir` | Per root: pins, last selected repo |
+| `roots/<hash>.json` | `app_config_dir` | Per root: pins, last selected repo, and the root's own path |
 | `cache/<hash>.json` | `app_cache_dir` | Per root: branch, dirty, ahead/behind, `last_fetch_at` |
 
 `<hash>` is a short hash of the canonicalised root path. **Cache and pins must be per-root**
@@ -1573,6 +1590,12 @@ Rules:
    never show the user an error.
 4. **Debounced writes** — every 30 s and on quit, not on every status change.
 5. Deleting the cache must never lose pins. Hence two files.
+6. **`cache/` is bounded by the recent-roots list; `roots/` is not.** Each time a root is
+   opened, cache files for roots no longer on the list are deleted — reopening one through
+   *Open Folder…* costs a single cold sweep. Pins are never pruned: a folder off the recent
+   list may still come back, and its pins have no other copy. Instead each `roots/` file
+   records the path it was hashed from, so an orphan can be identified without reversing
+   the hash.
 
 ---
 

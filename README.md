@@ -214,11 +214,14 @@ src/
     mascot/                  the poses the app imports, cut from the sheet
     panes/
       Pane.svelte            shared header + scrolling body
-      RepoList.svelte        left    — filter, bulk strip, pinned/all bands, sweep timing
+      RepoList.svelte        left    — filter, pinned/all bands, sweep timing
+      RootStrip.svelte       the folder-wide strip — behind count, Pull all, bulk progress
       RepoRow.svelte         pin · name · branch · changed files · ahead/behind · busy
-      CommitPane.svelte      middle  — message, staging, the four verbs, file context menu
+      CommitPane.svelte      middle  — message, commit/push, fetch/pull
+      ChangesList.svelte     staged/unstaged lists — selection, arrows, context menu, discard
       FileRow.svelte         status letter · path · stage/unstage on hover
       GraphPane.svelte       right   — virtualization, branch switching
+      BranchFind.svelte      find a branch — the box, its results, jump to the tip
       GraphRow.svelte        lanes · hash · subject · refs · author · date
       CommitInfoPanel.svelte commit details for the selected commit
       DiffView.svelte        right pane's second view — read-only, always (SPEC §5.4)
