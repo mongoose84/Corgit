@@ -476,7 +476,7 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    background: rgba(0, 0, 0, 0.45);
+    background: var(--scrim);
   }
 
   .dialog {
@@ -490,7 +490,7 @@
     background: var(--bg-raised);
     border: 1px solid var(--border-strong);
     border-radius: var(--radius-md);
-    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+    box-shadow: var(--shadow-dialog);
   }
 
   .title {
@@ -585,7 +585,7 @@
     background: var(--bg-hover);
     border: 1px solid var(--border-strong);
     border-radius: var(--radius-sm);
-    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+    box-shadow: var(--shadow-dialog);
     overflow: hidden;
   }
 

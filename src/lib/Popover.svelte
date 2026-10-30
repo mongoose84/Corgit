@@ -53,6 +53,6 @@
     background: var(--bg-raised);
     border: 1px solid var(--border-strong);
     border-radius: var(--radius-md);
-    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+    box-shadow: var(--shadow-menu);
   }
 </style>

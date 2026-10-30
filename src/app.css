@@ -122,6 +122,17 @@
   --diff-filler-bg: #191a1d;
   --diff-gutter-text: #6b7280;
 
+  /* Elevation. Whole values rather than bare colours, because every modal
+     and every menu used the same three literals verbatim — the thing to keep
+     in step is the look of "a dialog" and "a menu", not one channel of it.
+     Black at an alpha rather than a ramp step: a scrim has to darken whatever
+     pane is behind it, and an opaque surface colour would just replace it. */
+  --scrim: rgba(0, 0, 0, 0.45);
+  --shadow-dialog: 0 8px 32px rgba(0, 0, 0, 0.5);
+  /* Tighter and lighter than a dialog's: a menu sits on the pane it came
+     from, not above a scrim, and a dialog-sized shadow reads as a modal. */
+  --shadow-menu: 0 4px 16px rgba(0, 0, 0, 0.4);
+
   --font-ui: 'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif;
   --font-mono: 'Cascadia Mono', Consolas, 'Courier New', monospace;
 
