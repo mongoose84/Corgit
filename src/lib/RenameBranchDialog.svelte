@@ -10,8 +10,9 @@
     /** The branch being renamed, exactly as its badge names it. */
     from: string;
     /** Local branch names already in the graph, for the duplicate check. May
-     *  include `from` itself; it is taken out here, since keeping the name is
-     *  "unchanged", not "already exists". */
+     *  include `from` itself — keeping the name exactly is "unchanged", and
+     *  checked before the duplicate rule, but `from` must stay in the list so
+     *  a case-only rename of it is caught like any other case clash. */
     existingLocal: readonly string[];
     /** Resolves to whether the rename happened. As with Create, the failure
      *  is reported by the pane alongside every other git write's. */
@@ -29,9 +30,11 @@
   let busy = $state(false);
   let inputEl: HTMLInputElement | undefined = $state();
 
-  const others = $derived(existingLocal.filter((branch) => branch !== from));
-  const problem = $derived(validateBranchName(name, others));
+  // `from` is not filtered out of the list: `feature` → `Feature` is the one
+  // rename git on Windows refuses against the branch's own name (§8.3), and
+  // only the case-insensitive half of the duplicate check sees it.
   const unchanged = $derived(name.trim() === from);
+  const problem = $derived(unchanged ? null : validateBranchName(name, existingLocal));
   const canRename = $derived(!busy && name.trim().length > 0 && !unchanged && problem === null);
 
   $effect(() => {

@@ -32,5 +32,15 @@ export function validateBranchName(name: string, existingLocal: readonly string[
   // already closed.
   if (existingLocal.includes(trimmed)) return `A branch named "${trimmed}" already exists`;
 
+  // Refs are case-sensitive to git but loose ones are files, and on Windows'
+  // case-insensitive filesystem `refs/heads/Main` *is* `refs/heads/main`: git
+  // refuses with the same "already exists" (checked against Git for Windows,
+  // for both `branch` and `branch -m`). Packed refs can slip past that refusal,
+  // which is worse — two refs one unpack away from colliding. v1 is
+  // Windows-only (§3), so this is the rule rather than a platform branch.
+  const lower = trimmed.toLowerCase();
+  const clash = existingLocal.find((branch) => branch.toLowerCase() === lower);
+  if (clash !== undefined) return `Only the case differs from "${clash}", which Windows cannot tell apart`;
+
   return null;
 }

@@ -6,37 +6,51 @@
  * the same badge. Pure and rune-free, like `branchName.ts`, so it is testable
  * without a pane.
  *
- * A branch counts as published on either of two signals, because each one
- * misses a case the other catches:
+ * Published means one thing: **a remote badge of the same branch name
+ * exists** (`origin/foo` for `foo`). That is the server still holding a copy
+ * under this name, which is exactly what a rename would strand and what a
+ * delete should wait for.
  *
- * - **A remote badge of the same name** (`origin/foo` for `foo`). This is
- *   "pushed" as the user means it, and it catches a branch pushed without
- *   `-u`, which has no upstream configured at all.
- * - **An upstream configured.** This catches a branch that tracks a remote
- *   branch under a *different* name, which no name comparison can see.
+ * The configured upstream is deliberately not a second signal, though it once
+ * was. `%(upstream:short)` keeps printing after the server branch is gone —
+ * `branch.<name>.merge` outlives a `--prune` — so a branch pushed with `-u`
+ * stayed "published" forever and Delete never came back after its PR was
+ * merged. And a branch tracking a *different* name (`feature-x` →
+ * `origin/main`, which older builds created via `branch.autoSetupMerge`) was
+ * never pushed under its own name at all: `needsPublish` in `repos.svelte.ts`
+ * calls it unpublished, and so must this. Renaming one is harmless anyway —
+ * `git branch -m` carries the tracking config across to the new name.
  *
- * Both come from the last fetch, so the answer can be stale (§5.1) — but only
- * in the cautious direction. A branch deleted on the server keeps its remote
- * badge until a `--prune` fetch removes it (§8.7), so for one sweep the entries
- * are missing where they could be offered; they are never offered where they
- * should not be.
+ * This is not `needsPublish`, and the two can differ on purpose. That one asks
+ * "can a plain `git push` work?", this one "does the server hold a copy under
+ * this name?". A branch pushed without `-u` is both: Push says *Publish*,
+ * because there is no upstream, and the graph holds back Rename, because
+ * there is a server copy.
+ *
+ * The badges are as of the last fetch (§5.1), and stale only in the cautious
+ * direction: a branch deleted on the server keeps its remote badge until a
+ * `--prune` fetch (§8.7) removes it, which is what makes the entries appear.
  */
 
 import type { RefBadge } from './graph.svelte';
 
 /** The names of the local branches that are published, out of every ref the
  *  graph holds. A set rather than a per-badge predicate: the menu asks about
- *  each badge on a row, and the remote names are the same for all of them. */
+ *  each badge on a row, and the remote badges are the same for all of them.
+ *
+ *  Matched as a `/`-bounded suffix of the remote badge, not by cutting off its
+ *  first segment as `upstreamBranch` and `branch::local_name` do. Those only
+ *  have to name *a* branch; this decides whether to offer a write, and a
+ *  remote named `jk/fork` would make the cut read `jk/fork/fix` as `fork/fix`
+ *  and offer a rename on a pushed `fix`. The suffix reads it right, and where
+ *  it can be wrong — local `x` beside `origin/feature/x` — it errs towards
+ *  holding the entries back, which is the side to be wrong on. */
 export function publishedBranches(refs: readonly RefBadge[]): ReadonlySet<string> {
-  // Only the first segment is the remote's name, as `branch::local_name` reads
-  // it on the Rust side: `origin/feature/x` is the branch `feature/x`.
-  const remoteNames = new Set(
-    refs.filter((ref) => ref.kind === 'remote').map((ref) => ref.name.slice(ref.name.indexOf('/') + 1)),
-  );
+  const remoteNames = refs.filter((ref) => ref.kind === 'remote').map((ref) => ref.name);
 
   return new Set(
     refs
-      .filter((ref) => ref.kind === 'local' && (ref.upstream !== null || remoteNames.has(ref.name)))
+      .filter((ref) => ref.kind === 'local' && remoteNames.some((remote) => remote.endsWith(`/${ref.name}`)))
       .map((ref) => ref.name),
   );
 }

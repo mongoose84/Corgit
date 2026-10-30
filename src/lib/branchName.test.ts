@@ -93,10 +93,16 @@ describe('collisions with an existing branch', () => {
     expect(error).toBe('A branch named "main" already exists');
   });
 
-  test('the comparison is exact, not case-insensitive or fuzzy', () => {
-    // Git refs are case-sensitive, so `Main` alongside `main` is legal even
-    // though it is a poor idea — refusing it here would block a valid name.
-    expect(validateBranchName('Main', ['main'])).toBeNull();
+  test('a name differing only in case is refused, as git on Windows does', () => {
+    // Loose refs are files on a case-insensitive filesystem, so git itself
+    // answers "already exists" — better said while typing than after submit.
+    expect(validateBranchName('Main', ['main'])).toBe(
+      'Only the case differs from "main", which Windows cannot tell apart',
+    );
+  });
+
+  test('the comparison is otherwise exact, not fuzzy', () => {
+    expect(validateBranchName('mains', ['main'])).toBeNull();
   });
 
   test('the collision check runs on the trimmed name', () => {

@@ -445,13 +445,14 @@
     busy = false;
   }
 
+  // No `busy` gate, as with `createBranch` above: the dialog has its own
+  // in-flight state, and the repo's write queue (§7) already orders a rename
+  // behind whatever the pane is running. Gating here only made a press during
+  // a merge resolve to `false` with nothing on screen saying why.
   async function renameBranch(to: string): Promise<boolean> {
     const from = renaming;
-    if (!from || busy) return false;
-    busy = true;
-    const ok = await repos.renameBranch(from, to);
-    busy = false;
-    return ok;
+    if (!from) return false;
+    return repos.renameBranch(from, to);
   }
 
   // Every row has a menu now, badges or not: *Show info* is the only way into
@@ -492,24 +493,26 @@
         // only. A remote badge would need a network write on the server's
         // copy — a different blast radius, not folded into the same entries —
         // and a published branch would leave that copy behind, still pushed
-        // under the old name, with a local branch no longer matching it.
+        // under the old name, with a local branch no longer matching it. One
+        // test for both, nested, so the shared half cannot drift apart.
         ...(ref.kind === 'local' && !published.has(ref.name)
           ? [
               {
                 label: `Rename ${ref.name}…`,
                 onSelect: () => (renaming = ref.name),
               },
-            ]
-          : []),
-        // Delete additionally skips the badge you are standing on: git
-        // refuses to delete the checked-out branch, and an entry that can only
-        // fail is not an entry. Rename has no such limit — HEAD moves with it.
-        ...(ref.kind === 'local' && !published.has(ref.name) && ref.name !== currentBranch
-          ? [
-              {
-                label: `Delete ${ref.name}`,
-                onSelect: () => (deleting = { name: ref.name, refusal: null }),
-              },
+              // Delete additionally skips the badge you are standing on: git
+              // refuses to delete the checked-out branch, and an entry that can
+              // only fail is not an entry. Rename has no such limit — HEAD
+              // moves with it.
+              ...(ref.name !== currentBranch
+                ? [
+                    {
+                      label: `Delete ${ref.name}`,
+                      onSelect: () => (deleting = { name: ref.name, refusal: null }),
+                    },
+                  ]
+                : []),
             ]
           : []),
       ]),

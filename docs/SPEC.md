@@ -1308,13 +1308,16 @@ under the new name) with a different blast radius, not folded into the same entr
 *published* local branch is held back too: renaming one leaves the server's copy under the
 old name and the local branch tracking a name it no longer has, and deleting one is the
 cleanup that belongs *after* the server's branch is gone. A local branch counts as
-published when a remote badge of the same name exists (`origin/foo` for `foo`, which
-catches a push without `-u`) or when it has an upstream configured (which catches one
-tracking a remote branch under a different name). Both signals are as of the last fetch
-(§5.1), and stale only in the cautious direction: a branch deleted on the server keeps its
-remote badge until `--prune` (§8.7) removes it, so the usual flow — PR merged, server
-branch deleted, next fetch — is exactly what makes *Delete* appear. One shared function
-decides it for both entries, so the two cannot disagree about a badge.
+published when, and only when, a remote badge of the same branch name exists (`origin/foo`
+for `foo`, on any remote). The configured upstream is deliberately not consulted: it
+outlives a pruned server branch, so a branch pushed with `-u` would stay published forever,
+and a branch tracking a *different* name was never pushed under its own (§8.7's
+*Publish* says the same of it). Renaming such a branch is safe — `-m` carries the
+tracking config across. The badges are as of the last fetch (§5.1), and stale only in the
+cautious direction: a branch deleted on the server keeps its remote badge until `--prune`
+(§8.7) removes it, so the usual flow — PR merged, server branch deleted, next fetch — is
+exactly what makes *Delete* appear. One shared function decides it for both entries, so
+the two cannot disagree about a badge.
 
 **Renaming a branch** (same menu): right-click an unpublished local ref badge → *Rename
 `<ref>`…* → a small modal holding the current name, selected, checked as it is typed
