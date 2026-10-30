@@ -11,6 +11,8 @@
   import ContextMenu from '../ContextMenu.svelte';
   import CreateBranchDialog from '../CreateBranchDialog.svelte';
   import DeleteBranchDialog from '../DeleteBranchDialog.svelte';
+  import RenameBranchDialog from '../RenameBranchDialog.svelte';
+  import { publishedBranches } from '../publishedBranches';
   import PullAfterSwitchDialog from '../PullAfterSwitchDialog.svelte';
   import { repos, isDirty, canPull } from '../repos.svelte';
   import { graph, type RefBadge } from '../graph.svelte';
@@ -292,6 +294,9 @@
   // in the dialog because it *is* the failed write's error, and every other
   // write's error is the pane's to hold.
   let deleting = $state<{ name: string; refusal: string | null } | null>(null);
+  // Non-null while the Rename Branch dialog is up (§8.3); the branch's
+  // current name.
+  let renaming = $state<string | null>(null);
 
   // Esc shuts the info panel (§5.2) and leaves the row selected — it undoes
   // the *Show info* that opened the column, not the click that picked the row.
@@ -344,6 +349,10 @@
   const localBranchNames = $derived(
     graph.refs.filter((ref) => ref.kind === 'local').map((ref) => ref.name),
   );
+
+  // Rename and Delete are offered only off this set's complement (§8.3) —
+  // one derivation for both entries, so they cannot disagree about a badge.
+  const published = $derived(publishedBranches(graph.refs));
 
   async function switchTo(ref: RefBadge) {
     if (busy) return;
@@ -436,6 +445,15 @@
     busy = false;
   }
 
+  async function renameBranch(to: string): Promise<boolean> {
+    const from = renaming;
+    if (!from || busy) return false;
+    busy = true;
+    const ok = await repos.renameBranch(from, to);
+    busy = false;
+    return ok;
+  }
+
   // Every row has a menu now, badges or not: *Show info* is the only way into
   // the info column (§5.2), so a plain commit with no refs on it must still
   // open one. That is why the old `refs.length === 0` bail is gone.
@@ -470,11 +488,23 @@
               },
             ]
           : []),
-        // Local badges only, and never the one you are standing on: git
-        // refuses to delete the checked-out branch, and deleting a remote
-        // badge would be a `push --delete` — a network write with a different
-        // blast radius, so it is not folded into the same entry (§8.3).
-        ...(ref.kind === 'local' && ref.name !== currentBranch
+        // Rename and Delete share a rule (§8.3): unpublished local badges
+        // only. A remote badge would need a network write on the server's
+        // copy — a different blast radius, not folded into the same entries —
+        // and a published branch would leave that copy behind, still pushed
+        // under the old name, with a local branch no longer matching it.
+        ...(ref.kind === 'local' && !published.has(ref.name)
+          ? [
+              {
+                label: `Rename ${ref.name}…`,
+                onSelect: () => (renaming = ref.name),
+              },
+            ]
+          : []),
+        // Delete additionally skips the badge you are standing on: git
+        // refuses to delete the checked-out branch, and an entry that can only
+        // fail is not an entry. Rename has no such limit — HEAD moves with it.
+        ...(ref.kind === 'local' && !published.has(ref.name) && ref.name !== currentBranch
           ? [
               {
                 label: `Delete ${ref.name}`,
@@ -715,6 +745,15 @@
     behind={pullPrompt.behind}
     onPull={pullAfterSwitch}
     onClose={() => (pullPrompt = null)}
+  />
+{/if}
+
+{#if renaming}
+  <RenameBranchDialog
+    from={renaming}
+    existingLocal={localBranchNames}
+    onRename={renameBranch}
+    onClose={() => (renaming = null)}
   />
 {/if}
 

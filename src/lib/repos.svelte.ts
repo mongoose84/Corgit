@@ -855,6 +855,13 @@ export class RepoStore {
     return this.write('delete_branch', { name, force }, 'Delete branch');
   }
 
+  /** Renaming an unpublished local branch from the graph (§8.3). `git branch
+   *  -m`, never `-M`, so a name that is already taken is git's refusal rather
+   *  than an overwrite. */
+  async renameBranch(from: string, to: string): Promise<boolean> {
+    return this.write('rename_branch', { from, to }, 'Rename branch');
+  }
+
   /** The dirty-tree checkout failure's other half (§8.3) — not routed through
    *  `write()`, since it never mutates repo state and has nothing to refresh.
    *  Defaults to the selected repo; the row context menu (§5.1) passes an

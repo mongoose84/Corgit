@@ -180,6 +180,7 @@ src/
     repoFilter.ts            the filter box: substring on name, comma-separated for several
     switchTargets.ts         what Switch & pull does to each repo, decided before it runs
     branchName.ts            branch-name checking while you type (SPEC §8.3)
+    publishedBranches.ts     which local branches are pushed — gates Rename and Delete (§8.3)
     busyIndicator.ts         when a spinner may be drawn — reveal delay, minimum hold
     gitErrors.ts             stderr → plain language (SPEC §13)
     dateFormat.ts            fixed dd-MM-yyyy HH:mm:ss, never a locale format
@@ -202,7 +203,8 @@ src/
     NoticeBanner.svelte      a failure plus the one action that resolves it (SPEC §13)
     RecentProblems.svelte    Help ▸ Recent Problems… — what §13 lets the UI throw away
     CreateBranchDialog.svelte    new branch here, from a ref badge or a commit row
-    DeleteBranchDialog.svelte    delete a local branch, from its ref badge
+    RenameBranchDialog.svelte    rename an unpublished local branch, from its ref badge
+    DeleteBranchDialog.svelte    delete an unpublished local branch, from its ref badge
     MultiBranchDialog.svelte     one branch name, cut across the pinned set (§5.1)
     SwitchPullDialog.svelte      one existing branch, checked out across All and pulled
     PullAfterSwitchDialog.svelte you landed on a branch that is behind — pull it?

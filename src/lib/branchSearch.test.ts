@@ -14,7 +14,7 @@ let seq = 0;
 
 function ref(name: string, kind: 'local' | 'remote', timestamp: number): RefBadge {
   seq += 1;
-  return { name, commit: `hash${seq}`, kind, timestamp, subject: `subject ${seq}` };
+  return { name, commit: `hash${seq}`, kind, timestamp, subject: `subject ${seq}`, upstream: null };
 }
 
 const names = (refs: RefBadge[]) => refs.map((r) => r.name);

@@ -120,6 +120,13 @@ pub struct RefBadge {
     pub timestamp: i64,
     /// `%(contents:subject)`, which git already folds to a single line.
     pub subject: String,
+    /// `%(upstream:short)` — the remote branch a local one tracks, `None` when
+    /// it tracks nothing and always `None` on a remote badge. Half of what
+    /// makes a branch *published* (§8.3), which gates Rename and Delete; the
+    /// other half, a same-named remote badge, the frontend reads off the badge
+    /// list it already has. This half is for the branch that tracks a remote
+    /// branch under a different name, which no name comparison can see.
+    pub upstream: Option<String>,
 }
 
 /// `git for-each-ref` over `refs/heads` and `refs/remotes` (§8.3) — the same
@@ -130,7 +137,7 @@ pub async fn refs(repo: &Path) -> Result<Vec<RefBadge>, String> {
         repo,
         &[
             "for-each-ref",
-            "--format=%(refname)%1f%(objectname)%1f%(committerdate:unix)%1f%(contents:subject)",
+            "--format=%(refname)%1f%(objectname)%1f%(committerdate:unix)%1f%(upstream:short)%1f%(contents:subject)",
             "refs/heads",
             "refs/remotes",
         ],
@@ -154,7 +161,8 @@ fn parse_ref(line: &str) -> Option<RefBadge> {
     // Subject last and unsplit: it is the one field that could itself contain
     // the separator, and taking the remainder means a commit message with a
     // stray 0x1f in it loses nothing rather than truncating the badge.
-    let (timestamp, subject) = rest.split_once('\u{1f}')?;
+    let (timestamp, rest) = rest.split_once('\u{1f}')?;
+    let (upstream, subject) = rest.split_once('\u{1f}')?;
 
     // clippy::question_mark wants the last arm folded into a `?` on the
     // `refs/remotes/` prefix. That would work, but it breaks the symmetry the
@@ -188,6 +196,9 @@ fn parse_ref(line: &str) -> Option<RefBadge> {
         // undatable ref belongs anyway.
         timestamp: timestamp.parse().unwrap_or(0),
         subject: subject.to_string(),
+        // git prints an empty field, not an error, for a branch that tracks
+        // nothing — and for every remote ref, which cannot track anything.
+        upstream: (!upstream.is_empty()).then(|| upstream.to_string()),
     })
 }
 
@@ -444,8 +455,8 @@ mod tests {
     #[test]
     fn reads_local_and_remote_branches() {
         let refs = parse_refs(
-            "refs/heads/main\u{1f}aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\u{1f}1700000000\u{1f}first\n\
-             refs/remotes/origin/main\u{1f}aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\u{1f}1700000000\u{1f}first\n",
+            "refs/heads/main\u{1f}aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\u{1f}1700000000\u{1f}origin/main\u{1f}first\n\
+             refs/remotes/origin/main\u{1f}aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\u{1f}1700000000\u{1f}\u{1f}first\n",
         );
 
         assert_eq!(
@@ -457,6 +468,7 @@ mod tests {
                     kind: RefKind::Local,
                     timestamp: 1_700_000_000,
                     subject: "first".into(),
+                    upstream: Some("origin/main".into()),
                 },
                 RefBadge {
                     name: "origin/main".into(),
@@ -464,6 +476,7 @@ mod tests {
                     kind: RefKind::Remote,
                     timestamp: 1_700_000_000,
                     subject: "first".into(),
+                    upstream: None,
                 },
             ]
         );
@@ -476,11 +489,12 @@ mod tests {
     #[test]
     fn a_ref_with_an_empty_subject_still_parses() {
         let refs = parse_refs(
-            "refs/heads/wip\u{1f}bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\u{1f}1700000001\u{1f}\n",
+            "refs/heads/wip\u{1f}bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\u{1f}1700000001\u{1f}\u{1f}\n",
         );
 
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].subject, "");
+        assert_eq!(refs[0].upstream, None);
         assert_eq!(refs[0].timestamp, 1_700_000_001);
     }
 
@@ -489,7 +503,7 @@ mod tests {
     #[test]
     fn a_separator_inside_a_subject_is_kept() {
         let refs = parse_refs(
-            "refs/heads/odd\u{1f}cccccccccccccccccccccccccccccccccccccccc\u{1f}1700000002\u{1f}a\u{1f}b\n",
+            "refs/heads/odd\u{1f}cccccccccccccccccccccccccccccccccccccccc\u{1f}1700000002\u{1f}\u{1f}a\u{1f}b\n",
         );
 
         assert_eq!(refs[0].subject, "a\u{1f}b");
@@ -498,7 +512,7 @@ mod tests {
     #[test]
     fn an_undatable_ref_is_still_a_badge() {
         let refs = parse_refs(
-            "refs/heads/odd\u{1f}dddddddddddddddddddddddddddddddddddddddd\u{1f}\u{1f}x\n",
+            "refs/heads/odd\u{1f}dddddddddddddddddddddddddddddddddddddddd\u{1f}\u{1f}\u{1f}x\n",
         );
 
         assert_eq!(refs.len(), 1);
@@ -508,7 +522,7 @@ mod tests {
     #[test]
     fn a_remote_head_symbolic_ref_is_skipped() {
         let refs = parse_refs(
-            "refs/remotes/origin/HEAD\u{1f}aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\u{1f}1700000000\u{1f}first\n",
+            "refs/remotes/origin/HEAD\u{1f}aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\u{1f}1700000000\u{1f}\u{1f}first\n",
         );
         assert!(refs.is_empty());
     }

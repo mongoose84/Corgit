@@ -30,6 +30,9 @@ export interface RefBadge {
    *  the loaded rows and so cannot look either up from `rows`. */
   timestamp: number;
   subject: string;
+  /** What a local branch tracks (`origin/main`), `null` when it tracks
+   *  nothing and always `null` on a remote badge. Read by `publishedBranches`. */
+  upstream: string | null;
 }
 
 interface GraphPage {

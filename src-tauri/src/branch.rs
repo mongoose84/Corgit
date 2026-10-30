@@ -230,6 +230,7 @@ fn names_message(stderr: &str) -> String {
 /// Deleting a local branch (§8.3, the same menu). Only local ones: a
 /// remote-tracking badge names a branch on the server, and removing that is a
 /// `push --delete` — a network write with a different blast radius, not this.
+/// The menu narrows it further to unpublished ones, the same rule as `rename`.
 ///
 /// `force` picks `-D` over `-d`, and the two are a *sequence*, not a choice
 /// the caller makes up front: the frontend always tries the safe one first and
@@ -263,6 +264,33 @@ fn delete_args(name: &str, force: bool) -> Vec<&str> {
 fn delete_message(stderr: &str) -> String {
     let trimmed = stderr.trim();
     if trimmed.is_empty() { "could not delete the branch".to_string() } else { trimmed.to_string() }
+}
+
+/// Renaming a local branch (§8.3, the same menu). `-m`, never `-M`: the
+/// capital one overwrites a branch that already has the new name, and the
+/// dialog's duplicate check is a check against the graph as it was painted —
+/// git refusing is the one that cannot be stale.
+///
+/// The menu offers this only for branches that are not published, and nothing
+/// here re-checks it, for the same reason `delete` does not re-check HEAD: the
+/// frontend's condition is about which entries to *show*. Unlike `delete`, the
+/// checked-out branch is fine — git renames it and moves HEAD along with it.
+pub async fn rename(repo: &Path, from: &str, to: &str) -> Result<(), String> {
+    let output = git::write(repo, &rename_args(from, to)).await?;
+    if !output.ok {
+        return Err(rename_message(&output.stderr));
+    }
+    Ok(())
+}
+
+fn rename_args<'a>(from: &'a str, to: &'a str) -> Vec<&'a str> {
+    vec!["branch", "-m", END_OF_OPTIONS, from, to]
+}
+
+/// Same whole-stderr rule as [`full_message`] (§13).
+fn rename_message(stderr: &str) -> String {
+    let trimmed = stderr.trim();
+    if trimmed.is_empty() { "could not rename the branch".to_string() } else { trimmed.to_string() }
 }
 
 /// Merge another branch into the checked-out one (§8.3, right-click a ref
@@ -589,6 +617,53 @@ mod tests {
 
         let message = delete(repo.path(), "--quiet", false).await.unwrap_err();
         assert!(message.contains("'--quiet' not found"), "{message}");
+    }
+
+    #[test]
+    fn a_rename_never_overwrites() {
+        assert_eq!(rename_args("old", "new"), ["branch", "-m", "--end-of-options", "old", "new"]);
+    }
+
+    #[test]
+    fn a_silent_rename_failure_still_says_something() {
+        assert_eq!(rename_message("  \n"), "could not rename the branch");
+    }
+
+    #[tokio::test]
+    async fn renaming_moves_the_branch_and_drops_the_old_name() {
+        let repo = repo_with_one_commit("rename-plain");
+        repo.git(&["branch", "old"]);
+
+        rename(repo.path(), "old", "new").await.unwrap();
+
+        assert!(!repo.try_git(&["rev-parse", "--verify", "--quiet", "refs/heads/new"]).stdout.is_empty());
+        assert!(repo.try_git(&["rev-parse", "--verify", "--quiet", "refs/heads/old"]).stdout.is_empty());
+    }
+
+    /// The case `delete` cannot do: HEAD follows the rename, so the user is
+    /// still on the branch they were on, under its new name.
+    #[tokio::test]
+    async fn renaming_the_checked_out_branch_keeps_head_on_it() {
+        let repo = repo_with_one_commit("rename-head");
+        repo.git(&["switch", "--quiet", "-c", "old"]);
+
+        rename(repo.path(), "old", "new").await.unwrap();
+
+        let current = repo.try_git(&["branch", "--show-current"]).stdout;
+        assert_eq!(String::from_utf8_lossy(&current).trim(), "new");
+    }
+
+    /// `-m` rather than `-M`: a name that is already taken is git's refusal,
+    /// and the branch that held it is untouched.
+    #[tokio::test]
+    async fn renaming_onto_an_existing_branch_is_refused() {
+        let repo = repo_with_one_commit("rename-taken");
+        repo.git(&["branch", "old"]);
+        repo.git(&["branch", "taken"]);
+
+        let message = rename(repo.path(), "old", "taken").await.unwrap_err();
+        assert!(message.contains("already exists"), "{message}");
+        assert!(!repo.try_git(&["rev-parse", "--verify", "--quiet", "refs/heads/old"]).stdout.is_empty());
     }
 
     fn repo_with_one_commit(name: &str) -> TempRepo {

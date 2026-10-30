@@ -1239,6 +1239,7 @@ git switch -c <new> <start-point>                # create and check out
 git merge --no-edit <source>                     # into the checked-out branch
 git branch -d <branch>                           # delete, refuses if unmerged
 git branch -D <branch>                           # delete anyway, only after -d refused
+git branch -m <old> <new>                        # rename, refuses if <new> exists
 ```
 
 The switcher lists **local branches, plus remote branches with no local counterpart**,
@@ -1301,11 +1302,29 @@ you are on is the same gesture, and it is the case Pull does not cover, since Pu
 merges *your* upstream. The badge for the current branch itself offers nothing — merging a
 branch into itself is git's own no-op. On a detached HEAD the entry is absent entirely.
 
-**Deleting a branch** (same menu): right-click a *local* ref badge in the graph → *Delete
-`<ref>`*. Local badges only — a remote badge names a branch on the server, and removing
-that is `push --delete`, a network write with a different blast radius that is not folded
-into the same entry. The badge for the checked-out branch does not offer it either: git
-refuses to delete the branch HEAD is on, and an entry that can only fail is not an entry.
+**Rename and Delete are for unpublished local branches only.** A remote badge names a
+branch on the server, and changing that is a network write (`push --delete`, or a push
+under the new name) with a different blast radius, not folded into the same entries. A
+*published* local branch is held back too: renaming one leaves the server's copy under the
+old name and the local branch tracking a name it no longer has, and deleting one is the
+cleanup that belongs *after* the server's branch is gone. A local branch counts as
+published when a remote badge of the same name exists (`origin/foo` for `foo`, which
+catches a push without `-u`) or when it has an upstream configured (which catches one
+tracking a remote branch under a different name). Both signals are as of the last fetch
+(§5.1), and stale only in the cautious direction: a branch deleted on the server keeps its
+remote badge until `--prune` (§8.7) removes it, so the usual flow — PR merged, server
+branch deleted, next fetch — is exactly what makes *Delete* appear. One shared function
+decides it for both entries, so the two cannot disagree about a badge.
+
+**Renaming a branch** (same menu): right-click an unpublished local ref badge → *Rename
+`<ref>`…* → a small modal holding the current name, selected, checked as it is typed
+against `check-ref-format`'s rules and the other local branches, like *Create branch*.
+`-m`, never `-M`: a name already taken is git's refusal, not an overwrite. The checked-out
+branch is offered too — git renames it and HEAD moves with it.
+
+**Deleting a branch** (same menu): right-click an unpublished local ref badge in the graph →
+*Delete `<ref>`*. The badge for the checked-out branch does not offer it: git refuses to
+delete the branch HEAD is on, and an entry that can only fail is not an entry.
 
 The confirmation is **two-stepped, in one dialog**, and this is where §8.3's
 "never force-checkout" rule is honoured rather than broken. The first press always runs

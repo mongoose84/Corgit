@@ -692,7 +692,8 @@ async fn create_branch(
 }
 
 /// Deleting a local branch (§8.3) — right-click its badge in the graph. The
-/// menu only offers this for local badges that are not the checked-out branch;
+/// menu only offers this for unpublished local badges that are not the
+/// checked-out branch;
 /// `force` is never set by that first click, only by the *Delete anyway* the
 /// dialog grows once git has refused an unmerged branch.
 ///
@@ -704,6 +705,15 @@ async fn create_branch(
 #[tauri::command]
 async fn delete_branch(repo_id: String, name: String, force: bool, app: AppHandle) -> Result<(), String> {
     write_and_refresh(&app, repo_id, "Delete branch", |path| async move { branch::delete(&path, &name, force).await }).await
+}
+
+/// Renaming a local branch (§8.3) — right-click its badge in the graph. The
+/// menu offers it only for unpublished local branches; as with `delete_branch`,
+/// nothing here re-derives that from cached status, and a rename onto a name
+/// already taken fails as git's own error.
+#[tauri::command]
+async fn rename_branch(repo_id: String, from: String, to: String, app: AppHandle) -> Result<(), String> {
+    write_and_refresh(&app, repo_id, "Rename branch", |path| async move { branch::rename(&path, &from, &to).await }).await
 }
 
 /// Merging a branch into the checked-out one (§8.3) — right-click a ref badge
@@ -1766,6 +1776,7 @@ pub fn run() {
             create_branch,
             merge_branch,
             delete_branch,
+            rename_branch,
             open_in_vscode,
             open_in_terminal,
             reveal_in_explorer,
