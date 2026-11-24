@@ -1194,6 +1194,10 @@ window too.
    usable while the herd comes down. The number is not new: the fetch sweep already runs at 4
    (§6) for the same reason, and a pull is that work with a merge on the end, holding its slot
    longer. Headroom rather than a priority queue — the simplest thing that keeps the promise.
+   **The status sweep takes at most 6**, for the same reason at a different size: the global
+   semaphore is FIFO, so a full pass that dispatched every repo at once queued the whole root
+   ahead of the graph load the user clicked next — invisible at 77 repos, over a second at
+   125. Two free slots are exactly one graph load (`git log` + `for-each-ref`).
 5. Never touch `index.lock` directly. If git reports a lock error, surface it — the user is
    probably in a terminal in the same repo.
 

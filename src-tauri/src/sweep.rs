@@ -389,9 +389,38 @@ enum Outcome {
     Discard,
 }
 
-/// Every repo is dispatched at once; the semaphore in `git.rs` is what
-/// actually holds concurrency to 8 (§7.3). One batched result rather than 77
-/// events keeps the IPC cost off the sweep's measured time. A repo whose
+/// How many of the global eight (§7.3) a status sweep may hold or wait on at
+/// once — two fewer, so that one graph load (`git log` + `for-each-ref`, the
+/// pair `graph_page`/`graph_refs` fire together) starts the moment it is asked
+/// for instead of queueing.
+///
+/// The global semaphore is FIFO, and the sweep used to dispatch every repo
+/// straight into it. At 69 repos that was a queue nobody noticed; at 125, a
+/// full pass — and one runs on *every* focus gain, which is exactly when the
+/// user is about to click a repo — put ~125 `git status` ahead of the click.
+/// At ~85 ms a spawn across 8 slots that is over a second of "Reading
+/// history…" before `git log` even starts, and double that while the fetch
+/// sweep holds four of the slots. The wait grew with the repo count, not with
+/// the selected repo, which is why no one-repo measurement shows it.
+///
+/// Headroom rather than a priority queue, for §7.4's reason: it is the
+/// simplest thing that keeps the promise. The price is a full pass that is at
+/// most 8/6 slower when nothing else is running; since the pass publishes as a
+/// batch and the user is not waiting on it, that is the right side to pay on.
+pub(crate) const SWEEP_CONCURRENCY: usize = crate::git::MAX_INFLIGHT - 2;
+
+// The headroom is the point, so it is checked as headroom, at compile time:
+// whatever the global cap becomes, a sweep leaves room for one graph load
+// beside it, and never drops to a bulk run's half share — a full pass that slow
+// would be a regression of its own.
+const _: () = {
+    assert!(SWEEP_CONCURRENCY + 2 <= crate::git::MAX_INFLIGHT);
+    assert!(SWEEP_CONCURRENCY > crate::git::MAX_INFLIGHT / 2);
+};
+
+/// Every repo is *spawned* at once, but at most [`SWEEP_CONCURRENCY`] are let
+/// through to `git.rs`'s semaphore at a time. One batched result rather than
+/// 77 events keeps the IPC cost off the sweep's measured time. A repo whose
 /// write lock is currently held is skipped rather than queried — a
 /// non-blocking `try_read`, not a wait, so one busy repo never holds up the
 /// other 76 (§6, §7 rule 2) — and is simply absent from both maps; `sweep`
@@ -402,13 +431,42 @@ pub(crate) async fn collect(
     repos: Vec<Repo>,
     patience: Duration,
 ) -> (HashMap<String, RepoStatus>, HashMap<String, String>, Vec<StatusTask>) {
+    collect_with(write_queues, repos, patience, |path| async move { status::query(&path).await }).await
+}
+
+/// [`collect`] with the per-repo read injected, so the cap can be tested
+/// without 125 real repositories behind it.
+async fn collect_with<F, Fut>(
+    write_queues: Arc<WriteQueues>,
+    repos: Vec<Repo>,
+    patience: Duration,
+    query: F,
+) -> (HashMap<String, RepoStatus>, HashMap<String, String>, Vec<StatusTask>)
+where
+    F: Fn(PathBuf) -> Fut + Clone + Send + 'static,
+    Fut: std::future::Future<Output = Result<RepoStatus, String>> + Send + 'static,
+{
+    // Per call, not static: a straggler keeps its permit past the end of the
+    // sweep that spawned it, and the next sweep cannot start until it lands
+    // anyway (§6), so two sweeps never share — or need to share — this budget.
+    let slots = Arc::new(tokio::sync::Semaphore::new(SWEEP_CONCURRENCY));
+
     let tasks: Vec<_> = repos
         .into_iter()
         .map(|repo| {
             let write_queues = write_queues.clone();
+            let slots = slots.clone();
+            let query = query.clone();
             tauri::async_runtime::spawn(async move {
+                // The slot before the read guard, not after. Holding the guard
+                // while queued would make a stage or commit on this repo wait
+                // for the sweep to *reach* it, not just for its one status read
+                // — at 125 repos, most of a full pass.
+                let Ok(_slot) = slots.acquire().await else {
+                    return (repo.id, None);
+                };
                 let result = match write_queues.try_read(&repo.id) {
-                    Some(_read_guard) => Some(status::query(&repo.path).await),
+                    Some(_read_guard) => Some(query(repo.path).await),
                     None => None,
                 };
                 (repo.id, result)
@@ -666,6 +724,57 @@ mod tests {
             SWEEP_PATIENCE >= Duration::from_secs(2),
             "a full pass over 69 repos costs ~1.2 s; splitting that one is noise, not news",
         );
+    }
+
+    /// The cap actually holds: twenty repos held open, and exactly
+    /// `SWEEP_CONCURRENCY` reads in flight — not fewer (a sweep that serialised
+    /// by accident) and not all twenty (the old dispatch-everything shape).
+    #[test]
+    fn a_sweep_never_has_more_than_its_cap_in_flight() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let active = Arc::new(AtomicU32::new(0));
+        let peak = Arc::new(AtomicU32::new(0));
+        let open = Arc::new(tokio::sync::Semaphore::new(0));
+
+        let query = {
+            let (active, peak, open) = (active.clone(), peak.clone(), open.clone());
+            move |_path: PathBuf| {
+                let (active, peak, open) = (active.clone(), peak.clone(), open.clone());
+                async move {
+                    let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(now, Ordering::SeqCst);
+                    // One permit releases everyone: each reader hands it on.
+                    drop(open.acquire().await.expect("gate closed"));
+                    active.fetch_sub(1, Ordering::SeqCst);
+                    Ok(RepoStatus::default())
+                }
+            }
+        };
+
+        let repos: Vec<_> = (0..20).map(|n| repo(&format!("r{n}"))).collect();
+        let run = tauri::async_runtime::spawn(collect_with(
+            Arc::new(WriteQueues::default()),
+            repos,
+            Duration::from_secs(60),
+            query,
+        ));
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while active.load(Ordering::SeqCst) < SWEEP_CONCURRENCY as u32 {
+            assert!(Instant::now() < deadline, "only {} reads ever started", active.load(Ordering::SeqCst));
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // Long enough for one more to have started if one could.
+        std::thread::sleep(Duration::from_millis(200));
+        assert_eq!(active.load(Ordering::SeqCst), SWEEP_CONCURRENCY as u32, "more than the cap started");
+
+        open.add_permits(1);
+        let (statuses, errors, stragglers) = tauri::async_runtime::block_on(run).unwrap();
+
+        assert_eq!(peak.load(Ordering::SeqCst), SWEEP_CONCURRENCY as u32);
+        assert_eq!(statuses.len(), 20);
+        assert!(errors.is_empty() && stragglers.is_empty());
     }
 
     use std::collections::HashSet;

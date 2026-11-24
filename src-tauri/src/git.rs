@@ -25,8 +25,9 @@ const REAL_BINARY_DIRS: [&str; 3] = ["mingw64", "mingw32", "clangarm64"];
 /// spawns one `git.exe` per repo at once and Defender melts the machine. A
 /// process-wide static because the cap has to cover every git spawn in the
 /// process at once — which is the whole cap only because §9.2 guarantees there
-/// is exactly one process.
-const MAX_INFLIGHT: usize = 8;
+/// is exactly one process. `pub(crate)` so the sweep can size its own cap as
+/// headroom *under* this one (§7.4) rather than as a second magic number.
+pub(crate) const MAX_INFLIGHT: usize = 8;
 
 /// Built-in FSMonitor, which is what makes `git status` fast on Windows (§6).
 const FSMONITOR_MIN_VERSION: (u32, u32) = (2, 37);
